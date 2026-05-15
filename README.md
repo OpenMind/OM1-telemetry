@@ -2,7 +2,7 @@
 
 A Go application that synchronously records multi-modal sensor data:
 - **Video** from RTSP streams (via ffmpeg)
-- **Audio** from RTSP streams (via ffmpeg)  
+- **Audio** from RTSP streams (via ffmpeg)
 - **Lidar** point clouds from Zenoh topics
 
 All streams are timestamped and organized into session directories for easy alignment and analysis.

@@ -2,11 +2,18 @@ FROM golang:1.25-alpine AS builder
 
 RUN apk add --no-cache git gcc musl-dev curl unzip
 
+ARG TARGETARCH
 ARG ZENOH_C_VERSION=1.9.0
-RUN curl -sSL -o /tmp/zc.zip \
-        https://github.com/eclipse-zenoh/zenoh-c/releases/download/${ZENOH_C_VERSION}/zenoh-c-${ZENOH_C_VERSION}-x86_64-unknown-linux-musl-standalone.zip \
- && unzip -q /tmp/zc.zip -d /opt/zenoh-c \
- && rm /tmp/zc.zip
+
+RUN case ${TARGETARCH} in \
+        "amd64") ZENOH_ARCH=x86_64 ;; \
+        "arm64") ZENOH_ARCH=aarch64 ;; \
+        *) echo "Unsupported architecture: ${TARGETARCH}" && exit 1 ;; \
+    esac && \
+    curl -sSL -o /tmp/zc.zip \
+        https://github.com/eclipse-zenoh/zenoh-c/releases/download/${ZENOH_C_VERSION}/zenoh-c-${ZENOH_C_VERSION}-${ZENOH_ARCH}-unknown-linux-musl-standalone.zip && \
+    unzip -q /tmp/zc.zip -d /opt/zenoh-c && \
+    rm /tmp/zc.zip
 
 WORKDIR /app
 
