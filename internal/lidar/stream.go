@@ -13,6 +13,7 @@ import (
 )
 
 type Config struct {
+	ZenohEndpoint  string
 	ZenohTopic     string
 	TimestampsFile string
 	DataFile       string
@@ -68,6 +69,10 @@ func (l *LidarStream) record(ctx context.Context) error {
 	config := zenoh.NewConfigDefault()
 	if err := config.InsertJson5(zenoh.ConfigModeKey, `"client"`); err != nil {
 		return err
+	}
+	endpoint := l.cfg.ZenohEndpoint
+	if err := config.InsertJson5(zenoh.ConfigConnectKey, `["`+endpoint+`"]`); err != nil {
+		return fmt.Errorf("set connect endpoint: %w", err)
 	}
 	session, err := zenoh.Open(config, nil)
 	if err != nil {

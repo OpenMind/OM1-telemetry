@@ -29,6 +29,7 @@ type AudioConfig struct {
 }
 
 type LidarConfig struct {
+	ZenohEndpoint  string
 	ZenohTopic     string
 	TimestampsFile string
 	DataFile       string
@@ -47,15 +48,16 @@ func Load() Config {
 		SessionDir:     sessionDir,
 		SessionStartNs: now.UnixNano(),
 		Video: VideoConfig{
-			RTSPURL:    envStr("VIDEO_RTSP_URL", "rtsp://localhost:8554/live"),
+			RTSPURL:    envStr("VIDEO_RTSP_URL", "rtsp://localhost:8554/top_camera_raw"),
 			OutputFile: filepath.Join(sessionDir, "video.mp4"),
 		},
 		Audio: AudioConfig{
 			RTSPURL:    envStr("AUDIO_RTSP_URL", "rtsp://localhost:8554/audio"),
-			OutputFile: filepath.Join(sessionDir, "audio.wav"),
+			OutputFile: filepath.Join(sessionDir, "audio.ogg"),
 		},
 		Lidar: LidarConfig{
-			ZenohTopic:     envStr("LIDAR_ZENOH_TOPIC", "/scan"),
+			ZenohEndpoint:  envStr("LIDAR_ZENOH_ENDPOINT", "tcp/127.0.0.1:7447"),
+			ZenohTopic:     envStr("LIDAR_ZENOH_TOPIC", "scan"),
 			TimestampsFile: filepath.Join(sessionDir, "lidar_timestamps.csv"),
 			DataFile:       filepath.Join(sessionDir, "lidar_scans.bin"),
 		},
@@ -78,6 +80,7 @@ func (c AudioConfig) AudioStreamConfig() audio.Config {
 
 func (c LidarConfig) LidarStreamConfig() lidar.Config {
 	return lidar.Config{
+		ZenohEndpoint:  c.ZenohEndpoint,
 		ZenohTopic:     c.ZenohTopic,
 		TimestampsFile: c.TimestampsFile,
 		DataFile:       c.DataFile,

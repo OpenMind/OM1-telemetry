@@ -33,13 +33,6 @@ export CGO_CFLAGS=-I$(ZENOH_C_ABS_DIR)/include
 export CGO_LDFLAGS=-L$(ZENOH_C_ABS_DIR)/lib -lzenohc -Wl,-rpath,$(ZENOH_C_ABS_DIR)/lib
 
 
-build:
-	@mkdir -p $(BUILD_DIR)
-	go build -o $(BUILD_DIR)/$(BIN) $(CMD)
-
-run:
-	go run $(CMD)
-
 download-zenohc:
 	@echo "Downloading zenoh-c $(ZENOH_C_VERSION) for $(ZENOH_PLATFORM)..."
 	@mkdir -p $(ZENOH_C_DIR)
@@ -58,6 +51,13 @@ download-zenohc:
 	else \
 		echo "zenoh-c already installed in $(ZENOH_C_DIR)"; \
 	fi
+
+build: download-zenohc
+	@mkdir -p $(BUILD_DIR)
+	go build -o $(BUILD_DIR)/$(BIN) $(CMD)
+
+run: download-zenohc
+	go run $(CMD)
 
 test: download-zenohc
 	$(DYLD_VAR)=$(ZENOH_C_ABS_DIR)/lib go test -p 8 -v ./...

@@ -11,7 +11,7 @@ import (
 func TestNew_returnsNonNilStream(t *testing.T) {
 	stream := New(Config{
 		RTSPURL:    "rtsp://localhost:8554/audio",
-		OutputFile: filepath.Join(t.TempDir(), "audio.wav"),
+		OutputFile: filepath.Join(t.TempDir(), "audio.ogg"),
 	})
 	require.NotNil(t, stream, "New() returned nil")
 }
@@ -21,7 +21,7 @@ func TestStartStop_cleanLifecycle(t *testing.T) {
 	// Stop() must still return cleanly.
 	stream := New(Config{
 		RTSPURL:    "rtsp://192.0.2.1:8554/unreachable", // TEST-NET — no route
-		OutputFile: filepath.Join(t.TempDir(), "audio.wav"),
+		OutputFile: filepath.Join(t.TempDir(), "audio.ogg"),
 	})
 
 	stream.Start()
@@ -46,7 +46,7 @@ func TestStartStop_cleanLifecycle(t *testing.T) {
 func TestStart_idempotent(t *testing.T) {
 	stream := New(Config{
 		RTSPURL:    "rtsp://192.0.2.1:8554/unreachable",
-		OutputFile: filepath.Join(t.TempDir(), "audio.wav"),
+		OutputFile: filepath.Join(t.TempDir(), "audio.ogg"),
 	})
 
 	stream.Start()
@@ -58,7 +58,7 @@ func TestStart_idempotent(t *testing.T) {
 func TestStop_beforeStart_isNoOp(t *testing.T) {
 	stream := New(Config{
 		RTSPURL:    "rtsp://192.0.2.1:8554/unreachable",
-		OutputFile: filepath.Join(t.TempDir(), "audio.wav"),
+		OutputFile: filepath.Join(t.TempDir(), "audio.ogg"),
 	})
 	// Stop without a preceding Start must not block or panic.
 	stream.Stop()
@@ -67,7 +67,7 @@ func TestStop_beforeStart_isNoOp(t *testing.T) {
 func TestStop_idempotent(t *testing.T) {
 	stream := New(Config{
 		RTSPURL:    "rtsp://192.0.2.1:8554/unreachable",
-		OutputFile: filepath.Join(t.TempDir(), "audio.wav"),
+		OutputFile: filepath.Join(t.TempDir(), "audio.ogg"),
 	})
 
 	stream.Start()

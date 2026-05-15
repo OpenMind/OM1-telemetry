@@ -16,8 +16,10 @@ func TestLoad_defaults(t *testing.T) {
 
 	cfg := Load()
 
-	require.Equal(t, "rtsp://localhost:8554/live", cfg.Video.RTSPURL, "unexpected video RTSP URL")
+	require.Equal(t, "rtsp://localhost:8554/top_camera", cfg.Video.RTSPURL, "unexpected video RTSP URL")
 	require.Equal(t, "rtsp://localhost:8554/audio", cfg.Audio.RTSPURL, "unexpected audio RTSP URL")
+	require.Equal(t, "tcp/127.0.0.1:7447", cfg.Lidar.ZenohEndpoint, "unexpected lidar zenoh endpoint")
+	require.Equal(t, "scan", cfg.Lidar.ZenohTopic, "unexpected lidar zenoh topic")
 	require.True(t, strings.HasPrefix(cfg.SessionDir, "recordings"), "session dir should be under recordings/, got: %s", cfg.SessionDir)
 }
 
@@ -54,7 +56,7 @@ func TestLoad_outputFilesInsideSessionDir(t *testing.T) {
 	require.Equal(t, cfg.SessionDir, filepath.Dir(cfg.Video.OutputFile), "video output file not in session dir: %s", cfg.Video.OutputFile)
 	require.Equal(t, "video.mp4", filepath.Base(cfg.Video.OutputFile), "unexpected video file name")
 	require.Equal(t, cfg.SessionDir, filepath.Dir(cfg.Audio.OutputFile), "audio output file not in session dir: %s", cfg.Audio.OutputFile)
-	require.Equal(t, "audio.wav", filepath.Base(cfg.Audio.OutputFile), "unexpected audio file name")
+	require.Equal(t, "audio.ogg", filepath.Base(cfg.Audio.OutputFile), "unexpected audio file name")
 }
 
 func TestLoad_eachCallProducesUniqueSessionDir(t *testing.T) {
