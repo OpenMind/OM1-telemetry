@@ -13,6 +13,7 @@ import (
 )
 
 type Config struct {
+	ZenohEndpoint  string
 	ZenohTopic     string
 	TimestampsFile string
 	DataFile       string
@@ -24,6 +25,16 @@ type LidarStream struct {
 	cancel  context.CancelFunc
 	done    chan struct{}
 	wg      sync.WaitGroup
+}
+
+type SessionResult struct {
+	session zenoh.Session
+	err     error
+}
+
+type SubscriberResult struct {
+	subscriber zenoh.Subscriber
+	err        error
 }
 
 func New(cfg Config) *LidarStream {
@@ -69,9 +80,26 @@ func (l *LidarStream) record(ctx context.Context) error {
 	if err := config.InsertJson5(zenoh.ConfigModeKey, `"client"`); err != nil {
 		return err
 	}
-	session, err := zenoh.Open(config, nil)
-	if err != nil {
-		return fmt.Errorf("open zenoh session: %w", err)
+	endpoint := l.cfg.ZenohEndpoint
+	if err := config.InsertJson5(zenoh.ConfigConnectKey, `["`+endpoint+`"]`); err != nil {
+		return fmt.Errorf("set connect endpoint: %w", err)
+	}
+
+	sessionChan := make(chan SessionResult, 1)
+	go func() {
+		session, err := zenoh.Open(config, nil)
+		sessionChan <- SessionResult{session, err}
+	}()
+
+	var session zenoh.Session
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case result := <-sessionChan:
+		if result.err != nil {
+			return fmt.Errorf("open zenoh session: %w", result.err)
+		}
+		session = result.session
 	}
 	defer session.Drop()
 
@@ -105,9 +133,22 @@ func (l *LidarStream) record(ctx context.Context) error {
 	}
 
 	handler := zenoh.NewFifoChannel[zenoh.Sample](1024)
-	subscriber, err := session.DeclareSubscriber(keyExpr, handler, nil)
-	if err != nil {
-		return fmt.Errorf("declare subscriber: %w", err)
+
+	subscriberChan := make(chan SubscriberResult, 1)
+	go func() {
+		subscriber, err := session.DeclareSubscriber(keyExpr, handler, nil)
+		subscriberChan <- SubscriberResult{subscriber, err}
+	}()
+
+	var subscriber zenoh.Subscriber
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case result := <-subscriberChan:
+		if result.err != nil {
+			return fmt.Errorf("declare subscriber: %w", result.err)
+		}
+		subscriber = result.subscriber
 	}
 	defer subscriber.Drop()
 

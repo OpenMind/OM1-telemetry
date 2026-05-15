@@ -3,3 +3,5 @@ bin/
 .zenoh-c/
 
 .DS_Store
+
+recordings/

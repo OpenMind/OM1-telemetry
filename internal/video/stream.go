@@ -59,17 +59,20 @@ func (v *VideoRTSPStream) loop(ctx context.Context) {
 }
 
 func (v *VideoRTSPStream) record(ctx context.Context) error {
-	cmd := exec.CommandContext(ctx, "ffmpeg",
-		"-loglevel", "error",
-		"-rtsp_transport", "tcp",
-		"-i", v.cfg.RTSPURL,
-		"-c", "copy",
-		"-y",
-		v.cfg.OutputFile,
-	)
-	cmd.Stderr = os.Stderr
-	if err := cmd.Start(); err != nil {
-		return fmt.Errorf("start video recorder: %w", err)
-	}
-	return cmd.Wait()
+    cmd := exec.CommandContext(ctx, "ffmpeg",
+        "-loglevel", "error",
+        "-rtsp_transport", "tcp",
+        "-i", v.cfg.RTSPURL,
+        "-c", "copy",
+        "-movflags", "+frag_keyframe+empty_moov+default_base_moof",
+        "-y",
+        v.cfg.OutputFile,
+    )
+    cmd.Cancel = func() error { return cmd.Process.Signal(os.Interrupt) }
+    cmd.WaitDelay = 5 * time.Second
+    cmd.Stderr = os.Stderr
+    if err := cmd.Start(); err != nil {
+        return fmt.Errorf("start video recorder: %w", err)
+    }
+    return cmd.Wait()
 }
