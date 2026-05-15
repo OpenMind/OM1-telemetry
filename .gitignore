@@ -1,1 +1,5 @@
-bin
+bin/
+
+.zenoh-c/
+
+.DS_Store
