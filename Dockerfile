@@ -28,7 +28,6 @@ RUN apk --no-cache add ca-certificates libgcc
 WORKDIR /root/
 
 COPY --from=builder /app/main .
-COPY --from=builder /app/internal/data/OG.csv ./internal/data/
 COPY --from=builder /opt/zenoh-c/lib/libzenohc.so /usr/lib/
 
 CMD ["./main"]
