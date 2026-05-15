@@ -4,6 +4,8 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/require"
 )
 
 func TestNew_returnsNonNilStream(t *testing.T) {
@@ -11,9 +13,7 @@ func TestNew_returnsNonNilStream(t *testing.T) {
 		RTSPURL:    "rtsp://localhost:8554/audio",
 		OutputFile: filepath.Join(t.TempDir(), "audio.wav"),
 	})
-	if stream == nil {
-		t.Fatal("New() returned nil")
-	}
+	require.NotNil(t, stream, "New() returned nil")
 }
 
 func TestStartStop_cleanLifecycle(t *testing.T) {
@@ -39,7 +39,7 @@ func TestStartStop_cleanLifecycle(t *testing.T) {
 	case <-done:
 		// expected
 	case <-time.After(5 * time.Second):
-		t.Fatal("Stop() did not return within 5 s")
+		require.Fail(t, "Stop() did not return within 5 s")
 	}
 }
 

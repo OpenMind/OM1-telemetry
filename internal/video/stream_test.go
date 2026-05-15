@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/require"
 )
 
 func TestNew_returnsNonNilStream(t *testing.T) {
@@ -12,9 +14,7 @@ func TestNew_returnsNonNilStream(t *testing.T) {
 		RTSPURL:    "rtsp://localhost:8554/live",
 		OutputFile: filepath.Join(t.TempDir(), "video.mp4"),
 	})
-	if stream == nil {
-		t.Fatal("New() returned nil")
-	}
+	require.NotNil(t, stream, "New() returned nil")
 }
 
 func TestStartStop_cleanLifecycle(t *testing.T) {
@@ -37,7 +37,7 @@ func TestStartStop_cleanLifecycle(t *testing.T) {
 	select {
 	case <-done:
 	case <-time.After(5 * time.Second):
-		t.Fatal("Stop() did not return within 5 s")
+		require.Fail(t, "Stop() did not return within 5 s")
 	}
 }
 
@@ -76,9 +76,8 @@ func TestRecord_createsOutputFileDirectory(t *testing.T) {
 	outputDir := filepath.Join(t.TempDir(), "nested", "session")
 	outputFile := filepath.Join(outputDir, "video.mp4")
 
-	if err := os.MkdirAll(outputDir, 0o755); err != nil {
-		t.Fatalf("could not create output dir: %v", err)
-	}
+	err := os.MkdirAll(outputDir, 0o755)
+	require.NoError(t, err, "could not create output dir")
 
 	stream := New(Config{
 		RTSPURL:    "rtsp://192.0.2.1:8554/unreachable",
@@ -89,7 +88,6 @@ func TestRecord_createsOutputFileDirectory(t *testing.T) {
 	time.Sleep(50 * time.Millisecond)
 	stream.Stop()
 
-	if _, err := os.Stat(outputDir); os.IsNotExist(err) {
-		t.Error("output directory was unexpectedly removed")
-	}
+	_, err = os.Stat(outputDir)
+	require.False(t, os.IsNotExist(err), "output directory was unexpectedly removed")
 }
