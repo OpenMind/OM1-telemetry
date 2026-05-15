@@ -18,7 +18,7 @@ func main() {
 	cfg := config.Load()
 
 	if !cfg.Collect {
-		slog.Info("data collection disabled via COLLECT=false, exiting")
+		slog.Info("data collection disabled via ENABLE_COLLECTION=false, exiting")
 		return
 	}
 

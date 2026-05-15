@@ -46,7 +46,7 @@ func Load() Config {
 	)
 
 	return Config{
-		Collect:        envBool("COLLECT", true),
+		Collect:        envBool("ENABLE_COLLECTION", true),
 		SessionDir:     sessionDir,
 		SessionStartNs: now.UnixNano(),
 		Video: VideoConfig{

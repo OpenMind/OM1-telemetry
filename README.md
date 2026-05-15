@@ -17,9 +17,11 @@ All streams are timestamped and organized into session directories for easy alig
 
 Configure via environment variables:
 
-- `VIDEO_RTSP_URL` - Video stream URL (default: `rtsp://localhost:8554/live`)
+- `ENABLE_COLLECTION` - Enable/disable data collection (default: `true`; set to `false`, `0`, or `no` to disable)
+- `VIDEO_RTSP_URL` - Video stream URL (default: `rtsp://localhost:8554/top_camera_raw`)
 - `AUDIO_RTSP_URL` - Audio stream URL (default: `rtsp://localhost:8554/audio`)
-- `LIDAR_ZENOH_TOPIC` - Zenoh topic for lidar data (default: `/scan`)
+- `LIDAR_ZENOH_ENDPOINT` - Zenoh endpoint for lidar (default: `tcp/127.0.0.1:7447`)
+- `LIDAR_ZENOH_TOPIC` - Zenoh topic for lidar data (default: `scan`)
 - `RECORDINGS_DIR` - Base directory for recordings (default: `recordings`)
 
 ## Building
@@ -42,9 +44,11 @@ The binary will be created at `bin/om1-telemetry`.
 Or with custom settings:
 
 ```bash
+ENABLE_COLLECTION=true \
 VIDEO_RTSP_URL="rtsp://camera.local/stream" \
 AUDIO_RTSP_URL="rtsp://camera.local/audio" \
-LIDAR_ZENOH_TOPIC="/lidar/scan" \
+LIDAR_ZENOH_ENDPOINT="tcp/192.168.1.10:7447" \
+LIDAR_ZENOH_TOPIC="scan" \
 RECORDINGS_DIR="/path/to/recordings" \
 ./bin/om1-telemetry
 ```
@@ -59,7 +63,7 @@ recordings/
     └── 2026-05-15_14-30-00/
         ├── meta.json                  # Session metadata
         ├── video.mp4                  # Video recording
-        ├── audio.wav                  # Audio recording
+        ├── audio.ogg                  # Audio recording
         ├── lidar_scans.bin           # Raw lidar point cloud data
         └── lidar_timestamps.csv       # Timestamps: unix_ns,seq,byte_offset
 ```
@@ -76,8 +80,6 @@ Run tests for a specific package:
 
 ```bash
 make test
-# Or with the Go test command directly:
-go test ./internal/lidar/... -v
 ```
 
 ## Development
