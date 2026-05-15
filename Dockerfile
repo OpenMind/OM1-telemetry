@@ -30,7 +30,7 @@ RUN CGO_ENABLED=1 GOOS=linux \
 
 FROM alpine:latest
 
-RUN apk --no-cache add ca-certificates libgcc
+RUN apk --no-cache add ca-certificates libgcc ffmpeg
 
 WORKDIR /root/
 
