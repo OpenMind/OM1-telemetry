@@ -27,6 +27,11 @@ type LidarStream struct {
 	wg      sync.WaitGroup
 }
 
+type SessionResult struct {
+	session zenoh.Session
+	err     error
+}
+
 func New(cfg Config) *LidarStream {
 	return &LidarStream{cfg: cfg}
 }
@@ -74,9 +79,22 @@ func (l *LidarStream) record(ctx context.Context) error {
 	if err := config.InsertJson5(zenoh.ConfigConnectKey, `["`+endpoint+`"]`); err != nil {
 		return fmt.Errorf("set connect endpoint: %w", err)
 	}
-	session, err := zenoh.Open(config, nil)
-	if err != nil {
-		return fmt.Errorf("open zenoh session: %w", err)
+
+	sessionChan := make(chan SessionResult, 1)
+	go func() {
+		session, err := zenoh.Open(config, nil)
+		sessionChan <- SessionResult{session, err}
+	}()
+
+	var session zenoh.Session
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case result := <-sessionChan:
+		if result.err != nil {
+			return fmt.Errorf("open zenoh session: %w", result.err)
+		}
+		session = result.session
 	}
 	defer session.Drop()
 
@@ -110,9 +128,27 @@ func (l *LidarStream) record(ctx context.Context) error {
 	}
 
 	handler := zenoh.NewFifoChannel[zenoh.Sample](1024)
-	subscriber, err := session.DeclareSubscriber(keyExpr, handler, nil)
-	if err != nil {
-		return fmt.Errorf("declare subscriber: %w", err)
+
+	// Declare subscriber with context awareness
+	type subscriberResult struct {
+		subscriber zenoh.Subscriber
+		err        error
+	}
+	subscriberChan := make(chan subscriberResult, 1)
+	go func() {
+		subscriber, err := session.DeclareSubscriber(keyExpr, handler, nil)
+		subscriberChan <- subscriberResult{subscriber, err}
+	}()
+
+	var subscriber zenoh.Subscriber
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case result := <-subscriberChan:
+		if result.err != nil {
+			return fmt.Errorf("declare subscriber: %w", result.err)
+		}
+		subscriber = result.subscriber
 	}
 	defer subscriber.Drop()
 

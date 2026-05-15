@@ -16,7 +16,7 @@ func TestLoad_defaults(t *testing.T) {
 
 	cfg := Load()
 
-	require.Equal(t, "rtsp://localhost:8554/top_camera", cfg.Video.RTSPURL, "unexpected video RTSP URL")
+	require.Equal(t, "rtsp://localhost:8554/top_camera_raw", cfg.Video.RTSPURL, "unexpected video RTSP URL")
 	require.Equal(t, "rtsp://localhost:8554/audio", cfg.Audio.RTSPURL, "unexpected audio RTSP URL")
 	require.Equal(t, "tcp/127.0.0.1:7447", cfg.Lidar.ZenohEndpoint, "unexpected lidar zenoh endpoint")
 	require.Equal(t, "scan", cfg.Lidar.ZenohTopic, "unexpected lidar zenoh topic")
