@@ -1,6 +1,6 @@
 .PHONY: build run download-zenohc test tidy
 
-BIN       := rom1-telemetry
+BIN       := om1-telemetry
 CMD       := ./cmd/main
 BUILD_DIR := bin
 
