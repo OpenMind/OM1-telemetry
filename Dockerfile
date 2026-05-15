@@ -19,7 +19,7 @@ COPY . .
 RUN CGO_ENABLED=1 GOOS=linux \
     CGO_CFLAGS="-I/opt/zenoh-c/include" \
     CGO_LDFLAGS="-L/opt/zenoh-c/lib -lzenohc" \
-    go build -a -o main cmd/main.go
+    go build -a -o main ./cmd/main
 
 FROM alpine:latest
 
