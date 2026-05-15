@@ -79,13 +79,21 @@ func (l *LidarStream) record(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("create timestamps file: %w", err)
 	}
-	defer tsFile.Close()
+	defer func() {
+		if err := tsFile.Close(); err != nil {
+			slog.Error("failed to close timestamps file", "err", err)
+		}
+	}()
 
 	dataFile, err := os.Create(l.cfg.DataFile)
 	if err != nil {
 		return fmt.Errorf("create data file: %w", err)
 	}
-	defer dataFile.Close()
+	defer func() {
+		if err := dataFile.Close(); err != nil {
+			slog.Error("failed to close data file", "err", err)
+		}
+	}()
 
 	if _, err := fmt.Fprintln(tsFile, "unix_ns,seq,byte_offset"); err != nil {
 		return fmt.Errorf("write header: %w", err)
