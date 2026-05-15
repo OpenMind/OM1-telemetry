@@ -17,12 +17,16 @@ import (
 func main() {
 	cfg := config.Load()
 
+	if !cfg.Collect {
+		slog.Info("data collection disabled via COLLECT=false, exiting")
+		return
+	}
+
 	if err := os.MkdirAll(cfg.SessionDir, 0o755); err != nil {
 		slog.Error("cannot create session directory", "dir", cfg.SessionDir, "err", err)
 		os.Exit(1)
 	}
 
-	// Write session metadata for timestamp synchronization
 	metaPath := filepath.Join(cfg.SessionDir, "meta.json")
 	metaData := map[string]interface{}{
 		"session_start_unix_ns": cfg.SessionStartNs,

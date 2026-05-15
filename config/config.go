@@ -11,6 +11,7 @@ import (
 )
 
 type Config struct {
+	Collect        bool
 	SessionDir     string
 	SessionStartNs int64
 	Video          VideoConfig
@@ -45,6 +46,7 @@ func Load() Config {
 	)
 
 	return Config{
+		Collect:        envBool("COLLECT", true),
 		SessionDir:     sessionDir,
 		SessionStartNs: now.UnixNano(),
 		Video: VideoConfig{
@@ -90,6 +92,16 @@ func (c LidarConfig) LidarStreamConfig() lidar.Config {
 func envStr(key, defaultValue string) string {
 	if value := os.Getenv(key); value != "" {
 		return value
+	}
+	return defaultValue
+}
+
+func envBool(key string, defaultValue bool) bool {
+	switch os.Getenv(key) {
+	case "false", "0", "no":
+		return false
+	case "true", "1", "yes":
+		return true
 	}
 	return defaultValue
 }
