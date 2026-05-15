@@ -32,6 +32,11 @@ type SessionResult struct {
 	err     error
 }
 
+type SubscriberResult struct {
+	subscriber zenoh.Subscriber
+	err        error
+}
+
 func New(cfg Config) *LidarStream {
 	return &LidarStream{cfg: cfg}
 }
@@ -129,15 +134,10 @@ func (l *LidarStream) record(ctx context.Context) error {
 
 	handler := zenoh.NewFifoChannel[zenoh.Sample](1024)
 
-	// Declare subscriber with context awareness
-	type subscriberResult struct {
-		subscriber zenoh.Subscriber
-		err        error
-	}
-	subscriberChan := make(chan subscriberResult, 1)
+	subscriberChan := make(chan SubscriberResult, 1)
 	go func() {
 		subscriber, err := session.DeclareSubscriber(keyExpr, handler, nil)
-		subscriberChan <- subscriberResult{subscriber, err}
+		subscriberChan <- SubscriberResult{subscriber, err}
 	}()
 
 	var subscriber zenoh.Subscriber
