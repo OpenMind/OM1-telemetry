@@ -10,6 +10,7 @@ import (
 
 	"om1-telemetry/config"
 	"om1-telemetry/internal/audio"
+	"om1-telemetry/internal/depth"
 	"om1-telemetry/internal/lidar"
 	"om1-telemetry/internal/video"
 )
@@ -42,19 +43,32 @@ func main() {
 		os.Exit(1)
 	}
 
-	videoStream := video.New(cfg.Video.VideoStreamConfig())
+	videoStreams := make([]*video.VideoRTSPStream, 0, len(cfg.Video))
+	for _, vc := range cfg.Video {
+		videoStreams = append(videoStreams, video.New(vc.VideoStreamConfig()))
+	}
 	audioStream := audio.New(cfg.Audio.AudioStreamConfig())
 	lidarStream := lidar.New(cfg.Lidar.LidarStreamConfig())
+	depthStream := depth.New(cfg.Depth.DepthStreamConfig())
 
-	videoStream.Start()
+	for _, vs := range videoStreams {
+		vs.Start()
+	}
 	audioStream.Start()
 	lidarStream.Start()
+	depthStream.Start()
+
+	videoURLs := make([]string, 0, len(cfg.Video))
+	for _, vc := range cfg.Video {
+		videoURLs = append(videoURLs, vc.Name+"="+vc.RTSPURL)
+	}
 
 	slog.Info("recording started",
 		"session", cfg.SessionDir,
-		"video-url", cfg.Video.RTSPURL,
+		"video-cameras", videoURLs,
 		"audio-url", cfg.Audio.RTSPURL,
 		"lidar-topic", cfg.Lidar.ZenohTopic,
+		"depth-topic", cfg.Depth.ZenohTopic,
 	)
 	slog.Info("press Ctrl-C to stop")
 
@@ -63,7 +77,10 @@ func main() {
 	<-shutdownSignal
 
 	slog.Info("shutting down…")
-	videoStream.Stop()
+	for _, vs := range videoStreams {
+		vs.Stop()
+	}
 	audioStream.Stop()
 	lidarStream.Stop()
+	depthStream.Stop()
 }
