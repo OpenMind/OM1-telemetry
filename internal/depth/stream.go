@@ -10,6 +10,8 @@ import (
 	"time"
 
 	"github.com/eclipse-zenoh/zenoh-go/zenoh"
+
+	"om1-telemetry/internal/zenohutil"
 )
 
 type Config struct {
@@ -171,7 +173,7 @@ func (d *DepthStream) record(ctx context.Context) error {
 			tsOpt := sample.TimeStamp()
 			if tsOpt.IsSome() {
 				ts := tsOpt.Unwrap()
-				unixNs = zenohTimestampToUnixNs(ts)
+				unixNs = zenohutil.TimestampToUnixNs(ts)
 			} else {
 				unixNs = time.Now().UnixNano()
 			}
@@ -190,21 +192,4 @@ func (d *DepthStream) record(ctx context.Context) error {
 			seq++
 		}
 	}
-}
-
-func zenohTimestampToUnixNs(ts zenoh.TimeStamp) int64 {
-	return ntpTimeToUnixNs(ts.Time())
-}
-
-func ntpTimeToUnixNs(ntpTime uint64) int64 {
-	const ntpToUnixOffset = 2208988800
-
-	seconds := int64(ntpTime >> 32)
-	fraction := uint32(ntpTime & 0xFFFFFFFF)
-
-	unixSeconds := seconds - ntpToUnixOffset
-
-	nanos := (int64(fraction) * 1e9) >> 32
-
-	return unixSeconds*1e9 + nanos
 }

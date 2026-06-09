@@ -9,6 +9,7 @@ import (
 	"om1-telemetry/internal/audio"
 	"om1-telemetry/internal/depth"
 	"om1-telemetry/internal/lidar"
+	"om1-telemetry/internal/odom"
 	"om1-telemetry/internal/video"
 )
 
@@ -20,6 +21,7 @@ type Config struct {
 	Audio          AudioConfig
 	Lidar          LidarConfig
 	Depth          DepthConfig
+	Odom           OdomConfig
 }
 
 type VideoConfig struct {
@@ -41,6 +43,13 @@ type LidarConfig struct {
 }
 
 type DepthConfig struct {
+	ZenohEndpoint  string
+	ZenohTopic     string
+	TimestampsFile string
+	DataFile       string
+}
+
+type OdomConfig struct {
 	ZenohEndpoint  string
 	ZenohTopic     string
 	TimestampsFile string
@@ -76,6 +85,12 @@ func Load() Config {
 			ZenohTopic:     envStr("DEPTH_ZENOH_TOPIC", "camera/realsense2_camera_node/depth/image_rect_raw"),
 			TimestampsFile: filepath.Join(sessionDir, "depth_timestamps.csv"),
 			DataFile:       filepath.Join(sessionDir, "depth_frames.bin"),
+		},
+		Odom: OdomConfig{
+			ZenohEndpoint:  envStr("ODOM_ZENOH_ENDPOINT", "tcp/127.0.0.1:7447"),
+			ZenohTopic:     envStr("ODOM_ZENOH_TOPIC", "odom"),
+			TimestampsFile: filepath.Join(sessionDir, "odom_timestamps.csv"),
+			DataFile:       filepath.Join(sessionDir, "odom_frames.bin"),
 		},
 	}
 }
@@ -127,6 +142,15 @@ func (c LidarConfig) LidarStreamConfig() lidar.Config {
 
 func (c DepthConfig) DepthStreamConfig() depth.Config {
 	return depth.Config{
+		ZenohEndpoint:  c.ZenohEndpoint,
+		ZenohTopic:     c.ZenohTopic,
+		TimestampsFile: c.TimestampsFile,
+		DataFile:       c.DataFile,
+	}
+}
+
+func (c OdomConfig) OdomStreamConfig() odom.Config {
+	return odom.Config{
 		ZenohEndpoint:  c.ZenohEndpoint,
 		ZenohTopic:     c.ZenohTopic,
 		TimestampsFile: c.TimestampsFile,

@@ -5,6 +5,7 @@ A Go application that synchronously records multi-modal sensor data:
 - **Audio** from RTSP streams (via ffmpeg)
 - **Lidar** point clouds from Zenoh topics
 - **Depth** frames from Zenoh topics (raw, lossless)
+- **Odometry** messages from Zenoh topics
 
 All streams are timestamped and organized into session directories for easy alignment and analysis.
 
@@ -27,6 +28,8 @@ Configure via environment variables:
 - `LIDAR_ZENOH_TOPIC` - Zenoh topic for lidar data (default: `scan`)
 - `DEPTH_ZENOH_ENDPOINT` - Zenoh endpoint for depth (default: `tcp/127.0.0.1:7447`)
 - `DEPTH_ZENOH_TOPIC` - Zenoh topic for depth frames (default: `camera/realsense2_camera_node/depth/image_rect_raw`)
+- `ODOM_ZENOH_ENDPOINT` - Zenoh endpoint for odometry (default: `tcp/127.0.0.1:7447`)
+- `ODOM_ZENOH_TOPIC` - Zenoh topic for odometry data (default: `odom`)
 - `RECORDINGS_DIR` - Base directory for recordings (default: `recordings`)
 
 ## Building
@@ -58,6 +61,8 @@ LIDAR_ZENOH_ENDPOINT="tcp/192.168.1.10:7447" \
 LIDAR_ZENOH_TOPIC="scan" \
 DEPTH_ZENOH_ENDPOINT="tcp/192.168.1.10:7447" \
 DEPTH_ZENOH_TOPIC="camera/realsense2_camera_node/depth/image_rect_raw" \
+ODOM_ZENOH_ENDPOINT="tcp/192.168.1.10:7447" \
+ODOM_ZENOH_TOPIC="odom" \
 RECORDINGS_DIR="/path/to/recordings" \
 ./bin/om1-telemetry
 ```
@@ -78,7 +83,9 @@ recordings/
         ├── lidar_scans.bin            # Raw lidar point cloud data
         ├── lidar_timestamps.csv       # Timestamps: unix_ns,seq,byte_offset
         ├── depth_frames.bin           # Raw depth frames (serialized ROS Image, 16UC1)
-        └── depth_timestamps.csv       # Timestamps: unix_ns,seq,byte_offset,byte_length
+        ├── depth_timestamps.csv       # Timestamps: unix_ns,seq,byte_offset,byte_length
+        ├── odom_frames.bin            # Raw odometry messages
+        └── odom_timestamps.csv        # Timestamps: unix_ns,seq,byte_offset
 ```
 
 Each row in `depth_timestamps.csv` slices one frame out of `depth_frames.bin`

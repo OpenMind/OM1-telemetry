@@ -1,4 +1,4 @@
-package lidar
+package odom
 
 import (
 	"context"
@@ -21,7 +21,7 @@ type Config struct {
 	DataFile       string
 }
 
-type LidarStream struct {
+type OdomStream struct {
 	cfg     Config
 	running atomic.Bool
 	cancel  context.CancelFunc
@@ -39,36 +39,36 @@ type SubscriberResult struct {
 	err        error
 }
 
-func New(cfg Config) *LidarStream {
-	return &LidarStream{cfg: cfg}
+func New(cfg Config) *OdomStream {
+	return &OdomStream{cfg: cfg}
 }
 
-func (l *LidarStream) Start() {
-	if l.running.Swap(true) {
+func (o *OdomStream) Start() {
+	if o.running.Swap(true) {
 		return
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	l.cancel = cancel
-	l.done = make(chan struct{})
-	l.wg.Add(1)
-	go l.loop(ctx)
+	o.cancel = cancel
+	o.done = make(chan struct{})
+	o.wg.Add(1)
+	go o.loop(ctx)
 }
 
-func (l *LidarStream) Stop() {
-	if !l.running.Swap(false) {
+func (o *OdomStream) Stop() {
+	if !o.running.Swap(false) {
 		return
 	}
-	l.cancel()
-	l.wg.Wait()
-	close(l.done)
-	slog.Info("lidar stream stopped")
+	o.cancel()
+	o.wg.Wait()
+	close(o.done)
+	slog.Info("odom stream stopped")
 }
 
-func (l *LidarStream) loop(ctx context.Context) {
-	defer l.wg.Done()
+func (o *OdomStream) loop(ctx context.Context) {
+	defer o.wg.Done()
 	for ctx.Err() == nil {
-		if err := l.record(ctx); err != nil && ctx.Err() == nil {
-			slog.Error("lidar recorder error; reconnecting in 2 s", "err", err)
+		if err := o.record(ctx); err != nil && ctx.Err() == nil {
+			slog.Error("odom recorder error; reconnecting in 2 s", "err", err)
 			select {
 			case <-ctx.Done():
 			case <-time.After(2 * time.Second):
@@ -77,12 +77,12 @@ func (l *LidarStream) loop(ctx context.Context) {
 	}
 }
 
-func (l *LidarStream) record(ctx context.Context) error {
+func (o *OdomStream) record(ctx context.Context) error {
 	config := zenoh.NewConfigDefault()
 	if err := config.InsertJson5(zenoh.ConfigModeKey, `"client"`); err != nil {
 		return err
 	}
-	endpoint := l.cfg.ZenohEndpoint
+	endpoint := o.cfg.ZenohEndpoint
 	if err := config.InsertJson5(zenoh.ConfigConnectKey, `["`+endpoint+`"]`); err != nil {
 		return fmt.Errorf("set connect endpoint: %w", err)
 	}
@@ -105,7 +105,7 @@ func (l *LidarStream) record(ctx context.Context) error {
 	}
 	defer session.Drop()
 
-	tsFile, err := os.Create(l.cfg.TimestampsFile)
+	tsFile, err := os.Create(o.cfg.TimestampsFile)
 	if err != nil {
 		return fmt.Errorf("create timestamps file: %w", err)
 	}
@@ -115,7 +115,7 @@ func (l *LidarStream) record(ctx context.Context) error {
 		}
 	}()
 
-	dataFile, err := os.Create(l.cfg.DataFile)
+	dataFile, err := os.Create(o.cfg.DataFile)
 	if err != nil {
 		return fmt.Errorf("create data file: %w", err)
 	}
@@ -129,7 +129,7 @@ func (l *LidarStream) record(ctx context.Context) error {
 		return fmt.Errorf("write header: %w", err)
 	}
 
-	keyExpr, err := zenoh.NewKeyExpr(l.cfg.ZenohTopic)
+	keyExpr, err := zenoh.NewKeyExpr(o.cfg.ZenohTopic)
 	if err != nil {
 		return fmt.Errorf("create key expression: %w", err)
 	}
@@ -154,7 +154,7 @@ func (l *LidarStream) record(ctx context.Context) error {
 	}
 	defer subscriber.Drop()
 
-	slog.Info("lidar recorder started", "topic", l.cfg.ZenohTopic)
+	slog.Info("odom recorder started", "topic", o.cfg.ZenohTopic)
 
 	var seq int64
 	var byteOffset int64
