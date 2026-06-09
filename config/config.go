@@ -3,9 +3,11 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"om1-telemetry/internal/audio"
+	"om1-telemetry/internal/depth"
 	"om1-telemetry/internal/lidar"
 	"om1-telemetry/internal/video"
 )
@@ -14,12 +16,14 @@ type Config struct {
 	Collect        bool
 	SessionDir     string
 	SessionStartNs int64
-	Video          VideoConfig
+	Video          []VideoConfig
 	Audio          AudioConfig
 	Lidar          LidarConfig
+	Depth          DepthConfig
 }
 
 type VideoConfig struct {
+	Name       string
 	RTSPURL    string
 	OutputFile string
 }
@@ -30,6 +34,13 @@ type AudioConfig struct {
 }
 
 type LidarConfig struct {
+	ZenohEndpoint  string
+	ZenohTopic     string
+	TimestampsFile string
+	DataFile       string
+}
+
+type DepthConfig struct {
 	ZenohEndpoint  string
 	ZenohTopic     string
 	TimestampsFile string
@@ -49,10 +60,7 @@ func Load() Config {
 		Collect:        envBool("ENABLE_COLLECTION", true),
 		SessionDir:     sessionDir,
 		SessionStartNs: now.UnixNano(),
-		Video: VideoConfig{
-			RTSPURL:    envStr("VIDEO_RTSP_URL", "rtsp://localhost:8554/top_camera_raw"),
-			OutputFile: filepath.Join(sessionDir, "video.mp4"),
-		},
+		Video:          videoConfigs(sessionDir),
 		Audio: AudioConfig{
 			RTSPURL:    envStr("AUDIO_RTSP_URL", "rtsp://localhost:8554/audio"),
 			OutputFile: filepath.Join(sessionDir, "audio.ogg"),
@@ -63,7 +71,35 @@ func Load() Config {
 			TimestampsFile: filepath.Join(sessionDir, "lidar_timestamps.csv"),
 			DataFile:       filepath.Join(sessionDir, "lidar_scans.bin"),
 		},
+		Depth: DepthConfig{
+			ZenohEndpoint:  envStr("DEPTH_ZENOH_ENDPOINT", "tcp/127.0.0.1:7447"),
+			ZenohTopic:     envStr("DEPTH_ZENOH_TOPIC", "camera/realsense2_camera_node/depth/image_rect_raw"),
+			TimestampsFile: filepath.Join(sessionDir, "depth_timestamps.csv"),
+			DataFile:       filepath.Join(sessionDir, "depth_frames.bin"),
+		},
 	}
+}
+
+func videoConfigs(sessionDir string) []VideoConfig {
+	cameras := []struct {
+		name       string
+		defaultURL string
+	}{
+		{"top_camera", "rtsp://localhost:8554/top_camera_raw"},
+		{"front_camera", "rtsp://localhost:8554/front_camera"},
+		{"down_camera", "rtsp://localhost:8554/down_camera"},
+	}
+
+	configs := make([]VideoConfig, 0, len(cameras))
+	for _, cam := range cameras {
+		envKey := strings.ToUpper(cam.name) + "_RTSP_URL"
+		configs = append(configs, VideoConfig{
+			Name:       cam.name,
+			RTSPURL:    envStr(envKey, cam.defaultURL),
+			OutputFile: filepath.Join(sessionDir, cam.name+".mp4"),
+		})
+	}
+	return configs
 }
 
 func (c VideoConfig) VideoStreamConfig() video.Config {
@@ -82,6 +118,15 @@ func (c AudioConfig) AudioStreamConfig() audio.Config {
 
 func (c LidarConfig) LidarStreamConfig() lidar.Config {
 	return lidar.Config{
+		ZenohEndpoint:  c.ZenohEndpoint,
+		ZenohTopic:     c.ZenohTopic,
+		TimestampsFile: c.TimestampsFile,
+		DataFile:       c.DataFile,
+	}
+}
+
+func (c DepthConfig) DepthStreamConfig() depth.Config {
+	return depth.Config{
 		ZenohEndpoint:  c.ZenohEndpoint,
 		ZenohTopic:     c.ZenohTopic,
 		TimestampsFile: c.TimestampsFile,

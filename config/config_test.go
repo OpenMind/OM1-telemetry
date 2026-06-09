@@ -10,13 +10,17 @@ import (
 )
 
 func TestLoad_defaults(t *testing.T) {
-	for _, key := range []string{"RECORDINGS_DIR", "VIDEO_RTSP_URL", "AUDIO_RTSP_URL"} {
+	for _, key := range []string{"RECORDINGS_DIR", "TOP_CAMERA_RTSP_URL", "FRONT_CAMERA_RTSP_URL", "DOWN_CAMERA_RTSP_URL", "AUDIO_RTSP_URL"} {
 		t.Setenv(key, "")
 	}
 
 	cfg := Load()
 
-	require.Equal(t, "rtsp://localhost:8554/top_camera_raw", cfg.Video.RTSPURL, "unexpected video RTSP URL")
+	require.Len(t, cfg.Video, 3, "expected 3 cameras")
+	require.Equal(t, "top_camera", cfg.Video[0].Name, "unexpected first camera name")
+	require.Equal(t, "rtsp://localhost:8554/top_camera_raw", cfg.Video[0].RTSPURL, "unexpected top camera RTSP URL")
+	require.Equal(t, "rtsp://localhost:8554/front_camera", cfg.Video[1].RTSPURL, "unexpected front camera RTSP URL")
+	require.Equal(t, "rtsp://localhost:8554/down_camera", cfg.Video[2].RTSPURL, "unexpected down camera RTSP URL")
 	require.Equal(t, "rtsp://localhost:8554/audio", cfg.Audio.RTSPURL, "unexpected audio RTSP URL")
 	require.Equal(t, "tcp/127.0.0.1:7447", cfg.Lidar.ZenohEndpoint, "unexpected lidar zenoh endpoint")
 	require.Equal(t, "scan", cfg.Lidar.ZenohTopic, "unexpected lidar zenoh topic")
@@ -25,12 +29,12 @@ func TestLoad_defaults(t *testing.T) {
 
 func TestLoad_envOverrides(t *testing.T) {
 	t.Setenv("RECORDINGS_DIR", "/tmp/test-recordings")
-	t.Setenv("VIDEO_RTSP_URL", "rtsp://cam.local:8554/cam0")
+	t.Setenv("TOP_CAMERA_RTSP_URL", "rtsp://cam.local:8554/cam0")
 	t.Setenv("AUDIO_RTSP_URL", "rtsp://cam.local:8554/mic0")
 
 	cfg := Load()
 
-	require.Equal(t, "rtsp://cam.local:8554/cam0", cfg.Video.RTSPURL, "unexpected video RTSP URL")
+	require.Equal(t, "rtsp://cam.local:8554/cam0", cfg.Video[0].RTSPURL, "unexpected top camera RTSP URL")
 	require.Equal(t, "rtsp://cam.local:8554/mic0", cfg.Audio.RTSPURL, "unexpected audio RTSP URL")
 	require.True(t, strings.HasPrefix(cfg.SessionDir, "/tmp/test-recordings"), "session dir should be under /tmp/test-recordings/, got: %s", cfg.SessionDir)
 }
@@ -53,8 +57,10 @@ func TestLoad_outputFilesInsideSessionDir(t *testing.T) {
 
 	cfg := Load()
 
-	require.Equal(t, cfg.SessionDir, filepath.Dir(cfg.Video.OutputFile), "video output file not in session dir: %s", cfg.Video.OutputFile)
-	require.Equal(t, "video.mp4", filepath.Base(cfg.Video.OutputFile), "unexpected video file name")
+	require.Equal(t, cfg.SessionDir, filepath.Dir(cfg.Video[0].OutputFile), "video output file not in session dir: %s", cfg.Video[0].OutputFile)
+	require.Equal(t, "top_camera.mp4", filepath.Base(cfg.Video[0].OutputFile), "unexpected video file name")
+	require.Equal(t, "front_camera.mp4", filepath.Base(cfg.Video[1].OutputFile), "unexpected video file name")
+	require.Equal(t, "down_camera.mp4", filepath.Base(cfg.Video[2].OutputFile), "unexpected video file name")
 	require.Equal(t, cfg.SessionDir, filepath.Dir(cfg.Audio.OutputFile), "audio output file not in session dir: %s", cfg.Audio.OutputFile)
 	require.Equal(t, "audio.ogg", filepath.Base(cfg.Audio.OutputFile), "unexpected audio file name")
 }
