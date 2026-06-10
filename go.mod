@@ -4,6 +4,7 @@ go 1.25
 
 require (
 	github.com/eclipse-zenoh/zenoh-go v1.9.0
+	github.com/klauspost/compress v1.18.6
 	github.com/stretchr/testify v1.11.1
 )
 
