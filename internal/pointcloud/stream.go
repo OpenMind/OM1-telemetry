@@ -134,7 +134,11 @@ func (c *PointCloudStream) record(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("create zstd encoder: %w", err)
 	}
-	defer encoder.Close()
+	defer func() {
+		if err := encoder.Close(); err != nil {
+			slog.Error("failed to close zstd encoder", "err", err)
+		}
+	}()
 
 	keyExpr, err := zenoh.NewKeyExpr(c.cfg.ZenohTopic)
 	if err != nil {

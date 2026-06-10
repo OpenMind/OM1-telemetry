@@ -13,7 +13,7 @@ import (
 func TestEncodeFrame_compressesAndRoundTrips(t *testing.T) {
 	encoder, err := zstd.NewWriter(nil)
 	require.NoError(t, err, "create encoder")
-	defer encoder.Close()
+	defer func() { require.NoError(t, encoder.Close()) }()
 
 	decoder, err := zstd.NewReader(nil)
 	require.NoError(t, err, "create decoder")
@@ -34,7 +34,7 @@ func TestEncodeFrame_compressesAndRoundTrips(t *testing.T) {
 func TestEncodeFrame_fallsBackToRawWhenNotSmaller(t *testing.T) {
 	encoder, err := zstd.NewWriter(nil)
 	require.NoError(t, err, "create encoder")
-	defer encoder.Close()
+	defer func() { require.NoError(t, encoder.Close()) }()
 
 	raw := []byte{0xDE, 0xAD, 0xBE, 0xEF}
 
