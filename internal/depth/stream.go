@@ -11,6 +11,7 @@ import (
 
 	"github.com/eclipse-zenoh/zenoh-go/zenoh"
 
+	"om1-telemetry/internal/rvl"
 	"om1-telemetry/internal/zenohutil"
 )
 
@@ -125,7 +126,7 @@ func (d *DepthStream) record(ctx context.Context) error {
 		}
 	}()
 
-	if _, err := fmt.Fprintln(tsFile, "unix_ns,seq,byte_offset,byte_length"); err != nil {
+	if _, err := fmt.Fprintln(tsFile, "unix_ns,seq,byte_offset,byte_length,method,width,height,encoding"); err != nil {
 		return fmt.Errorf("write header: %w", err)
 	}
 
@@ -178,18 +179,51 @@ func (d *DepthStream) record(ctx context.Context) error {
 				unixNs = time.Now().UnixNano()
 			}
 
-			payload := sample.Payload()
-			n, err := dataFile.Write(payload.Bytes())
+			payload := sample.Payload().Bytes()
+			frame := encodeFrame(payload)
+
+			n, err := dataFile.Write(frame.data)
 			if err != nil {
 				return fmt.Errorf("write data: %w", err)
 			}
 
-			if _, err := fmt.Fprintf(tsFile, "%d,%d,%d,%d\n", unixNs, seq, byteOffset, n); err != nil {
+			if _, err := fmt.Fprintf(tsFile, "%d,%d,%d,%d,%s,%d,%d,%s\n",
+				unixNs, seq, byteOffset, n, frame.method, frame.width, frame.height, frame.encoding); err != nil {
 				return fmt.Errorf("write timestamp: %w", err)
 			}
 
 			byteOffset += int64(n)
 			seq++
 		}
+	}
+}
+
+type frame struct {
+	data     []byte
+	method   string // "rvl" (compressed) or "raw" (passthrough)
+	width    uint32
+	height   uint32
+	encoding string
+}
+
+func encodeFrame(payload []byte) frame {
+	img, err := ParseImage(payload)
+	if err != nil {
+		slog.Warn("depth: cannot parse image, storing raw", "err", err)
+		return frame{data: payload, method: "raw"}
+	}
+
+	pixels, err := img.DepthPixels()
+	if err != nil {
+		slog.Warn("depth: not a 16-bit depth frame, storing raw", "err", err, "encoding", img.Encoding)
+		return frame{data: payload, method: "raw", encoding: img.Encoding}
+	}
+
+	return frame{
+		data:     rvl.Encode(pixels),
+		method:   "rvl",
+		width:    img.Width,
+		height:   img.Height,
+		encoding: img.Encoding,
 	}
 }

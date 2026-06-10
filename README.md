@@ -4,7 +4,7 @@ A Go application that synchronously records multi-modal sensor data:
 - **Video** from RTSP streams (via ffmpeg) — multiple cameras
 - **Audio** from RTSP streams (via ffmpeg)
 - **Lidar** point clouds from Zenoh topics
-- **Depth** frames from Zenoh topics (raw, lossless)
+- **Depth** frames from Zenoh topics (RVL-compressed, lossless)
 - **Odometry** messages from Zenoh topics
 
 All streams are timestamped and organized into session directories for easy alignment and analysis.
@@ -82,16 +82,32 @@ recordings/
         ├── audio.ogg                  # Audio recording
         ├── lidar_scans.bin            # Raw lidar point cloud data
         ├── lidar_timestamps.csv       # Timestamps: unix_ns,seq,byte_offset
-        ├── depth_frames.bin           # Raw depth frames (serialized ROS Image, 16UC1)
-        ├── depth_timestamps.csv       # Timestamps: unix_ns,seq,byte_offset,byte_length
+        ├── depth_frames.bin           # RVL-compressed depth frames (lossless)
+        ├── depth_timestamps.csv       # unix_ns,seq,byte_offset,byte_length,method,width,height,encoding
         ├── odom_frames.bin            # Raw odometry messages
         └── odom_timestamps.csv        # Timestamps: unix_ns,seq,byte_offset
 ```
 
+### Depth frames (RVL)
+
 Each row in `depth_timestamps.csv` slices one frame out of `depth_frames.bin`
-using `byte_offset` and `byte_length`. The frames are the raw serialized
-`sensor_msgs/Image` payloads — stored losslessly so the 16-bit depth values are
-preserved exactly — and are decoded/aligned offline.
+using `byte_offset` and `byte_length`. Depth is compressed with **RVL**
+(Wilson, *Fast Lossless Depth Image Compression*, ISS 2017) — a lossless codec
+designed for 16-bit depth maps, so depth values are preserved exactly while
+typically using far less space than the raw frames.
+
+The extra columns describe each frame so it can be reconstructed offline:
+
+- `method` — `rvl` for RVL-compressed frames, or `raw` for the fallback (see below).
+- `width`, `height` — frame dimensions; the decoded frame has `width*height` 16-bit pixels.
+- `encoding` — the source ROS image encoding (e.g. `16UC1`).
+
+To decode a frame: read `byte_length` bytes at `byte_offset`, then RVL-decode
+into `width*height` little-endian `uint16` pixels.
+
+**Fallback:** if a payload can't be parsed as a 16-bit depth image, it is stored
+verbatim with `method=raw` (the original serialized `sensor_msgs/Image`), so no
+data is ever lost — those rows are decoded by parsing the ROS message directly.
 
 ## Testing
 
