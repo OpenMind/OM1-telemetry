@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/eclipse-zenoh/zenoh-go/zenoh"
+	"github.com/klauspost/compress/zstd"
 
 	"om1-telemetry/internal/zenohutil"
 )
@@ -125,9 +126,15 @@ func (c *PointCloudStream) record(ctx context.Context) error {
 		}
 	}()
 
-	if _, err := fmt.Fprintln(tsFile, "unix_ns,seq,byte_offset"); err != nil {
+	if _, err := fmt.Fprintln(tsFile, "unix_ns,seq,byte_offset,byte_length,method"); err != nil {
 		return fmt.Errorf("write header: %w", err)
 	}
+
+	encoder, err := zstd.NewWriter(nil)
+	if err != nil {
+		return fmt.Errorf("create zstd encoder: %w", err)
+	}
+	defer encoder.Close()
 
 	keyExpr, err := zenoh.NewKeyExpr(c.cfg.ZenohTopic)
 	if err != nil {
@@ -178,13 +185,14 @@ func (c *PointCloudStream) record(ctx context.Context) error {
 				unixNs = time.Now().UnixNano()
 			}
 
-			payload := sample.Payload()
-			n, err := dataFile.Write(payload.Bytes())
+			data, method := encodeFrame(encoder, sample.Payload().Bytes())
+
+			n, err := dataFile.Write(data)
 			if err != nil {
 				return fmt.Errorf("write data: %w", err)
 			}
 
-			if _, err := fmt.Fprintf(tsFile, "%d,%d,%d\n", unixNs, seq, byteOffset); err != nil {
+			if _, err := fmt.Fprintf(tsFile, "%d,%d,%d,%d,%s\n", unixNs, seq, byteOffset, n, method); err != nil {
 				return fmt.Errorf("write timestamp: %w", err)
 			}
 
@@ -192,4 +200,12 @@ func (c *PointCloudStream) record(ctx context.Context) error {
 			seq++
 		}
 	}
+}
+
+func encodeFrame(encoder *zstd.Encoder, raw []byte) (data []byte, method string) {
+	compressed := encoder.EncodeAll(raw, make([]byte, 0, len(raw)))
+	if len(compressed) >= len(raw) {
+		return raw, "raw"
+	}
+	return compressed, "zstd"
 }

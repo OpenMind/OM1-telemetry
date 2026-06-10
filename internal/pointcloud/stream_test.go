@@ -1,12 +1,49 @@
 package pointcloud
 
 import (
+	"bytes"
 	"path/filepath"
 	"testing"
 	"time"
 
+	"github.com/klauspost/compress/zstd"
 	"github.com/stretchr/testify/require"
 )
+
+func TestEncodeFrame_compressesAndRoundTrips(t *testing.T) {
+	encoder, err := zstd.NewWriter(nil)
+	require.NoError(t, err, "create encoder")
+	defer encoder.Close()
+
+	decoder, err := zstd.NewReader(nil)
+	require.NoError(t, err, "create decoder")
+	defer decoder.Close()
+
+	// Highly compressible payload, larger than zstd's frame overhead.
+	raw := bytes.Repeat([]byte{0x01, 0x02, 0x03, 0x04}, 1024)
+
+	data, method := encodeFrame(encoder, raw)
+
+	require.Equal(t, "zstd", method, "expected compressible payload to use zstd")
+	require.Less(t, len(data), len(raw), "compressed frame should be smaller than raw")
+
+	decoded, err := decoder.DecodeAll(data, nil)
+	require.NoError(t, err, "decode frame")
+	require.Equal(t, raw, decoded, "round-trip must be lossless")
+}
+
+func TestEncodeFrame_fallsBackToRawWhenNotSmaller(t *testing.T) {
+	encoder, err := zstd.NewWriter(nil)
+	require.NoError(t, err, "create encoder")
+	defer encoder.Close()
+
+	raw := []byte{0xDE, 0xAD, 0xBE, 0xEF}
+
+	data, method := encodeFrame(encoder, raw)
+
+	require.Equal(t, "raw", method, "expected incompressible payload to fall back to raw")
+	require.Equal(t, raw, data, "raw fallback must store the payload verbatim")
+}
 
 func TestNew_returnsNonNilStream(t *testing.T) {
 	stream := New(Config{

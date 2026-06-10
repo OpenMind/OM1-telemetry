@@ -4,7 +4,7 @@ A Go application that synchronously records multi-modal sensor data:
 - **Video** from RTSP streams (via ffmpeg) — multiple cameras
 - **Audio** from RTSP streams (via ffmpeg)
 - **Lidar** scans from Zenoh topics
-- **Point clouds** (Livox MID360) from Zenoh topics
+- **Point clouds** (Livox MID360) from Zenoh topics (zstd-compressed, lossless)
 - **Depth** frames from Zenoh topics (RVL-compressed, lossless)
 - **Odometry** messages from Zenoh topics
 
@@ -87,8 +87,8 @@ recordings/
         ├── audio.ogg                  # Audio recording
         ├── lidar_scans.bin            # Raw lidar point cloud data
         ├── lidar_timestamps.csv       # Timestamps: unix_ns,seq,byte_offset
-        ├── pointcloud_frames.bin      # Raw Livox MID360 PointCloud2 data
-        ├── pointcloud_timestamps.csv  # Timestamps: unix_ns,seq,byte_offset
+        ├── pointcloud_frames.bin      # zstd-compressed Livox MID360 PointCloud2 frames
+        ├── pointcloud_timestamps.csv  # unix_ns,seq,byte_offset,byte_length,method
         ├── depth_frames.bin           # RVL-compressed depth frames (lossless)
         ├── depth_timestamps.csv       # unix_ns,seq,byte_offset,byte_length,method,width,height,encoding
         ├── odom_frames.bin            # Raw odometry messages
@@ -115,6 +115,22 @@ into `width*height` little-endian `uint16` pixels.
 **Fallback:** if a payload can't be parsed as a 16-bit depth image, it is stored
 verbatim with `method=raw` (the original serialized `sensor_msgs/Image`), so no
 data is ever lost — those rows are decoded by parsing the ROS message directly.
+
+### Point cloud frames (zstd)
+
+Each row in `pointcloud_timestamps.csv` slices one frame out of
+`pointcloud_frames.bin` using `byte_offset` and `byte_length`. Each
+`sensor_msgs/PointCloud2` payload is compressed independently with **zstd**
+(lossless), so frames stay randomly accessible and decode exactly.
+
+- `method` — `zstd` for compressed frames, or `raw` for the fallback.
+- `byte_length` — the number of bytes the frame occupies in the data file.
+
+To decode a frame: read `byte_length` bytes at `byte_offset`, then zstd-decode
+(for `method=zstd`) to recover the original serialized `sensor_msgs/PointCloud2`.
+
+**Fallback:** if compression wouldn't shrink a payload, it is stored verbatim
+with `method=raw`, so no data is ever lost.
 
 ## Testing
 
