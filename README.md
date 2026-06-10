@@ -3,7 +3,8 @@
 A Go application that synchronously records multi-modal sensor data:
 - **Video** from RTSP streams (via ffmpeg) — multiple cameras
 - **Audio** from RTSP streams (via ffmpeg)
-- **Lidar** point clouds from Zenoh topics
+- **Lidar** scans from Zenoh topics
+- **Point clouds** (Livox MID360) from Zenoh topics
 - **Depth** frames from Zenoh topics (RVL-compressed, lossless)
 - **Odometry** messages from Zenoh topics
 
@@ -26,6 +27,8 @@ Configure via environment variables:
 - `AUDIO_RTSP_URL` - Audio stream URL (default: `rtsp://localhost:8554/audio`)
 - `LIDAR_ZENOH_ENDPOINT` - Zenoh endpoint for lidar (default: `tcp/127.0.0.1:7447`)
 - `LIDAR_ZENOH_TOPIC` - Zenoh topic for lidar data (default: `scan`)
+- `POINTCLOUD_ZENOH_ENDPOINT` - Zenoh endpoint for point cloud (default: `tcp/127.0.0.1:7447`)
+- `POINTCLOUD_ZENOH_TOPIC` - Zenoh topic for point cloud data (default: `rt/utlidar/cloud_livox_mid360`)
 - `DEPTH_ZENOH_ENDPOINT` - Zenoh endpoint for depth (default: `tcp/127.0.0.1:7447`)
 - `DEPTH_ZENOH_TOPIC` - Zenoh topic for depth frames (default: `camera/realsense2_camera_node/depth/image_rect_raw`)
 - `ODOM_ZENOH_ENDPOINT` - Zenoh endpoint for odometry (default: `tcp/127.0.0.1:7447`)
@@ -59,6 +62,8 @@ DOWN_CAMERA_RTSP_URL="rtsp://camera.local/down_camera" \
 AUDIO_RTSP_URL="rtsp://camera.local/audio" \
 LIDAR_ZENOH_ENDPOINT="tcp/192.168.1.10:7447" \
 LIDAR_ZENOH_TOPIC="scan" \
+POINTCLOUD_ZENOH_ENDPOINT="tcp/192.168.1.10:7447" \
+POINTCLOUD_ZENOH_TOPIC="rt/utlidar/cloud_livox_mid360" \
 DEPTH_ZENOH_ENDPOINT="tcp/192.168.1.10:7447" \
 DEPTH_ZENOH_TOPIC="camera/realsense2_camera_node/depth/image_rect_raw" \
 ODOM_ZENOH_ENDPOINT="tcp/192.168.1.10:7447" \
@@ -82,6 +87,8 @@ recordings/
         ├── audio.ogg                  # Audio recording
         ├── lidar_scans.bin            # Raw lidar point cloud data
         ├── lidar_timestamps.csv       # Timestamps: unix_ns,seq,byte_offset
+        ├── pointcloud_frames.bin      # Raw Livox MID360 PointCloud2 data
+        ├── pointcloud_timestamps.csv  # Timestamps: unix_ns,seq,byte_offset
         ├── depth_frames.bin           # RVL-compressed depth frames (lossless)
         ├── depth_timestamps.csv       # unix_ns,seq,byte_offset,byte_length,method,width,height,encoding
         ├── odom_frames.bin            # Raw odometry messages

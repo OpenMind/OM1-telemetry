@@ -14,6 +14,7 @@ import (
 	"om1-telemetry/internal/lidar"
 	"om1-telemetry/internal/network"
 	"om1-telemetry/internal/odom"
+	"om1-telemetry/internal/pointcloud"
 	"om1-telemetry/internal/video"
 )
 
@@ -51,6 +52,7 @@ func main() {
 	}
 	audioStream := audio.New(cfg.Audio.AudioStreamConfig())
 	lidarStream := lidar.New(cfg.Lidar.LidarStreamConfig())
+	pointCloudStream := pointcloud.New(cfg.PointCloud.PointCloudStreamConfig())
 	depthStream := depth.New(cfg.Depth.DepthStreamConfig())
 	odomStream := odom.New(cfg.Odom.OdomStreamConfig())
 	networkStream := network.New(cfg.Network.NetworkStreamConfig())
@@ -60,6 +62,7 @@ func main() {
 	}
 	audioStream.Start()
 	lidarStream.Start()
+	pointCloudStream.Start()
 	depthStream.Start()
 	odomStream.Start()
 	networkStream.Start()
@@ -74,6 +77,7 @@ func main() {
 		"video-cameras", videoURLs,
 		"audio-url", cfg.Audio.RTSPURL,
 		"lidar-topic", cfg.Lidar.ZenohTopic,
+		"pointcloud-topic", cfg.PointCloud.ZenohTopic,
 		"depth-topic", cfg.Depth.ZenohTopic,
 		"odom-topic", cfg.Odom.ZenohTopic,
 		"net-ping-host", cfg.Network.PingHost,
@@ -90,6 +94,7 @@ func main() {
 	}
 	audioStream.Stop()
 	lidarStream.Stop()
+	pointCloudStream.Stop()
 	depthStream.Stop()
 	odomStream.Stop()
 	networkStream.Stop()

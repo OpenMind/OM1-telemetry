@@ -10,7 +10,7 @@ import (
 )
 
 func TestLoad_defaults(t *testing.T) {
-	for _, key := range []string{"RECORDINGS_DIR", "TOP_CAMERA_RTSP_URL", "FRONT_CAMERA_RTSP_URL", "DOWN_CAMERA_RTSP_URL", "AUDIO_RTSP_URL"} {
+	for _, key := range []string{"RECORDINGS_DIR", "TOP_CAMERA_RTSP_URL", "FRONT_CAMERA_RTSP_URL", "DOWN_CAMERA_RTSP_URL", "AUDIO_RTSP_URL", "POINTCLOUD_ZENOH_ENDPOINT", "POINTCLOUD_ZENOH_TOPIC"} {
 		t.Setenv(key, "")
 	}
 
@@ -24,7 +24,46 @@ func TestLoad_defaults(t *testing.T) {
 	require.Equal(t, "rtsp://localhost:8554/audio", cfg.Audio.RTSPURL, "unexpected audio RTSP URL")
 	require.Equal(t, "tcp/127.0.0.1:7447", cfg.Lidar.ZenohEndpoint, "unexpected lidar zenoh endpoint")
 	require.Equal(t, "scan", cfg.Lidar.ZenohTopic, "unexpected lidar zenoh topic")
+	require.Equal(t, "tcp/127.0.0.1:7447", cfg.PointCloud.ZenohEndpoint, "unexpected point cloud zenoh endpoint")
+	require.Equal(t, "rt/utlidar/cloud_livox_mid360", cfg.PointCloud.ZenohTopic, "unexpected point cloud zenoh topic")
 	require.True(t, strings.HasPrefix(cfg.SessionDir, "recordings"), "session dir should be under recordings/, got: %s", cfg.SessionDir)
+}
+
+func TestLoad_pointCloudEnvOverrides(t *testing.T) {
+	t.Setenv("POINTCLOUD_ZENOH_ENDPOINT", "tcp/192.168.1.10:7447")
+	t.Setenv("POINTCLOUD_ZENOH_TOPIC", "rt/custom/cloud")
+
+	cfg := Load()
+
+	require.Equal(t, "tcp/192.168.1.10:7447", cfg.PointCloud.ZenohEndpoint, "unexpected point cloud zenoh endpoint")
+	require.Equal(t, "rt/custom/cloud", cfg.PointCloud.ZenohTopic, "unexpected point cloud zenoh topic")
+}
+
+func TestLoad_pointCloudOutputFilesInsideSessionDir(t *testing.T) {
+	t.Setenv("RECORDINGS_DIR", "recordings")
+
+	cfg := Load()
+
+	require.Equal(t, cfg.SessionDir, filepath.Dir(cfg.PointCloud.TimestampsFile), "point cloud timestamps file not in session dir: %s", cfg.PointCloud.TimestampsFile)
+	require.Equal(t, "pointcloud_timestamps.csv", filepath.Base(cfg.PointCloud.TimestampsFile), "unexpected point cloud timestamps file name")
+	require.Equal(t, cfg.SessionDir, filepath.Dir(cfg.PointCloud.DataFile), "point cloud data file not in session dir: %s", cfg.PointCloud.DataFile)
+	require.Equal(t, "pointcloud_frames.bin", filepath.Base(cfg.PointCloud.DataFile), "unexpected point cloud data file name")
+}
+
+func TestPointCloudStreamConfig_mapsFields(t *testing.T) {
+	cfg := PointCloudConfig{
+		ZenohEndpoint:  "tcp/10.0.0.1:7447",
+		ZenohTopic:     "rt/utlidar/cloud_livox_mid360",
+		TimestampsFile: "/tmp/pointcloud_timestamps.csv",
+		DataFile:       "/tmp/pointcloud_frames.bin",
+	}
+
+	sc := cfg.PointCloudStreamConfig()
+
+	require.Equal(t, cfg.ZenohEndpoint, sc.ZenohEndpoint, "endpoint not mapped")
+	require.Equal(t, cfg.ZenohTopic, sc.ZenohTopic, "topic not mapped")
+	require.Equal(t, cfg.TimestampsFile, sc.TimestampsFile, "timestamps file not mapped")
+	require.Equal(t, cfg.DataFile, sc.DataFile, "data file not mapped")
 }
 
 func TestLoad_envOverrides(t *testing.T) {

@@ -11,6 +11,7 @@ import (
 	"om1-telemetry/internal/lidar"
 	"om1-telemetry/internal/network"
 	"om1-telemetry/internal/odom"
+	"om1-telemetry/internal/pointcloud"
 	"om1-telemetry/internal/video"
 )
 
@@ -21,6 +22,7 @@ type Config struct {
 	Video          []VideoConfig
 	Audio          AudioConfig
 	Lidar          LidarConfig
+	PointCloud     PointCloudConfig
 	Depth          DepthConfig
 	Odom           OdomConfig
 	Network        NetworkConfig
@@ -38,6 +40,13 @@ type AudioConfig struct {
 }
 
 type LidarConfig struct {
+	ZenohEndpoint  string
+	ZenohTopic     string
+	TimestampsFile string
+	DataFile       string
+}
+
+type PointCloudConfig struct {
 	ZenohEndpoint  string
 	ZenohTopic     string
 	TimestampsFile string
@@ -88,6 +97,12 @@ func Load() Config {
 			ZenohTopic:     envStr("LIDAR_ZENOH_TOPIC", "scan"),
 			TimestampsFile: filepath.Join(sessionDir, "lidar_timestamps.csv"),
 			DataFile:       filepath.Join(sessionDir, "lidar_scans.bin"),
+		},
+		PointCloud: PointCloudConfig{
+			ZenohEndpoint:  envStr("POINTCLOUD_ZENOH_ENDPOINT", "tcp/127.0.0.1:7447"),
+			ZenohTopic:     envStr("POINTCLOUD_ZENOH_TOPIC", "rt/utlidar/cloud_livox_mid360"),
+			TimestampsFile: filepath.Join(sessionDir, "pointcloud_timestamps.csv"),
+			DataFile:       filepath.Join(sessionDir, "pointcloud_frames.bin"),
 		},
 		Depth: DepthConfig{
 			ZenohEndpoint:  envStr("DEPTH_ZENOH_ENDPOINT", "tcp/127.0.0.1:7447"),
@@ -148,6 +163,15 @@ func (c AudioConfig) AudioStreamConfig() audio.Config {
 
 func (c LidarConfig) LidarStreamConfig() lidar.Config {
 	return lidar.Config{
+		ZenohEndpoint:  c.ZenohEndpoint,
+		ZenohTopic:     c.ZenohTopic,
+		TimestampsFile: c.TimestampsFile,
+		DataFile:       c.DataFile,
+	}
+}
+
+func (c PointCloudConfig) PointCloudStreamConfig() pointcloud.Config {
+	return pointcloud.Config{
 		ZenohEndpoint:  c.ZenohEndpoint,
 		ZenohTopic:     c.ZenohTopic,
 		TimestampsFile: c.TimestampsFile,
