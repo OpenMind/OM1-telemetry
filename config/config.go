@@ -9,6 +9,7 @@ import (
 	"om1-telemetry/internal/audio"
 	"om1-telemetry/internal/depth"
 	"om1-telemetry/internal/lidar"
+	"om1-telemetry/internal/network"
 	"om1-telemetry/internal/odom"
 	"om1-telemetry/internal/video"
 )
@@ -22,6 +23,7 @@ type Config struct {
 	Lidar          LidarConfig
 	Depth          DepthConfig
 	Odom           OdomConfig
+	Network        NetworkConfig
 }
 
 type VideoConfig struct {
@@ -54,6 +56,13 @@ type OdomConfig struct {
 	ZenohTopic     string
 	TimestampsFile string
 	DataFile       string
+}
+
+type NetworkConfig struct {
+	PingHost     string
+	PingTimeout  time.Duration
+	PollInterval time.Duration
+	DataFile     string
 }
 
 func Load() Config {
@@ -91,6 +100,12 @@ func Load() Config {
 			ZenohTopic:     envStr("ODOM_ZENOH_TOPIC", "odom"),
 			TimestampsFile: filepath.Join(sessionDir, "odom_timestamps.csv"),
 			DataFile:       filepath.Join(sessionDir, "odom_frames.bin"),
+		},
+		Network: NetworkConfig{
+			PingHost:     envStr("NET_PING_HOST", "8.8.8.8"),
+			PingTimeout:  envDuration("NET_PING_TIMEOUT", 2*time.Second),
+			PollInterval: envDuration("NET_POLL_INTERVAL", 5*time.Second),
+			DataFile:     filepath.Join(sessionDir, "network_status.csv"),
 		},
 	}
 }
@@ -158,9 +173,27 @@ func (c OdomConfig) OdomStreamConfig() odom.Config {
 	}
 }
 
+func (c NetworkConfig) NetworkStreamConfig() network.Config {
+	return network.Config{
+		PingHost:     c.PingHost,
+		PingTimeout:  c.PingTimeout,
+		PollInterval: c.PollInterval,
+		DataFile:     c.DataFile,
+	}
+}
+
 func envStr(key, defaultValue string) string {
 	if value := os.Getenv(key); value != "" {
 		return value
+	}
+	return defaultValue
+}
+
+func envDuration(key string, defaultValue time.Duration) time.Duration {
+	if value := os.Getenv(key); value != "" {
+		if d, err := time.ParseDuration(value); err == nil {
+			return d
+		}
 	}
 	return defaultValue
 }

@@ -12,6 +12,7 @@ import (
 	"om1-telemetry/internal/audio"
 	"om1-telemetry/internal/depth"
 	"om1-telemetry/internal/lidar"
+	"om1-telemetry/internal/network"
 	"om1-telemetry/internal/odom"
 	"om1-telemetry/internal/video"
 )
@@ -52,6 +53,7 @@ func main() {
 	lidarStream := lidar.New(cfg.Lidar.LidarStreamConfig())
 	depthStream := depth.New(cfg.Depth.DepthStreamConfig())
 	odomStream := odom.New(cfg.Odom.OdomStreamConfig())
+	networkStream := network.New(cfg.Network.NetworkStreamConfig())
 
 	for _, vs := range videoStreams {
 		vs.Start()
@@ -60,6 +62,7 @@ func main() {
 	lidarStream.Start()
 	depthStream.Start()
 	odomStream.Start()
+	networkStream.Start()
 
 	videoURLs := make([]string, 0, len(cfg.Video))
 	for _, vc := range cfg.Video {
@@ -73,6 +76,7 @@ func main() {
 		"lidar-topic", cfg.Lidar.ZenohTopic,
 		"depth-topic", cfg.Depth.ZenohTopic,
 		"odom-topic", cfg.Odom.ZenohTopic,
+		"net-ping-host", cfg.Network.PingHost,
 	)
 	slog.Info("press Ctrl-C to stop")
 
@@ -88,4 +92,5 @@ func main() {
 	lidarStream.Stop()
 	depthStream.Stop()
 	odomStream.Stop()
+	networkStream.Stop()
 }
