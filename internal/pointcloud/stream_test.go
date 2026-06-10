@@ -19,7 +19,6 @@ func TestEncodeFrame_compressesAndRoundTrips(t *testing.T) {
 	require.NoError(t, err, "create decoder")
 	defer decoder.Close()
 
-	// Highly compressible payload, larger than zstd's frame overhead.
 	raw := bytes.Repeat([]byte{0x01, 0x02, 0x03, 0x04}, 1024)
 
 	data, method := encodeFrame(encoder, raw)
