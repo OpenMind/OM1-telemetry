@@ -11,8 +11,9 @@ import (
 )
 
 type Config struct {
-	RTSPURL    string
-	OutputFile string
+	RTSPURL        string
+	OutputFile     string
+	TimestampsFile string
 }
 
 type AudioRTSPStream struct {
@@ -59,11 +60,13 @@ func (a *AudioRTSPStream) loop(ctx context.Context) {
 }
 
 func (a *AudioRTSPStream) record(ctx context.Context) error {
+	start := time.Now()
 	cmd := exec.CommandContext(ctx, "ffmpeg",
 		"-loglevel", "error",
 		"-rtsp_transport", "tcp",
 		"-i", a.cfg.RTSPURL,
 		"-c", "copy",
+		"-metadata", "creation_time="+start.UTC().Format(time.RFC3339Nano),
 		"-y",
 		a.cfg.OutputFile,
 	)
@@ -71,5 +74,19 @@ func (a *AudioRTSPStream) record(ctx context.Context) error {
 	if err := cmd.Start(); err != nil {
 		return fmt.Errorf("start audio recorder: %w", err)
 	}
+	if err := writeStartTimestamp(a.cfg.TimestampsFile, start); err != nil {
+		slog.Error("failed to write audio start timestamp", "file", a.cfg.TimestampsFile, "err", err)
+	}
 	return cmd.Wait()
+}
+
+func writeStartTimestamp(path string, start time.Time) error {
+	if path == "" {
+		return nil
+	}
+	return os.WriteFile(
+		path,
+		[]byte(fmt.Sprintf("recording_start_unix_ns\n%d\n", start.UnixNano())),
+		0o644,
+	)
 }

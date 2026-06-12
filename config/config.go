@@ -29,14 +29,16 @@ type Config struct {
 }
 
 type VideoConfig struct {
-	Name       string
-	RTSPURL    string
-	OutputFile string
+	Name           string
+	RTSPURL        string
+	OutputFile     string
+	TimestampsFile string
 }
 
 type AudioConfig struct {
-	RTSPURL    string
-	OutputFile string
+	RTSPURL        string
+	OutputFile     string
+	TimestampsFile string
 }
 
 type LidarConfig struct {
@@ -89,8 +91,9 @@ func Load() Config {
 		SessionStartNs: now.UnixNano(),
 		Video:          videoConfigs(sessionDir),
 		Audio: AudioConfig{
-			RTSPURL:    envStr("AUDIO_RTSP_URL", "rtsp://localhost:8554/audio"),
-			OutputFile: filepath.Join(sessionDir, "audio.ogg"),
+			RTSPURL:        envStr("AUDIO_RTSP_URL", "rtsp://localhost:8554/audio"),
+			OutputFile:     filepath.Join(sessionDir, "audio.ogg"),
+			TimestampsFile: filepath.Join(sessionDir, "audio_timestamps.csv"),
 		},
 		Lidar: LidarConfig{
 			ZenohEndpoint:  envStr("LIDAR_ZENOH_ENDPOINT", "tcp/127.0.0.1:7447"),
@@ -139,9 +142,10 @@ func videoConfigs(sessionDir string) []VideoConfig {
 	for _, cam := range cameras {
 		envKey := strings.ToUpper(cam.name) + "_RTSP_URL"
 		configs = append(configs, VideoConfig{
-			Name:       cam.name,
-			RTSPURL:    envStr(envKey, cam.defaultURL),
-			OutputFile: filepath.Join(sessionDir, cam.name+".mp4"),
+			Name:           cam.name,
+			RTSPURL:        envStr(envKey, cam.defaultURL),
+			OutputFile:     filepath.Join(sessionDir, cam.name+".mp4"),
+			TimestampsFile: filepath.Join(sessionDir, cam.name+"_timestamps.csv"),
 		})
 	}
 	return configs
@@ -149,15 +153,17 @@ func videoConfigs(sessionDir string) []VideoConfig {
 
 func (c VideoConfig) VideoStreamConfig() video.Config {
 	return video.Config{
-		RTSPURL:    c.RTSPURL,
-		OutputFile: c.OutputFile,
+		RTSPURL:        c.RTSPURL,
+		OutputFile:     c.OutputFile,
+		TimestampsFile: c.TimestampsFile,
 	}
 }
 
 func (c AudioConfig) AudioStreamConfig() audio.Config {
 	return audio.Config{
-		RTSPURL:    c.RTSPURL,
-		OutputFile: c.OutputFile,
+		RTSPURL:        c.RTSPURL,
+		OutputFile:     c.OutputFile,
+		TimestampsFile: c.TimestampsFile,
 	}
 }
 
