@@ -1,4 +1,4 @@
-package depth
+package lowstate
 
 import (
 	"context"
@@ -12,12 +12,25 @@ import (
 
 	"om1-telemetry/internal/heartbeat"
 	"om1-telemetry/internal/recordutil"
-	"om1-telemetry/internal/rvl"
 	"om1-telemetry/internal/zenohutil"
 )
 
 // HeartbeatName is the stream identifier used with heartbeat.Monitor.
-const HeartbeatName = "depth"
+// Same name on Go2 and G1 — the messages have slightly different
+// schemas (unitree_go vs unitree_hg) but identical purpose; the data
+// pipeline doesn't need to distinguish them.
+const HeartbeatName = "lowstate"
+
+// /lowstate is the catch-all robot state message:
+// IMU, joint states, battery, foot forces, wireless remote, temperatures, etc.
+// We record raw payload bytes + per-message timestamps; downstream tools
+// deserialize when needed.
+//
+// Measured rates:
+//   Go2 (unitree_go/msg/LowState):  ~500 Hz,  ~2.5 KB / msg = ~1.25 MB/s
+//   G1  (unitree_hg/msg/LowState):  ~1053 Hz, ~2.1 KB / msg = ~2.21 MB/s
+//
+// Daily (8h continuous):  Go2 ~36 GB,  G1 ~62 GB
 
 const syncInterval = 2 * time.Second
 
@@ -27,12 +40,12 @@ type Config struct {
 	TimestampsFile string
 	DataFile       string
 
-	// Monitor is optional; ticks once per stored frame so the central
+	// Monitor is optional; ticks once per message so the central
 	// heartbeat monitor can detect a stuck recorder.
 	Monitor *heartbeat.Monitor
 }
 
-type DepthStream struct {
+type LowstateStream struct {
 	cfg     Config
 	running atomic.Bool
 	cancel  context.CancelFunc
@@ -50,36 +63,36 @@ type SubscriberResult struct {
 	err        error
 }
 
-func New(cfg Config) *DepthStream {
-	return &DepthStream{cfg: cfg}
+func New(cfg Config) *LowstateStream {
+	return &LowstateStream{cfg: cfg}
 }
 
-func (d *DepthStream) Start() {
-	if d.running.Swap(true) {
+func (l *LowstateStream) Start() {
+	if l.running.Swap(true) {
 		return
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	d.cancel = cancel
-	d.done = make(chan struct{})
-	d.wg.Add(1)
-	go d.loop(ctx)
+	l.cancel = cancel
+	l.done = make(chan struct{})
+	l.wg.Add(1)
+	go l.loop(ctx)
 }
 
-func (d *DepthStream) Stop() {
-	if !d.running.Swap(false) {
+func (l *LowstateStream) Stop() {
+	if !l.running.Swap(false) {
 		return
 	}
-	d.cancel()
-	d.wg.Wait()
-	close(d.done)
-	slog.Info("depth stream stopped")
+	l.cancel()
+	l.wg.Wait()
+	close(l.done)
+	slog.Info("lowstate stream stopped")
 }
 
-func (d *DepthStream) loop(ctx context.Context) {
-	defer d.wg.Done()
+func (l *LowstateStream) loop(ctx context.Context) {
+	defer l.wg.Done()
 	for ctx.Err() == nil {
-		if err := d.record(ctx); err != nil && ctx.Err() == nil {
-			slog.Error("depth recorder error; reconnecting in 2 s", "err", err)
+		if err := l.record(ctx); err != nil && ctx.Err() == nil {
+			slog.Error("lowstate recorder error; reconnecting in 2 s", "err", err)
 			select {
 			case <-ctx.Done():
 			case <-time.After(2 * time.Second):
@@ -88,12 +101,12 @@ func (d *DepthStream) loop(ctx context.Context) {
 	}
 }
 
-func (d *DepthStream) record(ctx context.Context) error {
+func (l *LowstateStream) record(ctx context.Context) error {
 	config := zenoh.NewConfigDefault()
 	if err := config.InsertJson5(zenoh.ConfigModeKey, `"client"`); err != nil {
 		return err
 	}
-	endpoint := d.cfg.ZenohEndpoint
+	endpoint := l.cfg.ZenohEndpoint
 	if err := config.InsertJson5(zenoh.ConfigConnectKey, `["`+endpoint+`"]`); err != nil {
 		return fmt.Errorf("set connect endpoint: %w", err)
 	}
@@ -116,8 +129,8 @@ func (d *DepthStream) record(ctx context.Context) error {
 	}
 	defer session.Drop()
 
-	// open files in APPEND mode so reconnects do NOT wipe data
-	tsResult, err := recordutil.OpenForAppend(d.cfg.TimestampsFile)
+	// Append-mode open: do NOT clobber prior data on reconnect.
+	tsResult, err := recordutil.OpenForAppend(l.cfg.TimestampsFile)
 	if err != nil {
 		return fmt.Errorf("open timestamps file: %w", err)
 	}
@@ -128,7 +141,7 @@ func (d *DepthStream) record(ctx context.Context) error {
 		}
 	}()
 
-	dataResult, err := recordutil.OpenForAppend(d.cfg.DataFile)
+	dataResult, err := recordutil.OpenForAppend(l.cfg.DataFile)
 	if err != nil {
 		return fmt.Errorf("open data file: %w", err)
 	}
@@ -140,13 +153,12 @@ func (d *DepthStream) record(ctx context.Context) error {
 	}()
 
 	if tsResult.PrevSize == 0 {
-		if _, err := fmt.Fprintln(tsFile,
-			"unix_ns,seq,byte_offset,byte_length,method,width,height,encoding"); err != nil {
+		if _, err := fmt.Fprintln(tsFile, "unix_ns,seq,byte_offset"); err != nil {
 			return fmt.Errorf("write header: %w", err)
 		}
 	}
 
-	lastSeq, err := recordutil.ReadLastSeq(d.cfg.TimestampsFile)
+	lastSeq, err := recordutil.ReadLastSeq(l.cfg.TimestampsFile)
 	if err != nil {
 		slog.Warn("could not read last seq; starting from 0", "err", err)
 		lastSeq = -1
@@ -155,17 +167,20 @@ func (d *DepthStream) record(ctx context.Context) error {
 	byteOffset := dataResult.PrevSize
 
 	if dataResult.PrevSize > 0 {
-		slog.Info("depth resuming previous session",
+		slog.Info("lowstate resuming previous session",
 			"starting_seq", seq,
 			"starting_byte_offset", byteOffset)
 	}
 
-	keyExpr, err := zenoh.NewKeyExpr(d.cfg.ZenohTopic)
+	keyExpr, err := zenoh.NewKeyExpr(l.cfg.ZenohTopic)
 	if err != nil {
 		return fmt.Errorf("create key expression: %w", err)
 	}
 
-	handler := zenoh.NewFifoChannel[zenoh.Sample](1024)
+	// FIFO buffer sized for high-frequency data.
+	// G1 @ 1053 Hz: 2048 entries ≈ 2 s of slack
+	// Go2 @ 500 Hz: 2048 entries ≈ 4 s of slack
+	handler := zenoh.NewFifoChannel[zenoh.Sample](2048)
 
 	subscriberChan := make(chan SubscriberResult, 1)
 	go func() {
@@ -185,7 +200,7 @@ func (d *DepthStream) record(ctx context.Context) error {
 	}
 	defer subscriber.Drop()
 
-	slog.Info("depth recorder started", "topic", d.cfg.ZenohTopic)
+	slog.Info("lowstate recorder started", "topic", l.cfg.ZenohTopic)
 
 	receiver := subscriber.Handler()
 
@@ -194,10 +209,10 @@ func (d *DepthStream) record(ctx context.Context) error {
 
 	flush := func() {
 		if err := dataFile.Sync(); err != nil {
-			slog.Warn("depth data sync failed", "err", err)
+			slog.Warn("lowstate data sync failed", "err", err)
 		}
 		if err := tsFile.Sync(); err != nil {
-			slog.Warn("depth ts sync failed", "err", err)
+			slog.Warn("lowstate ts sync failed", "err", err)
 		}
 	}
 
@@ -223,16 +238,13 @@ func (d *DepthStream) record(ctx context.Context) error {
 				unixNs = time.Now().UnixNano()
 			}
 
-			payload := sample.Payload().Bytes()
-			f := encodeFrame(payload)
-
-			n, err := dataFile.Write(f.data)
+			payload := sample.Payload()
+			n, err := dataFile.Write(payload.Bytes())
 			if err != nil {
 				return fmt.Errorf("write data: %w", err)
 			}
 
-			if _, err := fmt.Fprintf(tsFile, "%d,%d,%d,%d,%s,%d,%d,%s\n",
-				unixNs, seq, byteOffset, n, f.method, f.width, f.height, f.encoding); err != nil {
+			if _, err := fmt.Fprintf(tsFile, "%d,%d,%d\n", unixNs, seq, byteOffset); err != nil {
 				return fmt.Errorf("write timestamp: %w", err)
 			}
 
@@ -240,49 +252,7 @@ func (d *DepthStream) record(ctx context.Context) error {
 			seq++
 
 			// Heartbeat tick. Safe if Monitor is nil.
-			d.cfg.Monitor.Tick(HeartbeatName)
+			l.cfg.Monitor.Tick(HeartbeatName)
 		}
-	}
-}
-
-type frame struct {
-	data     []byte
-	method   string // "rvl" (compressed) or "raw" (passthrough)
-	width    uint32
-	height   uint32
-	encoding string
-}
-
-func encodeFrame(payload []byte) frame {
-	img, err := ParseImage(payload)
-	if err != nil {
-		slog.Warn("depth: cannot parse image, storing raw", "err", err)
-		return frame{data: payload, method: "raw"}
-	}
-
-	// Defensive check: if step has row padding (step != width*2), the
-	// DepthPixels reader would misalign rows.  Fall back to raw — the
-	// data is preserved as-is, downstream decoders can handle it.
-	if img.Step != img.Width*2 {
-		slog.Warn("depth: step has padding, storing raw",
-			"step", img.Step, "width_times_2", img.Width*2)
-		return frame{
-			data: payload, method: "raw",
-			width: img.Width, height: img.Height, encoding: img.Encoding,
-		}
-	}
-
-	pixels, err := img.DepthPixels()
-	if err != nil {
-		slog.Warn("depth: not a 16-bit depth frame, storing raw", "err", err, "encoding", img.Encoding)
-		return frame{data: payload, method: "raw", encoding: img.Encoding}
-	}
-
-	return frame{
-		data:     rvl.Encode(pixels),
-		method:   "rvl",
-		width:    img.Width,
-		height:   img.Height,
-		encoding: img.Encoding,
 	}
 }

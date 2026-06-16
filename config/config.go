@@ -9,6 +9,7 @@ import (
 	"om1-telemetry/internal/audio"
 	"om1-telemetry/internal/depth"
 	"om1-telemetry/internal/lidar"
+	"om1-telemetry/internal/lowstate"
 	"om1-telemetry/internal/network"
 	"om1-telemetry/internal/odom"
 	"om1-telemetry/internal/pointcloud"
@@ -25,6 +26,7 @@ type Config struct {
 	PointCloud     PointCloudConfig
 	Depth          DepthConfig
 	Odom           OdomConfig
+	Lowstate       LowstateConfig
 	Network        NetworkConfig
 }
 
@@ -69,6 +71,18 @@ type OdomConfig struct {
 	DataFile       string
 }
 
+// LowstateConfig: catch-all robot state (IMU + joints + battery + foot
+// forces + remote).  Same config & recorder for Go2 and G1 — the message
+// schema differs (unitree_go/LowState vs unitree_hg/LowState) but the
+// recorder stores raw bytes, so it doesn't need to know.  Decode the
+// recorded data offline with the appropriate ROS package.
+type LowstateConfig struct {
+	ZenohEndpoint  string
+	ZenohTopic     string
+	TimestampsFile string
+	DataFile       string
+}
+
 type NetworkConfig struct {
 	PingHost     string
 	PingTimeout  time.Duration
@@ -95,12 +109,21 @@ func Load() Config {
 			OutputFile:     filepath.Join(sessionDir, "audio.ogg"),
 			TimestampsFile: filepath.Join(sessionDir, "audio_timestamps.csv"),
 		},
+		// Lidar (2D scan):  /scan is the 2D laser scan converted from 3D
+		// point cloud by pointcloud_to_laserscan_node.  Smaller than the
+		// 3D cloud (~10 KB vs ~440 KB per scan) but loses height info.
+		// On G1 the converter outputs /scan_raw (cloud_in = utlidar/cloud_livox_mid360).
+		// Override with LIDAR_ZENOH_TOPIC env var (e.g. "rt/scan_raw" on G1)
+		// or set ENABLE_COLLECTION=false on this recorder if you only care
+		// about the 3D point cloud (recorded by the pointcloud recorder).
 		Lidar: LidarConfig{
 			ZenohEndpoint:  envStr("LIDAR_ZENOH_ENDPOINT", "tcp/127.0.0.1:7447"),
 			ZenohTopic:     envStr("LIDAR_ZENOH_TOPIC", "scan"),
 			TimestampsFile: filepath.Join(sessionDir, "lidar_timestamps.csv"),
 			DataFile:       filepath.Join(sessionDir, "lidar_scans.bin"),
 		},
+		// PointCloud (3D):  the main 3D LiDAR data source.  Default is
+		// the G1 Livox Mid-360 topic; on Go2 override to "rt/utlidar/cloud_deskewed".
 		PointCloud: PointCloudConfig{
 			ZenohEndpoint:  envStr("POINTCLOUD_ZENOH_ENDPOINT", "tcp/127.0.0.1:7447"),
 			ZenohTopic:     envStr("POINTCLOUD_ZENOH_TOPIC", "rt/utlidar/cloud_livox_mid360"),
@@ -113,11 +136,26 @@ func Load() Config {
 			TimestampsFile: filepath.Join(sessionDir, "depth_timestamps.csv"),
 			DataFile:       filepath.Join(sessionDir, "depth_frames.bin"),
 		},
+		// Odom:  basic foot-odometry by default ("odom").  Could be
+		// overridden to a higher-quality LIO topic if available:
+		//   Go2: "/lio_sam_ros2/mapping/odometry"
+		//   G1:  "/unitree/slam_mapping/odom"
+		// The /lowstate recording already contains raw IMU, so post-hoc
+		// SLAM-quality odom can be computed offline if needed.
 		Odom: OdomConfig{
 			ZenohEndpoint:  envStr("ODOM_ZENOH_ENDPOINT", "tcp/127.0.0.1:7447"),
 			ZenohTopic:     envStr("ODOM_ZENOH_TOPIC", "odom"),
 			TimestampsFile: filepath.Join(sessionDir, "odom_timestamps.csv"),
 			DataFile:       filepath.Join(sessionDir, "odom_frames.bin"),
+		},
+		// Lowstate:  Same default topic ("rt/lowstate") for Go2 and G1.
+		// The message schema differs internally but the recorder is robot-agnostic
+		// (stores raw bytes).  Measured rates: Go2 ~500 Hz, G1 ~1053 Hz.
+		Lowstate: LowstateConfig{
+			ZenohEndpoint:  envStr("LOWSTATE_ZENOH_ENDPOINT", "tcp/127.0.0.1:7447"),
+			ZenohTopic:     envStr("LOWSTATE_ZENOH_TOPIC", "rt/lowstate"),
+			TimestampsFile: filepath.Join(sessionDir, "lowstate_timestamps.csv"),
+			DataFile:       filepath.Join(sessionDir, "lowstate_frames.bin"),
 		},
 		Network: NetworkConfig{
 			PingHost:     envStr("NET_PING_HOST", "8.8.8.8"),
@@ -128,6 +166,10 @@ func Load() Config {
 	}
 }
 
+// videoConfigs returns the configured video RTSP cameras.  Add another entry
+// (or set its env var) to record additional streams such as Insta360 (set
+// INSTA360_RTSP_URL after confirming the URL via:
+//   ffprobe rtsp://localhost:8554/insta360 ).
 func videoConfigs(sessionDir string) []VideoConfig {
 	cameras := []struct {
 		name       string
@@ -136,6 +178,7 @@ func videoConfigs(sessionDir string) []VideoConfig {
 		{"top_camera", "rtsp://localhost:8554/top_camera_raw"},
 		{"front_camera", "rtsp://localhost:8554/front_camera"},
 		{"down_camera", "rtsp://localhost:8554/down_camera"},
+		// {"insta360", "rtsp://localhost:8554/insta360"},   // uncomment when URL confirmed
 	}
 
 	configs := make([]VideoConfig, 0, len(cameras))
@@ -196,6 +239,15 @@ func (c DepthConfig) DepthStreamConfig() depth.Config {
 
 func (c OdomConfig) OdomStreamConfig() odom.Config {
 	return odom.Config{
+		ZenohEndpoint:  c.ZenohEndpoint,
+		ZenohTopic:     c.ZenohTopic,
+		TimestampsFile: c.TimestampsFile,
+		DataFile:       c.DataFile,
+	}
+}
+
+func (c LowstateConfig) LowstateStreamConfig() lowstate.Config {
+	return lowstate.Config{
 		ZenohEndpoint:  c.ZenohEndpoint,
 		ZenohTopic:     c.ZenohTopic,
 		TimestampsFile: c.TimestampsFile,

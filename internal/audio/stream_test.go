@@ -1,7 +1,10 @@
 package audio
 
 import (
+	"fmt"
+	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -68,4 +71,42 @@ func TestStop_idempotent(t *testing.T) {
 	stream.Start()
 	stream.Stop()
 	stream.Stop() // second call must be a no-op
+}
+
+func TestAppendSegmentEntry_emptyPath_isNoOp(t *testing.T) {
+	err := appendSegmentEntry("", time.Now(), "/data/audio.ogg")
+	require.NoError(t, err)
+}
+
+func TestAppendSegmentEntry_writesHeaderAndEntry(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "audio_timestamps.csv")
+	start := time.Unix(1_000_000_000, 123_456_789)
+	segFile := "/data/audio_20260612T164629_876543210Z.ogg"
+
+	err := appendSegmentEntry(path, start, segFile)
+	require.NoError(t, err)
+
+	data, err := os.ReadFile(path)
+	require.NoError(t, err)
+	content := string(data)
+	require.Contains(t, content, "recording_start_unix_ns,segment_file")
+	require.Contains(t, content, fmt.Sprintf("%d", start.UnixNano()))
+	require.Contains(t, content, filepath.Base(segFile))
+}
+
+func TestAppendSegmentEntry_headerWrittenOnce(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "audio_timestamps.csv")
+	seg1 := "/data/audio_seg1.ogg"
+	seg2 := "/data/audio_seg2.ogg"
+
+	require.NoError(t, appendSegmentEntry(path, time.Unix(1_000_000_000, 0), seg1))
+	require.NoError(t, appendSegmentEntry(path, time.Unix(2_000_000_000, 0), seg2))
+
+	data, err := os.ReadFile(path)
+	require.NoError(t, err)
+	content := string(data)
+
+	require.Equal(t, 1, strings.Count(content, "recording_start_unix_ns"), "header must appear exactly once")
+	require.Contains(t, content, filepath.Base(seg1))
+	require.Contains(t, content, filepath.Base(seg2))
 }

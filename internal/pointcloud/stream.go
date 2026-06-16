@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
-	"os"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -12,14 +11,25 @@ import (
 	"github.com/eclipse-zenoh/zenoh-go/zenoh"
 	"github.com/klauspost/compress/zstd"
 
+	"om1-telemetry/internal/heartbeat"
+	"om1-telemetry/internal/recordutil"
 	"om1-telemetry/internal/zenohutil"
 )
+
+// HeartbeatName is the stream identifier used with heartbeat.Monitor.
+const HeartbeatName = "pointcloud"
+
+const syncInterval = 2 * time.Second
 
 type Config struct {
 	ZenohEndpoint  string
 	ZenohTopic     string
 	TimestampsFile string
 	DataFile       string
+
+	// Monitor is optional; ticks once per stored frame so the
+	// central heartbeat monitor can detect a stuck recorder.
+	Monitor *heartbeat.Monitor
 }
 
 type PointCloudStream struct {
@@ -106,28 +116,50 @@ func (c *PointCloudStream) record(ctx context.Context) error {
 	}
 	defer session.Drop()
 
-	tsFile, err := os.Create(c.cfg.TimestampsFile)
+	// ── P0-1: open files in APPEND mode so reconnects do NOT clobber ──
+	tsResult, err := recordutil.OpenForAppend(c.cfg.TimestampsFile)
 	if err != nil {
-		return fmt.Errorf("create timestamps file: %w", err)
+		return fmt.Errorf("open timestamps file: %w", err)
 	}
+	tsFile := tsResult.File
 	defer func() {
 		if err := tsFile.Close(); err != nil {
 			slog.Error("failed to close timestamps file", "err", err)
 		}
 	}()
 
-	dataFile, err := os.Create(c.cfg.DataFile)
+	dataResult, err := recordutil.OpenForAppend(c.cfg.DataFile)
 	if err != nil {
-		return fmt.Errorf("create data file: %w", err)
+		return fmt.Errorf("open data file: %w", err)
 	}
+	dataFile := dataResult.File
 	defer func() {
 		if err := dataFile.Close(); err != nil {
 			slog.Error("failed to close data file", "err", err)
 		}
 	}()
 
-	if _, err := fmt.Fprintln(tsFile, "unix_ns,seq,byte_offset,byte_length,method"); err != nil {
-		return fmt.Errorf("write header: %w", err)
+	// Only write CSV header on first open (empty file).
+	if tsResult.PrevSize == 0 {
+		if _, err := fmt.Fprintln(tsFile,
+			"unix_ns,seq,byte_offset,byte_length,method"); err != nil {
+			return fmt.Errorf("write header: %w", err)
+		}
+	}
+
+	// Continue counters from where the previous session left off.
+	lastSeq, err := recordutil.ReadLastSeq(c.cfg.TimestampsFile)
+	if err != nil {
+		slog.Warn("could not read last seq; starting from 0", "err", err)
+		lastSeq = -1
+	}
+	seq := lastSeq + 1
+	byteOffset := dataResult.PrevSize
+
+	if dataResult.PrevSize > 0 {
+		slog.Info("pointcloud resuming previous session",
+			"starting_seq", seq,
+			"starting_byte_offset", byteOffset)
 	}
 
 	encoder, err := zstd.NewWriter(nil)
@@ -167,16 +199,31 @@ func (c *PointCloudStream) record(ctx context.Context) error {
 
 	slog.Info("pointcloud recorder started", "topic", c.cfg.ZenohTopic)
 
-	var seq int64
-	var byteOffset int64
 	receiver := subscriber.Handler()
+
+	// ── P0-2: periodic fsync so a crash never loses more than syncInterval ──
+	syncTicker := time.NewTicker(syncInterval)
+	defer syncTicker.Stop()
+
+	flush := func() {
+		if err := dataFile.Sync(); err != nil {
+			slog.Warn("pointcloud data sync failed", "err", err)
+		}
+		if err := tsFile.Sync(); err != nil {
+			slog.Warn("pointcloud ts sync failed", "err", err)
+		}
+	}
 
 	for {
 		select {
 		case <-ctx.Done():
+			flush()
 			return nil
+		case <-syncTicker.C:
+			flush()
 		case sample, ok := <-receiver:
 			if !ok {
+				flush()
 				return fmt.Errorf("subscriber channel closed")
 			}
 
@@ -196,16 +243,25 @@ func (c *PointCloudStream) record(ctx context.Context) error {
 				return fmt.Errorf("write data: %w", err)
 			}
 
-			if _, err := fmt.Fprintf(tsFile, "%d,%d,%d,%d,%s\n", unixNs, seq, byteOffset, n, method); err != nil {
+			if _, err := fmt.Fprintf(tsFile, "%d,%d,%d,%d,%s\n",
+				unixNs, seq, byteOffset, n, method); err != nil {
 				return fmt.Errorf("write timestamp: %w", err)
 			}
 
 			byteOffset += int64(n)
 			seq++
+
+			// Heartbeat tick. Safe if Monitor is nil.
+			c.cfg.Monitor.Tick(HeartbeatName)
 		}
 	}
 }
 
+// encodeFrame zstd-compresses the raw PointCloud2 CDR payload.  If the
+// "compressed" output would actually be LARGER than the input (rare but
+// possible on extremely small/random payloads), the function falls back
+// to storing the raw bytes.  The CSV row's "method" column tells you
+// which path was taken so decoding code knows whether to decompress.
 func encodeFrame(encoder *zstd.Encoder, raw []byte) (data []byte, method string) {
 	compressed := encoder.EncodeAll(raw, make([]byte, 0, len(raw)))
 	if len(compressed) >= len(raw) {
