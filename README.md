@@ -18,8 +18,32 @@ All streams are timestamped and organized into session directories for easy alig
 
 ## Configuration
 
-Configure via environment variables:
+### Robot profile
 
+Set `ROBOT_TYPE` to select a built-in recording profile. The profile decides
+which sensors are recorded and the robot-specific Zenoh topic defaults; it is
+defined in code (`config/profile.go`), so no profile files need to ship with
+the binary.
+
+- `ROBOT_TYPE=go2` — Go2 quadruped: 2D `/scan` lidar enabled, 3D point cloud disabled.
+- `ROBOT_TYPE=g1` — G1 humanoid: 3D point cloud (Livox Mid-360) and 2D `/scan` lidar both enabled.
+
+If `ROBOT_TYPE` is unset or unrecognized, the recorder logs a warning and falls
+back to the default profile (`go2`). The convenience env files set this for you:
+
+```bash
+source env.go2   # ROBOT_TYPE=go2 + deployment overrides
+source env.g1    # ROBOT_TYPE=g1  + deployment overrides
+./bin/om1-telemetry
+```
+
+### Environment variables
+
+Any of the following override the selected profile / defaults:
+
+- `ROBOT_TYPE` - Robot profile to load: `go2` or `g1` (default: `go2`)
+- `ENABLE_LIDAR` - Record the 2D `/scan` lidar (default: from profile)
+- `ENABLE_POINTCLOUD` - Record the 3D point cloud (default: from profile)
 - `ENABLE_COLLECTION` - Enable/disable data collection (default: `true`; set to `false`, `0`, or `no` to disable)
 - `TOP_CAMERA_RTSP_URL` - Top camera stream URL (default: `rtsp://localhost:8554/top_camera_raw`)
 - `FRONT_CAMERA_RTSP_URL` - Front camera stream URL (default: `rtsp://localhost:8554/front_camera`)

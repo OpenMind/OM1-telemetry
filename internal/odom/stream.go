@@ -115,7 +115,7 @@ func (o *OdomStream) record(ctx context.Context) error {
 	}
 	defer session.Drop()
 
-	// open files in APPEND mode so reconnects do NOT wipe data ─────
+	// Open files in APPEND mode so reconnects do NOT wipe data.
 	tsResult, err := recordutil.OpenForAppend(o.cfg.TimestampsFile)
 	if err != nil {
 		return fmt.Errorf("open timestamps file: %w", err)
@@ -234,7 +234,7 @@ func (o *OdomStream) record(ctx context.Context) error {
 			byteOffset += int64(n)
 			seq++
 
-			// Heartbeat tick. Safe if Monitor is nil.
+			// Heartbeat tick: safe if Monitor is nil.
 			o.cfg.Monitor.Tick(HeartbeatName)
 		}
 	}

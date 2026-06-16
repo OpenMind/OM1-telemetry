@@ -67,9 +67,9 @@ func (n *NetworkStream) Stop() {
 func (n *NetworkStream) loop(ctx context.Context) {
 	defer n.wg.Done()
 	for ctx.Err() == nil {
-		// Note: record() returns errors only for disk-write failures,
-		// not for ping failures (those are recorded as reachable=false).
-		// So this loop retries disk errors, not network errors.
+		// record() returns errors only for disk-write failures, not for ping
+		// failures (those are recorded as reachable=false). So this loop
+		// retries disk errors, not network errors.
 		if err := n.record(ctx); err != nil && ctx.Err() == nil {
 			slog.Error("network recorder error; retrying in 2 s", "err", err)
 			select {
@@ -134,7 +134,7 @@ func (n *NetworkStream) record(ctx context.Context) error {
 		}
 		seq++
 
-		// Heartbeat: one tick per recorded sample.  Safe if Monitor is nil.
+		// Heartbeat: one tick per recorded sample. Safe if Monitor is nil.
 		n.cfg.Monitor.Tick(HeartbeatName)
 
 		select {
@@ -151,8 +151,8 @@ type pingResult struct {
 	lossPct   float64
 }
 
-// ping runs a single ping and parses the result.  The binaryWarned pointer
-// is used to log "ping binary missing" only once across the lifetime of the
+// ping runs a single ping and parses the result. The binaryWarned pointer is
+// used to log "ping binary missing" only once across the lifetime of the
 // recorder, rather than every poll interval.
 func (n *NetworkStream) ping(ctx context.Context, binaryWarned *bool) pingResult {
 	timeoutSec := int(n.cfg.PingTimeout.Seconds())

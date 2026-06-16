@@ -116,7 +116,7 @@ func (c *PointCloudStream) record(ctx context.Context) error {
 	}
 	defer session.Drop()
 
-	// ── P0-1: open files in APPEND mode so reconnects do NOT clobber ──
+	// Open files in APPEND mode so reconnects do NOT clobber existing data.
 	tsResult, err := recordutil.OpenForAppend(c.cfg.TimestampsFile)
 	if err != nil {
 		return fmt.Errorf("open timestamps file: %w", err)
@@ -201,7 +201,7 @@ func (c *PointCloudStream) record(ctx context.Context) error {
 
 	receiver := subscriber.Handler()
 
-	// ── P0-2: periodic fsync so a crash never loses more than syncInterval ──
+	// Periodic fsync so a crash never loses more than syncInterval of data.
 	syncTicker := time.NewTicker(syncInterval)
 	defer syncTicker.Stop()
 
@@ -251,17 +251,12 @@ func (c *PointCloudStream) record(ctx context.Context) error {
 			byteOffset += int64(n)
 			seq++
 
-			// Heartbeat tick. Safe if Monitor is nil.
+			// Heartbeat tick: safe if Monitor is nil.
 			c.cfg.Monitor.Tick(HeartbeatName)
 		}
 	}
 }
 
-// encodeFrame zstd-compresses the raw PointCloud2 CDR payload.  If the
-// "compressed" output would actually be LARGER than the input (rare but
-// possible on extremely small/random payloads), the function falls back
-// to storing the raw bytes.  The CSV row's "method" column tells you
-// which path was taken so decoding code knows whether to decompress.
 func encodeFrame(encoder *zstd.Encoder, raw []byte) (data []byte, method string) {
 	compressed := encoder.EncodeAll(raw, make([]byte, 0, len(raw)))
 	if len(compressed) >= len(raw) {

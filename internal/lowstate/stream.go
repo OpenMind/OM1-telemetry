@@ -30,7 +30,7 @@ const HeartbeatName = "lowstate"
 //   Go2 (unitree_go/msg/LowState):  ~500 Hz,  ~2.5 KB / msg = ~1.25 MB/s
 //   G1  (unitree_hg/msg/LowState):  ~1053 Hz, ~2.1 KB / msg = ~2.21 MB/s
 //
-// Daily (8h continuous):  Go2 ~36 GB,  G1 ~62 GB
+// Daily (8h continuous): Go2 ~36 GB, G1 ~62 GB
 
 const syncInterval = 2 * time.Second
 

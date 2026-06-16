@@ -22,8 +22,7 @@ type Config struct {
 	RTSPURL        string
 	OutputFile     string // base path; each segment is a uniquely-named sibling
 	TimestampsFile string // CSV index of all segments
-	FramesFile     string // per-packet timestamps CSV (highly recommended).
-	//                       Audio "frames" are really packets (~1024 samples / packet for AAC/Opus).
+	FramesFile     string // per-packet timestamps CSV (highly recommended)
 
 	Monitor *heartbeat.Monitor
 }
@@ -136,7 +135,6 @@ func (a *AudioRTSPStream) record(ctx context.Context) error {
 			}
 		}(segmentFile, start.UnixNano())
 	}
-	// ──────────────────────────────────────────────────────────────────────
 
 	return waitErr
 }

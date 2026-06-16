@@ -1,12 +1,3 @@
-// Package rvl implements the RVL lossless depth-image codec described in
-// Andrew D. Wilson, "Fast Lossless Depth Image Compression" (ACM ISS 2017).
-//
-// RVL run-length-encodes spans of zero (invalid) depth pixels and
-// variable-length-encodes the zig-zag deltas of the non-zero spans, packing
-// everything into 4-bit nibbles. It is lossless and fast, and it exploits the
-// structure of depth maps (large zero regions, locally smooth values) far
-// better than a general-purpose compressor. Output is always a multiple of 4
-// bytes (the encoder flushes whole 32-bit little-endian words).
 package rvl
 
 import "encoding/binary"

@@ -116,7 +116,7 @@ func (d *DepthStream) record(ctx context.Context) error {
 	}
 	defer session.Drop()
 
-	// open files in APPEND mode so reconnects do NOT wipe data
+	// Open files in APPEND mode so reconnects do NOT wipe data.
 	tsResult, err := recordutil.OpenForAppend(d.cfg.TimestampsFile)
 	if err != nil {
 		return fmt.Errorf("open timestamps file: %w", err)
@@ -261,7 +261,7 @@ func encodeFrame(payload []byte) frame {
 	}
 
 	// Defensive check: if step has row padding (step != width*2), the
-	// DepthPixels reader would misalign rows.  Fall back to raw — the
+	// DepthPixels reader would misalign rows. Fall back to raw — the
 	// data is preserved as-is, downstream decoders can handle it.
 	if img.Step != img.Width*2 {
 		slog.Warn("depth: step has padding, storing raw",

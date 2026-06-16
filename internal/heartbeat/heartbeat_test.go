@@ -74,7 +74,7 @@ func TestCheck_gracePeriod_noWarn(t *testing.T) {
 	mon := NewMonitor(5 * time.Millisecond)
 	mon.Register("camera", 30)
 
-	// call check() immediately — we're within the 2× interval grace period
+	// Call check() immediately — we're within the 2× interval grace period
 	// so the stream should NOT be marked as warned.
 	mon.check()
 

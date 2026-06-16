@@ -233,8 +233,7 @@ func (l *LidarStream) record(ctx context.Context) error {
 			byteOffset += int64(n)
 			seq++
 
-			// ── HEARTBEAT TICK ──
-			// Single line.  Safe if cfg.Monitor is nil (no-op).
+			// Heartbeat tick. Safe if cfg.Monitor is nil (no-op).
 			l.cfg.Monitor.Tick(HeartbeatName)
 		}
 	}

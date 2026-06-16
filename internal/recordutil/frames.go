@@ -12,20 +12,6 @@ import (
 	"sync"
 )
 
-// FrameCSVWriter appends per-frame timestamps (extracted post-hoc via
-// ffprobe) into a master CSV.  One instance per stream (video/audio).
-//
-// CSV schema:
-//
-//	segment_file,frame_idx,pts,pts_time_sec,wallclock_unix_ns
-//
-// Where:
-//   - segment_file       basename of the .mp4 the frame came from
-//   - frame_idx          0-based index within the segment
-//   - pts                raw PTS value (in container time_base units)
-//   - pts_time_sec       PTS in seconds since the segment's first frame
-//   - wallclock_unix_ns  absolute time the frame was captured:
-//                          segment_start_unix_ns + pts_time_sec * 1e9
 type FrameCSVWriter struct {
 	path string
 	mu   sync.Mutex
@@ -35,25 +21,9 @@ func NewFrameCSVWriter(path string) *FrameCSVWriter {
 	return &FrameCSVWriter{path: path}
 }
 
-// ExtractAndAppend runs `ffprobe` on segmentFile to dump per-packet PTS,
-// computes each frame's wallclock unix-ns timestamp using
-// segmentStartUnixNs as the anchor, and appends a row per frame to the
-// master CSV.
-//
-// streamSelector is what ffprobe's -select_streams flag wants:
-//   - "v:0" for the first video stream
-//   - "a:0" for the first audio stream
-//
-// If FrameCSVWriter.path is empty, this is a no-op (frame extraction
-// is opt-in via Config).
-//
-// On any error (ffprobe fails, segment file corrupt, etc.), this
-// returns the error but does NOT crash the caller.  The segment is
-// still in the segments index — only its per-frame CSV is missing,
-// which can be regenerated later by running ffprobe manually.
 func (w *FrameCSVWriter) ExtractAndAppend(segmentFile, streamSelector string, segmentStartUnixNs int64) error {
 	if w == nil || w.path == "" {
-		return nil // disabled
+		return nil
 	}
 
 	cmd := exec.Command("ffprobe",
@@ -99,7 +69,6 @@ func (w *FrameCSVWriter) ExtractAndAppend(segmentFile, streamSelector string, se
 		if line == "" {
 			continue
 		}
-		// Each line: "<pts>,<pts_time>"
 		parts := strings.SplitN(line, ",", 2)
 		if len(parts) != 2 {
 			continue
@@ -107,7 +76,6 @@ func (w *FrameCSVWriter) ExtractAndAppend(segmentFile, streamSelector string, se
 		ptsStr := strings.TrimSpace(parts[0])
 		ptsTimeStr := strings.TrimSpace(parts[1])
 
-		// pts_time may be "N/A" for some malformed packets; skip those.
 		if ptsTimeStr == "" || ptsTimeStr == "N/A" {
 			frameIdx++
 			continue

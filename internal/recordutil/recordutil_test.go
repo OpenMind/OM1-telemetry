@@ -11,8 +11,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// ── OpenForAppend ──────────────────────────────────────────────────────────
-
 func TestOpenForAppend_createsNewFile(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "data.csv")
 
@@ -64,8 +62,6 @@ func TestOpenForAppend_createsMissingDirectories(t *testing.T) {
 	_, err = os.Stat(filepath.Dir(path))
 	require.NoError(t, err, "parent directories must be created")
 }
-
-// ── ReadLastSeq ────────────────────────────────────────────────────────────
 
 func TestReadLastSeq_nonExistentFile(t *testing.T) {
 	seq, err := ReadLastSeq("/nonexistent/path/timestamps.csv")
@@ -120,8 +116,6 @@ func TestReadLastSeq_skipsBlankLines(t *testing.T) {
 	require.Equal(t, int64(5), seq)
 }
 
-// ── UniqueSegmentFile ──────────────────────────────────────────────────────
-
 func TestUniqueSegmentFile_insertsTimestampBeforeExtension(t *testing.T) {
 	base := "/data/top_camera.mp4"
 	ts := time.Date(2026, 6, 12, 16, 46, 29, 876543210, time.UTC)
@@ -146,8 +140,6 @@ func TestUniqueSegmentFile_differentTimesProduceDifferentNames(t *testing.T) {
 
 	require.NotEqual(t, UniqueSegmentFile(base, t1), UniqueSegmentFile(base, t2))
 }
-
-// ── FrameCSVWriter ─────────────────────────────────────────────────────────
 
 func TestNewFrameCSVWriter_emptyPath(t *testing.T) {
 	w := NewFrameCSVWriter("")

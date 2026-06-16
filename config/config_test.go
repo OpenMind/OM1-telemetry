@@ -13,6 +13,7 @@ func TestLoad_defaults(t *testing.T) {
 	for _, key := range []string{"RECORDINGS_DIR", "TOP_CAMERA_RTSP_URL", "FRONT_CAMERA_RTSP_URL", "DOWN_CAMERA_RTSP_URL", "AUDIO_RTSP_URL", "POINTCLOUD_ZENOH_ENDPOINT", "POINTCLOUD_ZENOH_TOPIC"} {
 		t.Setenv(key, "")
 	}
+	t.Setenv("ROBOT_TYPE", string(RobotG1))
 
 	cfg := Load()
 

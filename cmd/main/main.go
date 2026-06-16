@@ -22,18 +22,6 @@ import (
 	"om1-telemetry/internal/video"
 )
 
-// envBool reads a boolean env var.  Defaults true if unset.
-// Accepts: false/0/no → false; true/1/yes (or unset) → true.
-func envBool(key string, defaultValue bool) bool {
-	switch os.Getenv(key) {
-	case "false", "0", "no":
-		return false
-	case "true", "1", "yes":
-		return true
-	}
-	return defaultValue
-}
-
 func main() {
 	cfg := config.Load()
 
@@ -62,25 +50,11 @@ func main() {
 		os.Exit(1)
 	}
 
-	// ── PER-ROBOT RECORDER SELECTION ─────────────────────────────────────
-	// Go2 typically wants /scan (2D) recorded; the 3D pointcloud topic
-	// "cloud_livox_mid360" doesn't exist on Go2 anyway.
-	// G1 typically wants the 3D Livox Mid-360 point cloud; /scan exists but
-	// is less informative than the 3D source.
-	//
-	// Set in env.go2:  ENABLE_LIDAR=true   ENABLE_POINTCLOUD=false
-	// Set in env.g1:   ENABLE_LIDAR=false  ENABLE_POINTCLOUD=true
-	enableLidar := envBool("ENABLE_LIDAR", true)
-	enablePointcloud := envBool("ENABLE_POINTCLOUD", true)
-	// ─────────────────────────────────────────────────────────────────────
+	enableLidar := cfg.EnableLidar
+	enablePointcloud := cfg.EnablePointCloud
 
-	// ── HEARTBEAT MONITOR ────────────────────────────────────────────────
-	// SILENT during normal operation; warns once when a stream stops
-	// receiving or its rate falls below half of expected.
 	mon := heartbeat.NewMonitor(30 * time.Second)
 
-	// Register only the recorders that will actually run, so disabled ones
-	// don't generate spurious "never received any message" warnings.
 	if enableLidar {
 		mon.Register(lidar.HeartbeatName, 10) // ~10 Hz nominal
 	}
@@ -93,7 +67,6 @@ func main() {
 	mon.Register(network.HeartbeatName, 0)    // 0 = liveness check only
 	mon.Register(audio.HeartbeatName, 0)      // 0 = liveness check only
 
-	// Video has multiple cameras; give each a unique heartbeat name.
 	videoHeartbeatNames := make([]string, len(cfg.Video))
 	for i, vc := range cfg.Video {
 		videoHeartbeatNames[i] = "video_" + vc.Name
@@ -102,9 +75,7 @@ func main() {
 
 	hbCtx, hbCancel := context.WithCancel(context.Background())
 	go mon.Run(hbCtx)
-	// ─────────────────────────────────────────────────────────────────────
 
-	// Build each video recorder with its unique heartbeat name.
 	videoStreams := make([]*video.VideoRTSPStream, 0, len(cfg.Video))
 	for i, vc := range cfg.Video {
 		vcfg := vc.VideoStreamConfig()
@@ -118,7 +89,6 @@ func main() {
 		videoStreams = append(videoStreams, video.New(vcfg))
 	}
 
-	// Audio: attach monitor and ensure frames CSV path is set.
 	audioCfg := cfg.Audio.AudioStreamConfig()
 	audioCfg.Monitor = mon
 	if audioCfg.FramesFile == "" {
@@ -128,8 +98,6 @@ func main() {
 	}
 	audioStream := audio.New(audioCfg)
 
-	// ── ZENOH RECORDERS ──────────────────────────────────────────────────
-	// Lidar and Pointcloud are conditionally created based on env vars.
 	var lidarStream *lidar.LidarStream
 	if enableLidar {
 		lidarCfg := cfg.Lidar.LidarStreamConfig()
@@ -160,7 +128,6 @@ func main() {
 	networkCfg.Monitor = mon
 	networkStream := network.New(networkCfg)
 
-	// Start every recorder (nil-safe for the conditional ones).
 	for _, vs := range videoStreams {
 		vs.Start()
 	}
@@ -183,6 +150,7 @@ func main() {
 
 	slog.Info("recording started",
 		"session", cfg.SessionDir,
+		"robot-type", cfg.RobotType,
 		"video-cameras", videoURLs,
 		"audio-url", cfg.Audio.RTSPURL,
 		"lidar-enabled", enableLidar,
@@ -203,8 +171,6 @@ func main() {
 
 	slog.Info("shutting down…")
 
-	// Stop the heartbeat monitor BEFORE recorders so it doesn't warn
-	// "stopped receiving" during shutdown.
 	hbCancel()
 
 	for _, vs := range videoStreams {
