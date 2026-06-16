@@ -14,12 +14,8 @@ import (
 	"om1-telemetry/internal/recordutil"
 )
 
-// HeartbeatName is the stream identifier used with heartbeat.Monitor.
 const HeartbeatName = "audio"
 
-// heartbeatInterval is how often the recorder ticks the heartbeat
-// monitor WHILE ffmpeg is alive.  Same rationale as video — we can't
-// tick per-frame because ffmpeg owns the audio processing.
 const heartbeatInterval = 5 * time.Second
 
 type Config struct {
@@ -29,9 +25,6 @@ type Config struct {
 	FramesFile     string // per-packet timestamps CSV (highly recommended).
 	//                       Audio "frames" are really packets (~1024 samples / packet for AAC/Opus).
 
-	// Monitor is optional; if non-nil, ticks every heartbeatInterval
-	// while ffmpeg is running so the central heartbeat monitor can
-	// detect when RTSP source is broken and ffmpeg can't connect.
 	Monitor *heartbeat.Monitor
 }
 
@@ -109,7 +102,6 @@ func (a *AudioRTSPStream) record(ctx context.Context) error {
 	}
 	slog.Info("audio segment started", "file", segmentFile)
 
-	// ── HEARTBEAT: tick periodically while ffmpeg is alive ──────────────
 	hbStop := make(chan struct{})
 	hbDone := make(chan struct{})
 	go func() {
@@ -127,13 +119,11 @@ func (a *AudioRTSPStream) record(ctx context.Context) error {
 			}
 		}
 	}()
-	// ─────────────────────────────────────────────────────────────────────
 
 	waitErr := cmd.Wait()
 	close(hbStop)
 	<-hbDone
 
-	// ── P0-3: extract per-packet timestamps via ffprobe ──────────────────
 	if a.cfg.FramesFile != "" {
 		a.pending.Add(1)
 		go func(segFile string, startUnixNs int64) {

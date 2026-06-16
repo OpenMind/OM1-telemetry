@@ -80,3 +80,34 @@ func TestParsePing_emptyOutput(t *testing.T) {
 	require.False(t, res.reachable)
 	require.InDelta(t, 100, res.lossPct, 0.001)
 }
+
+func TestParsePing_macOSFormat(t *testing.T) {
+	// macOS ping uses "round-trip" instead of "rtt" and a slightly different layout.
+	out := `PING 8.8.8.8 (8.8.8.8): 56 data bytes
+64 bytes from 8.8.8.8: icmp_seq=0 ttl=116 time=11.234 ms
+
+--- 8.8.8.8 ping statistics ---
+1 packets transmitted, 1 packets received, 0.0% packet loss
+round-trip min/avg/max/stddev = 11.234/11.234/11.234/0.000 ms`
+
+	res := parsePing(out)
+	require.True(t, res.reachable)
+	require.InDelta(t, 11.234, res.rttMs, 0.001)
+	require.InDelta(t, 0, res.lossPct, 0.01)
+}
+
+func TestStop_idempotent(t *testing.T) {
+	stream := New(testConfig(t))
+	stream.Start()
+	stream.Stop()
+	stream.Stop() // second call must be a no-op
+}
+
+func TestFormatFloat_validValue(t *testing.T) {
+	require.Equal(t, "12.345", formatFloat(12.345, true))
+	require.Equal(t, "0.000", formatFloat(0, true))
+}
+
+func TestFormatFloat_invalidValue(t *testing.T) {
+	require.Equal(t, "", formatFloat(99.9, false), "invalid flag must return empty string")
+}
