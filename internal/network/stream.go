@@ -4,14 +4,19 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
-	"os"
 	"os/exec"
 	"regexp"
 	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"om1-telemetry/internal/heartbeat"
+	"om1-telemetry/internal/recordutil"
 )
+
+// HeartbeatName is the stream identifier for the heartbeat monitor.
+const HeartbeatName = "network"
 
 type Config struct {
 	PingHost    string
@@ -20,6 +25,10 @@ type Config struct {
 	PollInterval time.Duration
 
 	DataFile string
+
+	// Monitor is optional; if non-nil, ticks once per successful sample
+	// write so heartbeat.Monitor can detect when this recorder dies.
+	Monitor *heartbeat.Monitor
 }
 
 type NetworkStream struct {
@@ -58,8 +67,11 @@ func (n *NetworkStream) Stop() {
 func (n *NetworkStream) loop(ctx context.Context) {
 	defer n.wg.Done()
 	for ctx.Err() == nil {
+		// Note: record() returns errors only for disk-write failures,
+		// not for ping failures (those are recorded as reachable=false).
+		// So this loop retries disk errors, not network errors.
 		if err := n.record(ctx); err != nil && ctx.Err() == nil {
-			slog.Error("network recorder error; reconnecting in 2 s", "err", err)
+			slog.Error("network recorder error; retrying in 2 s", "err", err)
 			select {
 			case <-ctx.Done():
 			case <-time.After(2 * time.Second):
@@ -69,18 +81,31 @@ func (n *NetworkStream) loop(ctx context.Context) {
 }
 
 func (n *NetworkStream) record(ctx context.Context) error {
-	dataFile, err := os.Create(n.cfg.DataFile)
+	result, err := recordutil.OpenForAppend(n.cfg.DataFile)
 	if err != nil {
-		return fmt.Errorf("create data file: %w", err)
+		return fmt.Errorf("open data file: %w", err)
 	}
+	dataFile := result.File
 	defer func() {
 		if err := dataFile.Close(); err != nil {
 			slog.Error("failed to close data file", "err", err)
 		}
 	}()
 
-	if _, err := fmt.Fprintln(dataFile, "unix_ns,seq,reachable,rtt_ms,packet_loss_pct"); err != nil {
-		return fmt.Errorf("write header: %w", err)
+	if result.PrevSize == 0 {
+		if _, err := fmt.Fprintln(dataFile, "unix_ns,seq,reachable,rtt_ms,packet_loss_pct"); err != nil {
+			return fmt.Errorf("write header: %w", err)
+		}
+	}
+
+	lastSeq, err := recordutil.ReadLastSeq(n.cfg.DataFile)
+	if err != nil {
+		slog.Warn("could not read last seq; starting from 0", "err", err)
+		lastSeq = -1
+	}
+	seq := lastSeq + 1
+	if result.PrevSize > 0 {
+		slog.Info("network resuming previous session", "starting_seq", seq)
 	}
 
 	slog.Info("network recorder started", "host", n.cfg.PingHost, "interval", n.cfg.PollInterval)
@@ -88,9 +113,12 @@ func (n *NetworkStream) record(ctx context.Context) error {
 	ticker := time.NewTicker(n.cfg.PollInterval)
 	defer ticker.Stop()
 
-	var seq int64
+	// Track whether we've already warned about a broken ping binary so we
+	// don't spam the log every poll interval.
+	pingBinaryWarned := false
+
 	for {
-		sample := n.ping(ctx)
+		sample := n.ping(ctx, &pingBinaryWarned)
 		if ctx.Err() != nil {
 			return nil
 		}
@@ -106,6 +134,9 @@ func (n *NetworkStream) record(ctx context.Context) error {
 		}
 		seq++
 
+		// Heartbeat: one tick per recorded sample.  Safe if Monitor is nil.
+		n.cfg.Monitor.Tick(HeartbeatName)
+
 		select {
 		case <-ctx.Done():
 			return nil
@@ -120,13 +151,34 @@ type pingResult struct {
 	lossPct   float64
 }
 
-func (n *NetworkStream) ping(ctx context.Context) pingResult {
+// ping runs a single ping and parses the result.  The binaryWarned pointer
+// is used to log "ping binary missing" only once across the lifetime of the
+// recorder, rather than every poll interval.
+func (n *NetworkStream) ping(ctx context.Context, binaryWarned *bool) pingResult {
 	timeoutSec := int(n.cfg.PingTimeout.Seconds())
 	if timeoutSec < 1 {
 		timeoutSec = 1
 	}
 	cmd := exec.CommandContext(ctx, "ping", "-c", "1", "-W", strconv.Itoa(timeoutSec), n.cfg.PingHost)
-	out, _ := cmd.Output()
+	out, err := cmd.Output()
+	if err != nil {
+		// `ping` exiting non-zero (e.g., host unreachable) returns
+		// *exec.ExitError — that's normal, we still want to parse output.
+		// Anything else (binary missing, permission denied, etc.) is an
+		// environment problem and we should surface it once.
+		if _, isExit := err.(*exec.ExitError); !isExit {
+			if !*binaryWarned {
+				slog.Warn("network: ping command failed for non-exit reason "+
+					"(check that `ping` is installed and PATH is correct)",
+					"err", err, "host", n.cfg.PingHost)
+				*binaryWarned = true
+			}
+		}
+	} else if *binaryWarned {
+		// We previously warned about a broken ping; it's working now.
+		slog.Info("network: ping command working again")
+		*binaryWarned = false
+	}
 	return parsePing(string(out))
 }
 

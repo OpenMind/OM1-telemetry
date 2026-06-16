@@ -4,21 +4,31 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
-	"os"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/eclipse-zenoh/zenoh-go/zenoh"
 
+	"om1-telemetry/internal/heartbeat"
+	"om1-telemetry/internal/recordutil"
 	"om1-telemetry/internal/zenohutil"
 )
+
+// HeartbeatName is the stream identifier used with heartbeat.Monitor.
+const HeartbeatName = "odom"
+
+const syncInterval = 2 * time.Second
 
 type Config struct {
 	ZenohEndpoint  string
 	ZenohTopic     string
 	TimestampsFile string
 	DataFile       string
+
+	// Monitor is optional; ticks once per message so the central
+	// heartbeat monitor can detect a stuck recorder.
+	Monitor *heartbeat.Monitor
 }
 
 type OdomStream struct {
@@ -105,28 +115,47 @@ func (o *OdomStream) record(ctx context.Context) error {
 	}
 	defer session.Drop()
 
-	tsFile, err := os.Create(o.cfg.TimestampsFile)
+	// open files in APPEND mode so reconnects do NOT wipe data ─────
+	tsResult, err := recordutil.OpenForAppend(o.cfg.TimestampsFile)
 	if err != nil {
-		return fmt.Errorf("create timestamps file: %w", err)
+		return fmt.Errorf("open timestamps file: %w", err)
 	}
+	tsFile := tsResult.File
 	defer func() {
 		if err := tsFile.Close(); err != nil {
 			slog.Error("failed to close timestamps file", "err", err)
 		}
 	}()
 
-	dataFile, err := os.Create(o.cfg.DataFile)
+	dataResult, err := recordutil.OpenForAppend(o.cfg.DataFile)
 	if err != nil {
-		return fmt.Errorf("create data file: %w", err)
+		return fmt.Errorf("open data file: %w", err)
 	}
+	dataFile := dataResult.File
 	defer func() {
 		if err := dataFile.Close(); err != nil {
 			slog.Error("failed to close data file", "err", err)
 		}
 	}()
 
-	if _, err := fmt.Fprintln(tsFile, "unix_ns,seq,byte_offset"); err != nil {
-		return fmt.Errorf("write header: %w", err)
+	if tsResult.PrevSize == 0 {
+		if _, err := fmt.Fprintln(tsFile, "unix_ns,seq,byte_offset"); err != nil {
+			return fmt.Errorf("write header: %w", err)
+		}
+	}
+
+	lastSeq, err := recordutil.ReadLastSeq(o.cfg.TimestampsFile)
+	if err != nil {
+		slog.Warn("could not read last seq; starting from 0", "err", err)
+		lastSeq = -1
+	}
+	seq := lastSeq + 1
+	byteOffset := dataResult.PrevSize
+
+	if dataResult.PrevSize > 0 {
+		slog.Info("odom resuming previous session",
+			"starting_seq", seq,
+			"starting_byte_offset", byteOffset)
 	}
 
 	keyExpr, err := zenoh.NewKeyExpr(o.cfg.ZenohTopic)
@@ -156,16 +185,30 @@ func (o *OdomStream) record(ctx context.Context) error {
 
 	slog.Info("odom recorder started", "topic", o.cfg.ZenohTopic)
 
-	var seq int64
-	var byteOffset int64
 	receiver := subscriber.Handler()
+
+	syncTicker := time.NewTicker(syncInterval)
+	defer syncTicker.Stop()
+
+	flush := func() {
+		if err := dataFile.Sync(); err != nil {
+			slog.Warn("odom data sync failed", "err", err)
+		}
+		if err := tsFile.Sync(); err != nil {
+			slog.Warn("odom ts sync failed", "err", err)
+		}
+	}
 
 	for {
 		select {
 		case <-ctx.Done():
+			flush()
 			return nil
+		case <-syncTicker.C:
+			flush()
 		case sample, ok := <-receiver:
 			if !ok {
+				flush()
 				return fmt.Errorf("subscriber channel closed")
 			}
 
@@ -190,6 +233,9 @@ func (o *OdomStream) record(ctx context.Context) error {
 
 			byteOffset += int64(n)
 			seq++
+
+			// Heartbeat tick. Safe if Monitor is nil.
+			o.cfg.Monitor.Tick(HeartbeatName)
 		}
 	}
 }
