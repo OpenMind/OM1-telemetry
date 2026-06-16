@@ -14,19 +14,8 @@ import (
 	"om1-telemetry/internal/recordutil"
 )
 
-// HeartbeatName is the stream identifier used with heartbeat.Monitor.
-// Note: with multiple video cameras, you'll have multiple "video"
-// streams.  See the comment in main.go on how to name them
-// individually (e.g. "video_top", "video_front", "video_down").
 const HeartbeatName = "video"
 
-// heartbeatInterval is how often the recorder ticks the heartbeat
-// monitor WHILE ffmpeg is alive.  We can't use per-frame ticks here
-// because ffmpeg owns the frame processing — we only see segment
-// start/end events in our Go code.  So we tick at a steady cadence
-// while ffmpeg's PID exists, which means:
-//   - If RTSP source dies and ffmpeg keeps dying → ticks stop → WARN
-//   - If RTSP source works and ffmpeg runs for hours → ticks continue → silent
 const heartbeatInterval = 5 * time.Second
 
 type Config struct {
@@ -35,15 +24,8 @@ type Config struct {
 	TimestampsFile string // CSV index of all segments
 	FramesFile     string // per-frame timestamps CSV (highly recommended).
 
-	// Monitor is optional; if non-nil, ticks every heartbeatInterval
-	// while ffmpeg is running so the central heartbeat monitor can
-	// detect when RTSP source is broken and ffmpeg can't connect.
 	Monitor *heartbeat.Monitor
 
-	// HeartbeatName overrides the default "video" tag.  Use a unique
-	// name per camera (e.g. "video_top") so the monitor can identify
-	// which camera is broken when multiple are running.  Defaults to
-	// HeartbeatName ("video") if empty.
 	HeartbeatName string
 }
 
@@ -53,12 +35,8 @@ type VideoRTSPStream struct {
 	cancel      context.CancelFunc
 	done        chan struct{}
 	framesWrite *recordutil.FrameCSVWriter
-
-	// pending tracks per-frame extraction goroutines so Stop() can wait
-	// for them before returning (otherwise the last segment's frames
-	// might never be appended).
-	pending atomic.Int64
-	allDone chan struct{}
+	pending     atomic.Int64
+	allDone     chan struct{}
 }
 
 func New(cfg Config) *VideoRTSPStream {
@@ -135,11 +113,6 @@ func (v *VideoRTSPStream) record(ctx context.Context) error {
 	}
 	slog.Info("video segment started", "camera", v.cfg.HeartbeatName, "file", segmentFile)
 
-	// ── HEARTBEAT: tick periodically while ffmpeg is alive ──────────────
-	// We launch a goroutine that ticks every heartbeatInterval and exits
-	// when ffmpeg does (signalled via hbStop).  This way the monitor sees
-	// steady ticks while the recorder is healthy, and silence when ffmpeg
-	// can't connect / keeps dying.
 	hbStop := make(chan struct{})
 	hbDone := make(chan struct{})
 	go func() {
@@ -157,18 +130,11 @@ func (v *VideoRTSPStream) record(ctx context.Context) error {
 			}
 		}
 	}()
-	// ─────────────────────────────────────────────────────────────────────
 
 	waitErr := cmd.Wait()
 	close(hbStop)
 	<-hbDone
 
-	// ── P0-3: extract per-frame timestamps via ffprobe ───────────────────
-	// We do this AFTER ffmpeg exits (segment is closed and complete) and
-	// in a goroutine so it doesn't block the next reconnect attempt.
-	//
-	// Each frame's absolute time:
-	//   wallclock_unix_ns = start.UnixNano() + frame_pts_time * 1e9
 	if v.cfg.FramesFile != "" {
 		v.pending.Add(1)
 		go func(segFile string, startUnixNs int64) {
@@ -182,7 +148,6 @@ func (v *VideoRTSPStream) record(ctx context.Context) error {
 			}
 		}(segmentFile, start.UnixNano())
 	}
-	// ──────────────────────────────────────────────────────────────────────
 
 	return waitErr
 }
@@ -205,9 +170,6 @@ func (v *VideoRTSPStream) waitForPending() {
 	}
 }
 
-// appendSegmentEntry appends a row to the segments index CSV.
-//
-//	recording_start_unix_ns,segment_file
 func appendSegmentEntry(path string, start time.Time, segmentFile string) error {
 	if path == "" {
 		return nil
