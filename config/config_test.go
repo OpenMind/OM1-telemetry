@@ -19,10 +19,10 @@ func TestLoad_defaults(t *testing.T) {
 
 	require.Len(t, cfg.Video, 3, "expected 3 cameras")
 	require.Equal(t, "top_camera", cfg.Video[0].Name, "unexpected first camera name")
-	require.Equal(t, "rtsp://localhost:8554/top_camera_raw", cfg.Video[0].RTSPURL, "unexpected top camera RTSP URL")
+	require.Equal(t, "rtsp://localhost:8556/raw", cfg.Video[0].RTSPURL, "unexpected top camera RTSP URL")
 	require.Equal(t, "rtsp://localhost:8554/front_camera", cfg.Video[1].RTSPURL, "unexpected front camera RTSP URL")
 	require.Equal(t, "rtsp://localhost:8554/down_camera", cfg.Video[2].RTSPURL, "unexpected down camera RTSP URL")
-	require.Equal(t, "rtsp://localhost:8554/audio", cfg.Audio.RTSPURL, "unexpected audio RTSP URL")
+	require.Equal(t, "rtsp://localhost:8555/live", cfg.Audio.RTSPURL, "unexpected audio RTSP URL")
 	require.Equal(t, "tcp/127.0.0.1:7447", cfg.Lidar.ZenohEndpoint, "unexpected lidar zenoh endpoint")
 	require.Equal(t, "scan", cfg.Lidar.ZenohTopic, "unexpected lidar zenoh topic")
 	require.Equal(t, "tcp/127.0.0.1:7447", cfg.PointCloud.ZenohEndpoint, "unexpected point cloud zenoh endpoint")
