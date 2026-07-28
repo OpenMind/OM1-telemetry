@@ -160,13 +160,13 @@ func (s *FeatureStream) openOutputs() error {
 	}
 	ts, err := os.OpenFile(s.cfg.TimestampsFile, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
 	if err != nil {
-		out.Close()
+		_ = out.Close()
 		return fmt.Errorf("open timestamps: %w", err)
 	}
 	if st, err := ts.Stat(); err == nil && st.Size() == 0 {
 		if _, err := fmt.Fprintln(ts, "unix_ns,t_capture_ns,type,seq"); err != nil {
-			out.Close()
-			ts.Close()
+			_ = out.Close()
+			_ = ts.Close()
 			return fmt.Errorf("write csv header: %w", err)
 		}
 	}
@@ -177,12 +177,20 @@ func (s *FeatureStream) openOutputs() error {
 
 func (s *FeatureStream) closeOutputs() {
 	if s.out != nil {
-		s.out.Sync()
-		s.out.Close()
+		if err := s.out.Sync(); err != nil {
+			slog.Warn("features: output sync failed", "err", err)
+		}
+		if err := s.out.Close(); err != nil {
+			slog.Warn("features: output close failed", "err", err)
+		}
 	}
 	if s.ts != nil {
-		s.ts.Sync()
-		s.ts.Close()
+		if err := s.ts.Sync(); err != nil {
+			slog.Warn("features: timestamps sync failed", "err", err)
+		}
+		if err := s.ts.Close(); err != nil {
+			slog.Warn("features: timestamps close failed", "err", err)
+		}
 	}
 }
 
@@ -198,7 +206,7 @@ func (s *FeatureStream) poll(loggedMissing *bool) {
 		}
 		return
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 	if *loggedMissing {
 		slog.Info("features: source available", "path", s.cfg.SourcePath)
 		*loggedMissing = false

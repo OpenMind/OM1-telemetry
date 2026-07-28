@@ -165,7 +165,7 @@ func appendSegmentEntry(path string, start time.Time, segmentFile string) error 
 	if err != nil {
 		return fmt.Errorf("open: %w", err)
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 
 	stat, err := f.Stat()
 	if err != nil {

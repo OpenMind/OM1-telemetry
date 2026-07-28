@@ -45,7 +45,7 @@ func (w *FrameCSVWriter) ExtractAndAppend(segmentFile, streamSelector string, se
 	if err != nil {
 		return fmt.Errorf("open frames csv: %w", err)
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 
 	stat, err := f.Stat()
 	if err != nil {

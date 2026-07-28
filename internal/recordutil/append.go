@@ -45,7 +45,7 @@ func ReadLastSeq(path string) (int64, error) {
 		}
 		return -1, fmt.Errorf("open %s: %w", path, err)
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 
 	scanner := bufio.NewScanner(f)
 	scanner.Buffer(make([]byte, 1<<20), 16<<20)

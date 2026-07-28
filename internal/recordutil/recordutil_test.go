@@ -17,7 +17,7 @@ func TestOpenForAppend_createsNewFile(t *testing.T) {
 	result, err := OpenForAppend(path)
 	require.NoError(t, err)
 	require.NotNil(t, result)
-	result.File.Close()
+	require.NoError(t, result.File.Close())
 
 	require.Zero(t, result.PrevSize, "new file must report PrevSize 0")
 	_, err = os.Stat(path)
@@ -31,7 +31,7 @@ func TestOpenForAppend_prevSizeReflectsExistingContent(t *testing.T) {
 
 	result, err := OpenForAppend(path)
 	require.NoError(t, err)
-	result.File.Close()
+	require.NoError(t, result.File.Close())
 
 	require.Equal(t, int64(len(content)), result.PrevSize)
 }
@@ -45,7 +45,7 @@ func TestOpenForAppend_appendsWithoutTruncating(t *testing.T) {
 
 	_, err = fmt.Fprintln(result.File, "line2")
 	require.NoError(t, err)
-	result.File.Close()
+	require.NoError(t, result.File.Close())
 
 	data, err := os.ReadFile(path)
 	require.NoError(t, err)
@@ -57,7 +57,7 @@ func TestOpenForAppend_createsMissingDirectories(t *testing.T) {
 
 	result, err := OpenForAppend(path)
 	require.NoError(t, err)
-	result.File.Close()
+	require.NoError(t, result.File.Close())
 
 	_, err = os.Stat(filepath.Dir(path))
 	require.NoError(t, err, "parent directories must be created")
