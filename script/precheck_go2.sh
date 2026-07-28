@@ -122,10 +122,10 @@ check_rtsp() {
     fi
 }
 
-check_rtsp "rtsp://localhost:8554/top_camera_raw"   "video top_camera"
+check_rtsp "rtsp://localhost:8556/raw"              "video top_camera (video-processor /raw)"
 check_rtsp "rtsp://localhost:8554/front_camera"     "video front_camera"
 check_rtsp "rtsp://localhost:8554/down_camera"      "video down_camera"
-check_rtsp "rtsp://localhost:8554/audio"            "audio"
+check_rtsp "rtsp://localhost:8555/live"             "audio (video-processor /live)"
 
 
 hdr "Calibration / latched topics (dump once per session for sensor fusion)"

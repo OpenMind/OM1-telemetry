@@ -8,6 +8,7 @@ import (
 
 	"om1-telemetry/internal/audio"
 	"om1-telemetry/internal/depth"
+	"om1-telemetry/internal/features"
 	"om1-telemetry/internal/lidar"
 	"om1-telemetry/internal/lowstate"
 	"om1-telemetry/internal/network"
@@ -25,6 +26,7 @@ type Config struct {
 	SessionStartNs   int64
 	Video            []VideoConfig
 	Audio            AudioConfig
+	Features         FeaturesConfig
 	Lidar            LidarConfig
 	PointCloud       PointCloudConfig
 	Depth            DepthConfig
@@ -44,6 +46,16 @@ type AudioConfig struct {
 	RTSPURL        string
 	OutputFile     string
 	TimestampsFile string
+}
+
+// FeaturesConfig configures ingestion of the video-processor's feature-event
+// log (capture-time-stamped, video-derived events). Disabled when SourcePath
+// is empty.
+type FeaturesConfig struct {
+	SourcePath     string
+	OutputFile     string
+	TimestampsFile string
+	TimebaseFile   string
 }
 
 type LidarConfig struct {
@@ -108,9 +120,22 @@ func Load() Config {
 		SessionStartNs:   now.UnixNano(),
 		Video:            videoConfigs(sessionDir),
 		Audio: AudioConfig{
-			RTSPURL:        envStr("AUDIO_RTSP_URL", "rtsp://localhost:8554/audio"),
+			// Audio is the audio track of the video-processor's muxed session
+			// stream (single capture clock). ffmpeg selects it with -vn. Served
+			// gst-direct on :8555 for the lowest-latency, capture-stamped source;
+			// override to mediamtx (rtsp://localhost:8554/live) for an off-host
+			// recorder.
+			RTSPURL:        envStr("AUDIO_RTSP_URL", "rtsp://localhost:8555/live"),
 			OutputFile:     filepath.Join(sessionDir, "audio.ogg"),
 			TimestampsFile: filepath.Join(sessionDir, "audio_timestamps.csv"),
+		},
+		Features: FeaturesConfig{
+			// Path to the video-processor's feature-log JSONL on a shared
+			// volume. Empty (default) disables ingestion.
+			SourcePath:     envStr("VIDEO_FEATURES_LOG", ""),
+			OutputFile:     filepath.Join(sessionDir, "video_features.jsonl"),
+			TimestampsFile: filepath.Join(sessionDir, "video_features_timestamps.csv"),
+			TimebaseFile:   filepath.Join(sessionDir, "video_features_timebase.json"),
 		},
 		Lidar: LidarConfig{
 			ZenohEndpoint:  envStr("LIDAR_ZENOH_ENDPOINT", "tcp/127.0.0.1:7447"),
@@ -156,7 +181,14 @@ func videoConfigs(sessionDir string) []VideoConfig {
 		name       string
 		defaultURL string
 	}{
-		{"top_camera", "rtsp://localhost:8554/top_camera_raw"},
+		// top_camera is served by the OM1 video-processor's GStreamer pipeline.
+		// /raw is the clean (no overlay/blur) camera view — the ground-truth
+		// image a recorder wants — on gst-direct :8556. Use :8555/live instead
+		// to record the processed view, or mediamtx :8554/raw for an off-host
+		// recorder.
+		{"top_camera", "rtsp://localhost:8556/raw"},
+		// front/down cameras are served by other sources on the robot; left on
+		// their existing mountpoints.
 		{"front_camera", "rtsp://localhost:8554/front_camera"},
 		{"down_camera", "rtsp://localhost:8554/down_camera"},
 	}
@@ -187,6 +219,20 @@ func (c AudioConfig) AudioStreamConfig() audio.Config {
 		RTSPURL:        c.RTSPURL,
 		OutputFile:     c.OutputFile,
 		TimestampsFile: c.TimestampsFile,
+	}
+}
+
+// Enabled reports whether feature-log ingestion is configured.
+func (c FeaturesConfig) Enabled() bool {
+	return c.SourcePath != ""
+}
+
+func (c FeaturesConfig) FeatureStreamConfig() features.Config {
+	return features.Config{
+		SourcePath:     c.SourcePath,
+		OutputFile:     c.OutputFile,
+		TimestampsFile: c.TimestampsFile,
+		TimebaseFile:   c.TimebaseFile,
 	}
 }
 

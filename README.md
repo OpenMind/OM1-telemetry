@@ -3,6 +3,7 @@
 A Go application that synchronously records multi-modal sensor data:
 - **Video** from RTSP streams (via ffmpeg) — multiple cameras
 - **Audio** from RTSP streams (via ffmpeg)
+- **Video features** (capture-time-stamped, video-derived events) from the OM1 video-processor's feature log
 - **Lidar** scans from Zenoh topics
 - **Point clouds** (Livox MID360) from Zenoh topics (zstd-compressed, lossless)
 - **Depth** frames from Zenoh topics (RVL-compressed, lossless)
@@ -45,10 +46,11 @@ Any of the following override the selected profile / defaults:
 - `ENABLE_LIDAR` - Record the 2D `/scan` lidar (default: from profile)
 - `ENABLE_POINTCLOUD` - Record the 3D point cloud (default: from profile)
 - `ENABLE_COLLECTION` - Enable/disable data collection (default: `true`; set to `false`, `0`, or `no` to disable)
-- `TOP_CAMERA_RTSP_URL` - Top camera stream URL (default: `rtsp://localhost:8554/top_camera_raw`)
+- `TOP_CAMERA_RTSP_URL` - Top camera stream URL (default: `rtsp://localhost:8556/raw` — the video-processor's clean camera view, gst-direct)
 - `FRONT_CAMERA_RTSP_URL` - Front camera stream URL (default: `rtsp://localhost:8554/front_camera`)
 - `DOWN_CAMERA_RTSP_URL` - Down camera stream URL (default: `rtsp://localhost:8554/down_camera`)
-- `AUDIO_RTSP_URL` - Audio stream URL (default: `rtsp://localhost:8554/audio`)
+- `AUDIO_RTSP_URL` - Audio stream URL (default: `rtsp://localhost:8555/live` — audio track of the video-processor's muxed session stream, gst-direct)
+- `VIDEO_FEATURES_LOG` - Path to the video-processor's feature-log JSONL on a shared volume (default: empty — ingestion disabled)
 - `LIDAR_ZENOH_ENDPOINT` - Zenoh endpoint for lidar (default: `tcp/127.0.0.1:7447`)
 - `LIDAR_ZENOH_TOPIC` - Zenoh topic for lidar data (default: `scan`)
 - `POINTCLOUD_ZENOH_ENDPOINT` - Zenoh endpoint for point cloud (default: `tcp/127.0.0.1:7447`)
@@ -80,10 +82,11 @@ Or with custom settings:
 
 ```bash
 ENABLE_COLLECTION=true \
-TOP_CAMERA_RTSP_URL="rtsp://camera.local/top_camera_raw" \
+TOP_CAMERA_RTSP_URL="rtsp://localhost:8556/raw" \
 FRONT_CAMERA_RTSP_URL="rtsp://camera.local/front_camera" \
 DOWN_CAMERA_RTSP_URL="rtsp://camera.local/down_camera" \
-AUDIO_RTSP_URL="rtsp://camera.local/audio" \
+AUDIO_RTSP_URL="rtsp://localhost:8555/live" \
+VIDEO_FEATURES_LOG="/shared/video-processor/features.jsonl" \
 LIDAR_ZENOH_ENDPOINT="tcp/192.168.1.10:7447" \
 LIDAR_ZENOH_TOPIC="scan" \
 POINTCLOUD_ZENOH_ENDPOINT="tcp/192.168.1.10:7447" \
@@ -109,6 +112,9 @@ recordings/
         ├── front_camera.mp4           # Front camera recording
         ├── down_camera.mp4            # Down camera recording
         ├── audio.ogg                  # Audio recording
+        ├── video_features.jsonl       # Verbatim video-processor feature events (if VIDEO_FEATURES_LOG set)
+        ├── video_features_timestamps.csv  # unix_ns,t_capture_ns,type,seq (capture time)
+        ├── video_features_timebase.json   # monotonic<->UTC mapping from the log header
         ├── lidar_scans.bin            # Raw lidar point cloud data
         ├── lidar_timestamps.csv       # Timestamps: unix_ns,seq,byte_offset
         ├── pointcloud_frames.bin      # zstd-compressed Livox MID360 PointCloud2 frames
@@ -155,6 +161,38 @@ To decode a frame: read `byte_length` bytes at `byte_offset`, then zstd-decode
 
 **Fallback:** if compression wouldn't shrink a payload, it is stored verbatim
 with `method=raw`, so no data is ever lost.
+
+### Video features & precision time
+
+The recorder captures data on a common **UTC-nanosecond** clock so that
+`align_recording.py` can nearest-neighbour join every modality. The Zenoh
+streams (lidar, point cloud, depth, odometry, lowstate) carry a *source*
+timestamp — precise. The camera/audio streams, however, are anchored to the
+ffmpeg **record-start wall clock** plus each segment's PTS offset, so they are
+skewed from true capture by the RTSP/pipeline latency at connect time.
+
+To recover a *capture-accurate* video timeline, point `VIDEO_FEATURES_LOG` at
+the OM1 video-processor's feature-log JSONL. The video-processor stamps every
+feature event (VVAD/speaking today; pose, recognition, etc. later) at
+frame-capture on its shared `CLOCK_MONOTONIC`, and writes a monotonic→UTC
+mapping in a header record. This recorder tails that file and emits
+`video_features_timestamps.csv` keyed to **true capture UTC time** — directly
+comparable to the source-stamped Zenoh streams, without relying on fragile A/V
+stream synchronisation.
+
+Deployment requirement: the feature log is written *inside* the video-processor
+container, so its file must live on a volume shared with this recorder, and
+`VIDEO_FEATURES_LOG` here must point at the same path the video-processor's
+`--feature-log` / `OM_FEATURE_LOG` writes. On the first open, the recorder skips
+the pre-session backlog and records only events from session start; it follows
+rotation of the source file.
+
+If you need frame-accurate timing for the recorded **video pixels** (not just
+the feature events) — e.g. to align a specific mp4 frame to a lidar scan within
+a few ms — the camera recorder would need to read per-frame capture time from
+RTP/RTCP sender reports (e.g. via a `gortsplib`-based client) instead of the
+ffmpeg record-start anchor. That is a larger change and is intentionally not
+done here; the feature-log timeline covers the common case.
 
 ## Testing
 

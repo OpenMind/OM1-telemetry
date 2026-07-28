@@ -13,6 +13,7 @@ import (
 	"om1-telemetry/config"
 	"om1-telemetry/internal/audio"
 	"om1-telemetry/internal/depth"
+	"om1-telemetry/internal/features"
 	"om1-telemetry/internal/heartbeat"
 	"om1-telemetry/internal/lidar"
 	"om1-telemetry/internal/lowstate"
@@ -66,6 +67,9 @@ func main() {
 	mon.Register(lowstate.HeartbeatName, 400) // Go2 ~500 / G1 ~1053; 400 = safe floor
 	mon.Register(network.HeartbeatName, 0)    // 0 = liveness check only
 	mon.Register(audio.HeartbeatName, 0)      // 0 = liveness check only
+	if cfg.Features.Enabled() {
+		mon.Register(features.HeartbeatName, 0) // 0 = liveness check only
+	}
 
 	videoHeartbeatNames := make([]string, len(cfg.Video))
 	for i, vc := range cfg.Video {
@@ -97,6 +101,13 @@ func main() {
 		audioCfg.FramesFile = stem + "_packets.csv"
 	}
 	audioStream := audio.New(audioCfg)
+
+	var featureStream *features.FeatureStream
+	if cfg.Features.Enabled() {
+		featureCfg := cfg.Features.FeatureStreamConfig()
+		featureCfg.Monitor = mon
+		featureStream = features.New(featureCfg)
+	}
 
 	var lidarStream *lidar.LidarStream
 	if enableLidar {
@@ -132,6 +143,9 @@ func main() {
 		vs.Start()
 	}
 	audioStream.Start()
+	if featureStream != nil {
+		featureStream.Start()
+	}
 	if lidarStream != nil {
 		lidarStream.Start()
 	}
@@ -153,6 +167,8 @@ func main() {
 		"robot-type", cfg.RobotType,
 		"video-cameras", videoURLs,
 		"audio-url", cfg.Audio.RTSPURL,
+		"features-enabled", cfg.Features.Enabled(),
+		"features-source", cfg.Features.SourcePath,
 		"lidar-enabled", enableLidar,
 		"lidar-topic", cfg.Lidar.ZenohTopic,
 		"pointcloud-enabled", enablePointcloud,
@@ -177,6 +193,9 @@ func main() {
 		vs.Stop()
 	}
 	audioStream.Stop()
+	if featureStream != nil {
+		featureStream.Stop()
+	}
 	if lidarStream != nil {
 		lidarStream.Stop()
 	}

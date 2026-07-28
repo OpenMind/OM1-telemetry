@@ -26,6 +26,11 @@ STREAMS = {
     "depth":      ("depth_timestamps.csv",      "depth_frames.bin",      "unix_ns"),
     "odom":       ("odom_timestamps.csv",       "odom_frames.bin",       "unix_ns"),
     "audio":      ("audio_packets.csv",         None,                    "unix_ns"),
+    # Capture-time-stamped, video-derived feature events from the
+    # video-processor (VVAD/speaking, etc.). unix_ns is true capture time, so
+    # this aligns precisely with the source-stamped Zenoh streams — unlike the
+    # camera streams, which are anchored to record-start wall clock.
+    "video_features": ("video_features_timestamps.csv", None,            "unix_ns"),
     "top_cam":    ("top_camera_frames.csv",     None,                    "wallclock_unix_ns"),
     "front_cam":  ("front_camera_frames.csv",   None,                    "wallclock_unix_ns"),
     "down_cam":   ("down_camera_frames.csv",    None,                    "wallclock_unix_ns"),
