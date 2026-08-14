@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"om1-telemetry/internal/clock"
@@ -98,9 +99,14 @@ func (a *AudioRTSPStream) record(ctx context.Context) error {
 		"-metadata", "creation_time="+start.UTC().Format(time.RFC3339Nano),
 		segmentFile,
 	)
-	// Shut ffmpeg down the way the video recorder does. Without this,
-	// CommandContext SIGKILLs it on cancel, and Ogg -- which buffers pages --
-	// never flushes, so a clean shutdown left a 0-byte audio.ogg behind.
+	// Own process group. Ctrl-C in a terminal delivers SIGINT to the whole
+	// foreground group, so ffmpeg would get one from the terminal and a second
+	// from Cancel below -- and ffmpeg treats a second interrupt as "exit
+	// immediately", abandoning the container trailer. Detached, it only ever
+	// receives the one we send.
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	// Interrupt rather than the CommandContext default of SIGKILL: Ogg buffers
+	// pages, so a killed ffmpeg flushes nothing and leaves a 0-byte audio.ogg.
 	cmd.Cancel = func() error { return cmd.Process.Signal(os.Interrupt) }
 	cmd.WaitDelay = 5 * time.Second
 	cmd.Stderr = os.Stderr

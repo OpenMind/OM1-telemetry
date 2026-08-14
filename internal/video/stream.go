@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"om1-telemetry/internal/clock"
@@ -103,6 +104,12 @@ func (v *VideoRTSPStream) record(ctx context.Context) error {
 		"-metadata", "creation_time="+start.UTC().Format(time.RFC3339Nano),
 		segmentFile,
 	)
+	// Own process group. Ctrl-C in a terminal delivers SIGINT to the whole
+	// foreground group, so ffmpeg would receive one from the terminal and a
+	// second from Cancel below -- and ffmpeg treats a second interrupt as
+	// "exit immediately", abandoning the container's trailer and truncating
+	// the last half-second. Detached, it only ever gets the one we send.
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	cmd.Cancel = func() error { return cmd.Process.Signal(os.Interrupt) }
 	cmd.WaitDelay = 5 * time.Second
 	cmd.Stderr = os.Stderr
