@@ -59,36 +59,69 @@ STREAMS = [
 # ~500 Hz, so checking it against Go2 numbers reported a perfectly good
 # recording as "rate 263% of expected". meta.json records which profile was
 # used; config/robots.yaml holds that profile's nominal rates.
-def profile_rates(session: Path) -> dict:
-    """Map stream name -> nominal Hz for the robot this session was recorded on."""
+def robot_profile(session: Path) -> dict | None:
+    """This session's entry from config/robots.yaml, via meta.json's robot_type."""
     try:
-        meta = json.loads((session / "meta.json").read_text())
+        robot = json.loads((session / "meta.json").read_text()).get("robot_type")
     except Exception:
-        return {}
-    robot = meta.get("robot_type")
+        return None
     if not robot:
-        return {}
+        return None
 
     yaml_path = Path(__file__).resolve().parent.parent / "config" / "robots.yaml"
     try:
         import yaml
-        profiles = yaml.safe_load(yaml_path.read_text())["robots"]
+        return yaml.safe_load(yaml_path.read_text())["robots"].get(robot)
     except Exception:
-        return {}
+        return None
 
-    topics = (profiles.get(robot) or {}).get("topics") or {}
+
+def profile_rates(session: Path) -> dict:
+    """Map stream name -> nominal Hz for the robot this session was recorded on."""
+    profile = robot_profile(session)
+    if not profile:
+        return {}
+    topics = profile.get("topics") or {}
     return {name: t["rate_hz"] for name, t in topics.items() if t.get("rate_hz")}
 
 
-def apply_profile_rates(session: Path):
-    """Rewrite STREAMS' expected_hz from the profile where it knows better."""
-    rates = profile_rates(session)
-    if not rates:
+def profile_streams(session: Path) -> set | None:
+    """The CSV files this robot's profile says should exist, or None if unknown.
+
+    Without this the table lists every stream of every robot, so a G1 report
+    carries three `--- (not recorded)` rows for Go2 cameras it does not have --
+    which reads as missing data rather than as hardware that was never there.
+    """
+    profile = robot_profile(session)
+    if not profile:
         return None
-    for i, (name, csv_name, expected_hz, time_col) in enumerate(STREAMS):
-        if name in rates:
-            STREAMS[i] = (name, csv_name, rates[name], time_col)
-    return rates
+    csvs = {f"{c['name']}_frames.csv" for c in (profile.get("cameras") or [])}
+    csvs |= {f"{t}_timestamps.csv" for t in (profile.get("topics") or {})}
+    # Recorded for every robot, so not listed in a profile.
+    csvs |= {"audio_packets.csv", "network_status.csv"}
+    return csvs
+
+
+def apply_profile(session: Path):
+    """Narrow STREAMS to this robot, and take its expected rates from the profile.
+
+    Returns (rates, dropped) where dropped is the streams belonging to other
+    robot types.
+    """
+    global STREAMS
+    rates = profile_rates(session)
+    if rates:
+        for i, (name, csv_name, expected_hz, time_col) in enumerate(STREAMS):
+            if name in rates:
+                STREAMS[i] = (name, csv_name, rates[name], time_col)
+
+    wanted = profile_streams(session)
+    if wanted is None:
+        return rates, []
+    keep = [e for e in STREAMS if e[1] in wanted]
+    dropped = [e[0] for e in STREAMS if e[1] not in wanted]
+    STREAMS = keep
+    return rates, dropped
 
 # ── 1. Per-stream statistics ─────────────────────────────────────────
 def stream_stats(csv_path: Path, expected_hz: float, time_col: str, tb=None):
@@ -597,10 +630,12 @@ def main():
 
     # Collect per-stream stats
     stats = {}
-    rates = apply_profile_rates(session)
+    rates, dropped = apply_profile(session)
     if rates:
         print(f"\n{BOLD}Profile{END}: expected rates from config/robots.yaml "
               f"({', '.join(f'{k}={v:g}Hz' for k, v in sorted(rates.items()))})")
+    if dropped:
+        print(f"  not on this robot, skipped: {', '.join(dropped)}")
 
     tb = timebase.load(session)
     print(f"\n{BOLD}Clock{END}: {timebase.describe(tb)}")
