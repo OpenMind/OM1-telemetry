@@ -44,8 +44,11 @@ robots:
       lowstate:
         enabled: true
         key: rt/lowstate
-        # G1 publishes ~1053 Hz; 400 is a safe floor for the stall detector.
-        rate_hz: 400
+        # Nominal publish rate, measured on a live G1. Consumers apply their
+        # own tolerance -- the heartbeat alarms below half of this, and
+        # verify_recording.py accepts +/-50% -- so this is the true rate, not
+        # a floor.
+        rate_hz: 1000
       pointcloud:
         enabled: true
         key: rt/utlidar/cloud_livox_mid360
@@ -53,7 +56,7 @@ robots:
       odom:
         enabled: true
         key: odom
-        rate_hz: 30
+        rate_hz: 500
       lidar:
         enabled: true
         key: scan
@@ -91,12 +94,11 @@ robots:
       lowstate:
         enabled: true
         key: rt/lowstate
-        # Go2 publishes ~500 Hz.
-        rate_hz: 400
+        rate_hz: 500
       odom:
         enabled: true
         key: odom
-        rate_hz: 30
+        rate_hz: 150
       lidar:
         enabled: true
         key: scan
@@ -104,7 +106,7 @@ robots:
       depth:
         enabled: true
         key: camera/realsense2_camera_node/depth/image_rect_raw
-        rate_hz: 10
+        rate_hz: 15
       # pointcloud is absent on purpose. It previously carried
       # `rt/utlidar/cloud_deskewed` behind `EnablePointCloud: false` -- a topic
       # the Go2 does not publish, disabled but still written down, which read

@@ -18,6 +18,7 @@ import argparse
 import os
 import subprocess
 import sys
+import json
 from pathlib import Path
 
 import numpy as np
@@ -49,6 +50,43 @@ STREAMS = [
     ("down_cam",   "down_camera_frames.csv",    15,   "wallclock_unix_ns"),
     ("network",    "network_status.csv",        0.2,  "unix_ns"),
 ]
+
+
+# ── Expected rates: from the robot's own profile, not a hardcoded guess ──
+# The table above is the Go2's. A G1 publishes lowstate at ~1053 Hz and odom at
+# ~500 Hz, so checking it against Go2 numbers reported a perfectly good
+# recording as "rate 263% of expected". meta.json records which profile was
+# used; config/robots.yaml holds that profile's nominal rates.
+def profile_rates(session: Path) -> dict:
+    """Map stream name -> nominal Hz for the robot this session was recorded on."""
+    try:
+        meta = json.loads((session / "meta.json").read_text())
+    except Exception:
+        return {}
+    robot = meta.get("robot_type")
+    if not robot:
+        return {}
+
+    yaml_path = Path(__file__).resolve().parent.parent / "config" / "robots.yaml"
+    try:
+        import yaml
+        profiles = yaml.safe_load(yaml_path.read_text())["robots"]
+    except Exception:
+        return {}
+
+    topics = (profiles.get(robot) or {}).get("topics") or {}
+    return {name: t["rate_hz"] for name, t in topics.items() if t.get("rate_hz")}
+
+
+def apply_profile_rates(session: Path):
+    """Rewrite STREAMS' expected_hz from the profile where it knows better."""
+    rates = profile_rates(session)
+    if not rates:
+        return None
+    for i, (name, csv_name, expected_hz, time_col) in enumerate(STREAMS):
+        if name in rates:
+            STREAMS[i] = (name, csv_name, rates[name], time_col)
+    return rates
 
 # ── 1. Per-stream statistics ─────────────────────────────────────────
 def stream_stats(csv_path: Path, expected_hz: float, time_col: str, tb=None):
@@ -95,7 +133,13 @@ def stream_stats(csv_path: Path, expected_hz: float, time_col: str, tb=None):
     monotonic = bool((intervals > 0).all())
 
     # Gap threshold: 3x expected interval, or 1s if no expected rate
-    gap_threshold = 3 * (1000.0 / expected_hz) if expected_hz > 0 else 1000.0
+    # 3x the nominal period, but never tighter than MIN_GAP_MS. At 1 kHz that
+    # rule alone gives a 3 ms threshold, which is below general-purpose Linux
+    # scheduler granularity -- it flagged 0.19% of a healthy G1 lowstate stream
+    # as gaps (max observed 7.6 ms) while the message count matched the nominal
+    # rate exactly. Below this floor you are measuring jitter, not loss.
+    MIN_GAP_MS = 20.0
+    gap_threshold = max(3 * (1000.0 / expected_hz), MIN_GAP_MS) if expected_hz > 0 else 1000.0
     gaps = int((intervals > gap_threshold).sum())
 
     # Sequence gaps
@@ -546,6 +590,11 @@ def main():
 
     # Collect per-stream stats
     stats = {}
+    rates = apply_profile_rates(session)
+    if rates:
+        print(f"\n{BOLD}Profile{END}: expected rates from config/robots.yaml "
+              f"({', '.join(f'{k}={v:g}Hz' for k, v in sorted(rates.items()))})")
+
     tb = timebase.load(session)
     print(f"\n{BOLD}Clock{END}: {timebase.describe(tb)}")
     if tb.needs_correction:

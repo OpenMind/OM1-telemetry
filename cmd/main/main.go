@@ -42,6 +42,7 @@ func main() {
 	session.Janitor(recordingsDir, sess.RealDir())
 
 	cfg := config.Load(sess.Dir())
+	sess.SetRobotType(string(cfg.RobotType))
 
 	if !cfg.Collect {
 		slog.Info("data collection disabled via ENABLE_COLLECTION=false, exiting")

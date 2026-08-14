@@ -55,19 +55,23 @@ type Session struct {
 	root string
 	clk  *clock.Clock
 
-	mu       sync.Mutex
-	realDir  string // where the files actually are
-	dir      string // what recorders were handed; a symlink while pending
-	pending  bool
-	promoted bool
+	mu        sync.Mutex
+	robotType string
+	realDir   string // where the files actually are
+	dir       string // what recorders were handed; a symlink while pending
+	pending   bool
+	promoted  bool
 }
 
 // Meta is the session's meta.json.
 type Meta struct {
-	SessionDir            string `json:"session_dir"`
-	SessionStartUnixNs    int64  `json:"session_start_unix_ns"`
-	SessionStartMonoNs    int64  `json:"session_start_mono_ns"`
-	BootID                string `json:"boot_id,omitempty"`
+	SessionDir         string `json:"session_dir"`
+	SessionStartUnixNs int64  `json:"session_start_unix_ns"`
+	SessionStartMonoNs int64  `json:"session_start_mono_ns"`
+	BootID             string `json:"boot_id,omitempty"`
+	// RobotType names the profile this session was recorded with, so an
+	// analysis tool can look up the expected publish rates without being told.
+	RobotType             string `json:"robot_type,omitempty"`
 	ClockSyncStateAtStart string `json:"clock_sync_state_at_start"`
 	ClockTrustedAtStart   bool   `json:"clock_trusted_at_start"`
 	// StartTimeCorrected is set when the session was promoted out of pending/,
@@ -209,8 +213,20 @@ func (s *Session) writeMeta() error {
 		BootID:                s.clk.BootID(),
 		ClockSyncStateAtStart: s.clk.StartSync().String(),
 		ClockTrustedAtStart:   s.clk.StartSync().Trusted(),
+		RobotType:             s.robotType,
 	}
 	return writeMetaTo(s.Dir(), m)
+}
+
+// SetRobotType records which profile this session used. Called once the
+// configuration has resolved, which happens after the directory exists.
+func (s *Session) SetRobotType(rt string) {
+	s.mu.Lock()
+	s.robotType = rt
+	s.mu.Unlock()
+	if err := s.writeMeta(); err != nil {
+		slog.Warn("session: could not record robot type in meta.json", "err", err)
+	}
 }
 
 func (s *Session) writeMetaCorrected(trueStart time.Time, from string) error {
@@ -221,6 +237,7 @@ func (s *Session) writeMetaCorrected(trueStart time.Time, from string) error {
 		BootID:                s.clk.BootID(),
 		ClockSyncStateAtStart: s.clk.StartSync().String(),
 		ClockTrustedAtStart:   s.clk.StartSync().Trusted(),
+		RobotType:             s.robotType,
 		StartTimeCorrected:    true,
 		PromotedFrom:          filepath.Base(from),
 	}

@@ -177,9 +177,11 @@ func TestLoad_heartbeatRatesComeFromProfile(t *testing.T) {
 
 	cfg := Load(testSessionDir)
 
-	require.Equal(t, 400.0, cfg.Lowstate.RateHz)
+	// Nominal publish rates measured on a live G1, not floors: the heartbeat
+	// applies its own 0.5 factor and verify_recording.py its own tolerance.
+	require.Equal(t, 1000.0, cfg.Lowstate.RateHz)
+	require.Equal(t, 500.0, cfg.Odom.RateHz)
 	require.Equal(t, 10.0, cfg.Lidar.RateHz)
-	require.Equal(t, 30.0, cfg.Odom.RateHz)
 }
 
 func TestRecordingsDir_defaultAndOverride(t *testing.T) {
