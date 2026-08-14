@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"log/slog"
 	"os"
 	"os/signal"
@@ -12,6 +11,7 @@ import (
 
 	"om1-telemetry/config"
 	"om1-telemetry/internal/audio"
+	"om1-telemetry/internal/clock"
 	"om1-telemetry/internal/depth"
 	"om1-telemetry/internal/features"
 	"om1-telemetry/internal/heartbeat"
@@ -20,53 +20,53 @@ import (
 	"om1-telemetry/internal/network"
 	"om1-telemetry/internal/odom"
 	"om1-telemetry/internal/pointcloud"
+	"om1-telemetry/internal/session"
 	"om1-telemetry/internal/video"
 )
 
 func main() {
-	cfg := config.Load()
+	// The clock is sampled before anything else so the session's monotonic
+	// anchor covers the whole run.
+	clk := clock.New()
+
+	recordingsDir := config.RecordingsDir()
+
+	sess, err := session.Open(recordingsDir, clk)
+	if err != nil {
+		slog.Error("cannot create session directory", "dir", recordingsDir, "err", err)
+		os.Exit(1)
+	}
+
+	// Sweep sessions an earlier run left undated. Done after Open so this run's
+	// own pending directory is excluded.
+	session.Janitor(recordingsDir, sess.RealDir())
+
+	cfg := config.Load(sess.Dir())
 
 	if !cfg.Collect {
 		slog.Info("data collection disabled via ENABLE_COLLECTION=false, exiting")
 		return
 	}
 
-	if err := os.MkdirAll(cfg.SessionDir, 0o755); err != nil {
-		slog.Error("cannot create session directory", "dir", cfg.SessionDir, "err", err)
-		os.Exit(1)
-	}
-
-	metaPath := filepath.Join(cfg.SessionDir, "meta.json")
-	metaData := map[string]interface{}{
-		"session_start_unix_ns": cfg.SessionStartNs,
-		"session_dir":           cfg.SessionDir,
-	}
-	metaJSON, err := json.MarshalIndent(metaData, "", "  ")
-	if err != nil {
-		slog.Error("cannot marshal metadata", "err", err)
-		os.Exit(1)
-	}
-	if err := os.WriteFile(metaPath, metaJSON, 0o644); err != nil {
-		slog.Error("cannot write metadata", "path", metaPath, "err", err)
-		os.Exit(1)
-	}
-
-	enableLidar := cfg.EnableLidar
-	enablePointcloud := cfg.EnablePointCloud
-
 	mon := heartbeat.NewMonitor(30 * time.Second)
 
-	if enableLidar {
-		mon.Register(lidar.HeartbeatName, 10) // ~10 Hz nominal
+	if cfg.EnableLidar {
+		mon.Register(lidar.HeartbeatName, cfg.Lidar.RateHz)
 	}
-	if enablePointcloud {
-		mon.Register(pointcloud.HeartbeatName, 10) // ~10 Hz nominal
+	if cfg.EnablePointCloud {
+		mon.Register(pointcloud.HeartbeatName, cfg.PointCloud.RateHz)
 	}
-	mon.Register(depth.HeartbeatName, 10)     // measured 15 Hz; floor at 10
-	mon.Register(odom.HeartbeatName, 30)      // 30-50 Hz typical
-	mon.Register(lowstate.HeartbeatName, 400) // Go2 ~500 / G1 ~1053; 400 = safe floor
-	mon.Register(network.HeartbeatName, 0)    // 0 = liveness check only
-	mon.Register(audio.HeartbeatName, 0)      // 0 = liveness check only
+	if cfg.EnableDepth {
+		mon.Register(depth.HeartbeatName, cfg.Depth.RateHz)
+	}
+	if cfg.EnableOdom {
+		mon.Register(odom.HeartbeatName, cfg.Odom.RateHz)
+	}
+	if cfg.EnableLowstate {
+		mon.Register(lowstate.HeartbeatName, cfg.Lowstate.RateHz)
+	}
+	mon.Register(network.HeartbeatName, 0) // 0 = liveness check only
+	mon.Register(audio.HeartbeatName, 0)   // 0 = liveness check only
 	if cfg.Features.Enabled() {
 		mon.Register(features.HeartbeatName, 0) // 0 = liveness check only
 	}
@@ -79,6 +79,18 @@ func main() {
 
 	hbCtx, hbCancel := context.WithCancel(context.Background())
 	go mon.Run(hbCtx)
+
+	// The clock watcher journals the monotonic-to-UTC mapping and, the first
+	// time NTP confirms the wall clock, promotes a pending session to its true
+	// date. Recorders write through a symlink, so the rename does not disturb
+	// them.
+	clkCtx, clkCancel := context.WithCancel(context.Background())
+	watcher := clock.NewWatcher(clk, sess.TimebasePath(), func(clock.Record) {
+		if err := sess.Promote(); err != nil {
+			slog.Error("could not promote session to its true date", "err", err)
+		}
+	})
+	go watcher.Run(clkCtx)
 
 	videoStreams := make([]*video.VideoRTSPStream, 0, len(cfg.Video))
 	for i, vc := range cfg.Video {
@@ -110,30 +122,39 @@ func main() {
 	}
 
 	var lidarStream *lidar.LidarStream
-	if enableLidar {
+	if cfg.EnableLidar {
 		lidarCfg := cfg.Lidar.LidarStreamConfig()
 		lidarCfg.Monitor = mon
 		lidarStream = lidar.New(lidarCfg)
 	}
 
 	var pointCloudStream *pointcloud.PointCloudStream
-	if enablePointcloud {
+	if cfg.EnablePointCloud {
 		pointCloudCfg := cfg.PointCloud.PointCloudStreamConfig()
 		pointCloudCfg.Monitor = mon
 		pointCloudStream = pointcloud.New(pointCloudCfg)
 	}
 
-	depthCfg := cfg.Depth.DepthStreamConfig()
-	depthCfg.Monitor = mon
-	depthStream := depth.New(depthCfg)
+	var depthStream *depth.DepthStream
+	if cfg.EnableDepth {
+		depthCfg := cfg.Depth.DepthStreamConfig()
+		depthCfg.Monitor = mon
+		depthStream = depth.New(depthCfg)
+	}
 
-	odomCfg := cfg.Odom.OdomStreamConfig()
-	odomCfg.Monitor = mon
-	odomStream := odom.New(odomCfg)
+	var odomStream *odom.OdomStream
+	if cfg.EnableOdom {
+		odomCfg := cfg.Odom.OdomStreamConfig()
+		odomCfg.Monitor = mon
+		odomStream = odom.New(odomCfg)
+	}
 
-	lowstateCfg := cfg.Lowstate.LowstateStreamConfig()
-	lowstateCfg.Monitor = mon
-	lowstateStream := lowstate.New(lowstateCfg)
+	var lowstateStream *lowstate.LowstateStream
+	if cfg.EnableLowstate {
+		lowstateCfg := cfg.Lowstate.LowstateStreamConfig()
+		lowstateCfg.Monitor = mon
+		lowstateStream = lowstate.New(lowstateCfg)
+	}
 
 	networkCfg := cfg.Network.NetworkStreamConfig()
 	networkCfg.Monitor = mon
@@ -152,9 +173,15 @@ func main() {
 	if pointCloudStream != nil {
 		pointCloudStream.Start()
 	}
-	depthStream.Start()
-	odomStream.Start()
-	lowstateStream.Start()
+	if depthStream != nil {
+		depthStream.Start()
+	}
+	if odomStream != nil {
+		odomStream.Start()
+	}
+	if lowstateStream != nil {
+		lowstateStream.Start()
+	}
 	networkStream.Start()
 
 	videoURLs := make([]string, 0, len(cfg.Video))
@@ -163,19 +190,19 @@ func main() {
 	}
 
 	slog.Info("recording started",
-		"session", cfg.SessionDir,
+		"session", sess.RealDir(),
+		"session-pending", sess.Pending(),
+		"clock-sync", clk.StartSync().String(),
 		"robot-type", cfg.RobotType,
 		"video-cameras", videoURLs,
 		"audio-url", cfg.Audio.RTSPURL,
 		"features-enabled", cfg.Features.Enabled(),
 		"features-source", cfg.Features.SourcePath,
-		"lidar-enabled", enableLidar,
-		"lidar-topic", cfg.Lidar.ZenohTopic,
-		"pointcloud-enabled", enablePointcloud,
-		"pointcloud-topic", cfg.PointCloud.ZenohTopic,
-		"depth-topic", cfg.Depth.ZenohTopic,
-		"odom-topic", cfg.Odom.ZenohTopic,
-		"lowstate-topic", cfg.Lowstate.ZenohTopic,
+		"lidar", topicStatus(cfg.EnableLidar, cfg.Lidar.ZenohTopic),
+		"pointcloud", topicStatus(cfg.EnablePointCloud, cfg.PointCloud.ZenohTopic),
+		"depth", topicStatus(cfg.EnableDepth, cfg.Depth.ZenohTopic),
+		"odom", topicStatus(cfg.EnableOdom, cfg.Odom.ZenohTopic),
+		"lowstate", topicStatus(cfg.EnableLowstate, cfg.Lowstate.ZenohTopic),
 		"net-ping-host", cfg.Network.PingHost,
 		"heartbeat", "30s interval; logs only when broken/recovered",
 	)
@@ -202,8 +229,32 @@ func main() {
 	if pointCloudStream != nil {
 		pointCloudStream.Stop()
 	}
-	depthStream.Stop()
-	odomStream.Stop()
-	lowstateStream.Stop()
+	if depthStream != nil {
+		depthStream.Stop()
+	}
+	if odomStream != nil {
+		odomStream.Stop()
+	}
+	if lowstateStream != nil {
+		lowstateStream.Stop()
+	}
 	networkStream.Stop()
+
+	// Stopped last: a clock step during shutdown is still worth journaling, and
+	// a session that syncs at the last moment still gets its true date.
+	clkCancel()
+
+	if sess.Pending() {
+		slog.Warn("session is still undated: the clock never synchronized while recording",
+			"dir", sess.RealDir(),
+			"note", "it will be dated automatically on a later start if it ever syncs")
+	}
+}
+
+// topicStatus renders a topic for the startup log: its key, or why it is off.
+func topicStatus(enabled bool, key string) string {
+	if !enabled {
+		return "disabled"
+	}
+	return key
 }

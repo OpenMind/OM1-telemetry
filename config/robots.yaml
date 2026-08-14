@@ -1,0 +1,112 @@
+# Per-robot recording profiles.
+#
+# This file is embedded into the binary at build time (see profile.go), so the
+# container works with no volume mounted. To change what a robot records
+# without rebuilding, mount a replacement and point ROBOT_PROFILES_FILE at it.
+#
+# Precedence for any single value: environment variable > this file > embedded
+# default. The env names are unchanged from before this file existed
+# (TOP_CAMERA_RTSP_URL, LIDAR_ZENOH_TOPIC, ENABLE_POINTCLOUD, ...), so existing
+# deployments keep working.
+#
+# ── A note on camera naming, because three different namespaces overlap ──
+#
+#   gst-direct ports   :8556/raw (front), :8558/raw (rear)
+#                      served by the video-processor's run_gst.py. This is what
+#                      we record: lowest latency, closest to capture.
+#   mediamtx paths     :8554/raw, /front, /rear, /top_camera_raw,
+#                      /rear_camera_raw -- the video-processor's local hub.
+#   cloud ingest       api-video-ingest.openmind.com:8554/top_camera_raw/<id>
+#                      set by the video-processor's OM_CAMERA_STREAM_PATHS.
+#
+# The `name` below only names the files on disk. It deliberately does NOT match
+# the cloud path (`top_camera_raw`) for the same physical camera: the ingest
+# backend keys on that path, so it is not ours to rename. front/rear here match
+# the video-processor's own front/rear terminology.
+
+robots:
+  # ── G1 humanoid ────────────────────────────────────────────────────
+  # Verified against a live G1 (Thor + Livox MID360, no RealSense).
+  g1:
+    cameras:
+      - name: front_camera_raw
+        url: rtsp://localhost:8556/raw
+        env: FRONT_CAMERA_RAW_RTSP_URL
+      - name: rear_camera_raw
+        url: rtsp://localhost:8558/raw
+        env: REAR_CAMERA_RAW_RTSP_URL
+
+    audio:
+      url: rtsp://localhost:8555/live
+      env: AUDIO_RTSP_URL
+
+    topics:
+      lowstate:
+        enabled: true
+        key: rt/lowstate
+        # G1 publishes ~1053 Hz; 400 is a safe floor for the stall detector.
+        rate_hz: 400
+      pointcloud:
+        enabled: true
+        key: rt/utlidar/cloud_livox_mid360
+        rate_hz: 10
+      odom:
+        enabled: true
+        key: odom
+        rate_hz: 30
+      lidar:
+        enabled: true
+        key: scan
+        rate_hz: 10
+      depth:
+        # Disabled: this G1 has no RealSense. realsense2_camera_node starts
+        # inside om1_sensor and logs "No RealSense devices were found!", so the
+        # topic exists but never carries a message. Recording it produced a
+        # 0-byte depth_frames.bin every session and left the depth heartbeat
+        # permanently broken. Flip to true if a D435 is fitted.
+        enabled: false
+        key: camera/realsense2_camera_node/depth/image_rect_raw
+        rate_hz: 10
+
+  # ── Go2 quadruped ──────────────────────────────────────────────────
+  # Not verifiable from the G1 bench; kept byte-for-byte identical to the
+  # behaviour before this file existed, with one exception noted below.
+  go2:
+    cameras:
+      - name: top_camera
+        url: rtsp://localhost:8556/raw
+        env: TOP_CAMERA_RTSP_URL
+      - name: front_camera
+        url: rtsp://localhost:8554/front_camera
+        env: FRONT_CAMERA_RTSP_URL
+      - name: down_camera
+        url: rtsp://localhost:8554/down_camera
+        env: DOWN_CAMERA_RTSP_URL
+
+    audio:
+      url: rtsp://localhost:8555/live
+      env: AUDIO_RTSP_URL
+
+    topics:
+      lowstate:
+        enabled: true
+        key: rt/lowstate
+        # Go2 publishes ~500 Hz.
+        rate_hz: 400
+      odom:
+        enabled: true
+        key: odom
+        rate_hz: 30
+      lidar:
+        enabled: true
+        key: scan
+        rate_hz: 10
+      depth:
+        enabled: true
+        key: camera/realsense2_camera_node/depth/image_rect_raw
+        rate_hz: 10
+      # pointcloud is absent on purpose. It previously carried
+      # `rt/utlidar/cloud_deskewed` behind `EnablePointCloud: false` -- a topic
+      # the Go2 does not publish, disabled but still written down, which read
+      # as "flip the switch and it records". Setting ENABLE_POINTCLOUD=true
+      # now reports a missing topic instead of silently subscribing to nothing.

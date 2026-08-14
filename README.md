@@ -1,7 +1,8 @@
 # OM1 Telemetry Recorder
 
 A Go application that synchronously records multi-modal sensor data:
-- **Video** from RTSP streams (via ffmpeg) — multiple cameras
+- **Video** from RTSP streams (via ffmpeg) — multiple cameras; on the G1 both
+  the front and rear pre-CV streams from the OM1 video-processor
 - **Audio** from RTSP streams (via ffmpeg)
 - **Video features** (capture-time-stamped, video-derived events) from the OM1 video-processor's feature log
 - **Lidar** scans from Zenoh topics
@@ -19,24 +20,49 @@ All streams are timestamped and organized into session directories for easy alig
 
 ## Configuration
 
-### Robot profile
+### Robot profile (`config/robots.yaml`)
 
-Set `ROBOT_TYPE` to select a built-in recording profile. The profile decides
-which sensors are recorded and the robot-specific Zenoh topic defaults; it is
-defined in code (`config/profile.go`), so no profile files need to ship with
-the binary.
+`ROBOT_TYPE` selects a profile, which lists the cameras and Zenoh topics that
+robot records. Profiles live in `config/robots.yaml`, embedded into the binary
+at build time, so nothing needs mounting for the defaults to work.
 
-- `ROBOT_TYPE=go2` — Go2 quadruped: 2D `/scan` lidar enabled, 3D point cloud disabled.
-- `ROBOT_TYPE=g1` — G1 humanoid: 3D point cloud (Livox Mid-360) and 2D `/scan` lidar both enabled.
+| | `ROBOT_TYPE=g1` | `ROBOT_TYPE=go2` |
+|---|---|---|
+| cameras | `front_camera_raw` (:8556/raw), `rear_camera_raw` (:8558/raw) | `top_camera` (:8556/raw), `front_camera`, `down_camera` |
+| lidar `scan` | ✅ | ✅ |
+| point cloud | ✅ `rt/utlidar/cloud_livox_mid360` | — not published by this robot |
+| odometry, lowstate | ✅ | ✅ |
+| depth | ❌ disabled — no RealSense fitted | ✅ |
 
-If `ROBOT_TYPE` is unset or unrecognized, the recorder logs a warning and falls
-back to the default profile (`go2`). The convenience env files set this for you:
+To change what a robot records **without rebuilding**, mount a replacement file
+and point `ROBOT_PROFILES_FILE` at it. A missing or malformed override falls
+back to the embedded profiles with a logged error, rather than stopping a robot
+from recording.
 
-```bash
-source env.go2   # ROBOT_TYPE=go2 + deployment overrides
-source env.g1    # ROBOT_TYPE=g1  + deployment overrides
-./bin/om1-telemetry
-```
+Adding a camera or switching a topic on is a few lines of YAML. Adding a topic
+of a *kind* the recorder has no module for (a new message shape needing its own
+decoder) still needs Go code.
+
+If `ROBOT_TYPE` is unset or unrecognized the recorder warns and falls back to
+`go2`.
+
+#### Why `depth` is off for the G1
+
+`realsense2_camera_node` starts inside `om1_sensor` on every G1 and logs
+`No RealSense devices were found!` when none is fitted. The topic exists, is
+allowed through the Zenoh bridge, and is subscribed successfully — it simply
+never carries a message. That produced a 0-byte `depth_frames.bin` in every
+session and a permanently broken `depth` heartbeat. Fit a D435 and set
+`ENABLE_DEPTH=true` (or flip `enabled` in the profile) to record it.
+
+#### Why `go2` has no `pointcloud` entry
+
+It previously carried `rt/utlidar/cloud_deskewed` behind `EnablePointCloud:
+false` — a topic the Go2 does not publish, disabled but still written down,
+which read as "flip the switch and it records". The entry is gone. Setting
+`ENABLE_POINTCLOUD=true` on a Go2 now logs that no topic is configured instead
+of silently subscribing to nothing; supplying `POINTCLOUD_ZENOH_TOPIC` as well
+enables it properly.
 
 ### Environment variables
 
@@ -46,9 +72,13 @@ Any of the following override the selected profile / defaults:
 - `ENABLE_LIDAR` - Record the 2D `/scan` lidar (default: from profile)
 - `ENABLE_POINTCLOUD` - Record the 3D point cloud (default: from profile)
 - `ENABLE_COLLECTION` - Enable/disable data collection (default: `true`; set to `false`, `0`, or `no` to disable)
-- `TOP_CAMERA_RTSP_URL` - Top camera stream URL (default: `rtsp://localhost:8556/raw` — the video-processor's clean camera view, gst-direct)
-- `FRONT_CAMERA_RTSP_URL` - Front camera stream URL (default: `rtsp://localhost:8554/front_camera`)
-- `DOWN_CAMERA_RTSP_URL` - Down camera stream URL (default: `rtsp://localhost:8554/down_camera`)
+- `ROBOT_PROFILES_FILE` - Path to a `robots.yaml` replacing the embedded profiles (default: empty — use embedded)
+- `ENABLE_DEPTH` / `ENABLE_ODOM` / `ENABLE_LOWSTATE` - Record these topics (default: from profile)
+- `FRONT_CAMERA_RAW_RTSP_URL` - G1 front pre-CV stream (default: `rtsp://localhost:8556/raw`, gst-direct)
+- `REAR_CAMERA_RAW_RTSP_URL` - G1 rear pre-CV stream (default: `rtsp://localhost:8558/raw`, gst-direct)
+- `TOP_CAMERA_RTSP_URL` - Go2 top camera stream URL (default: `rtsp://localhost:8556/raw`)
+- `FRONT_CAMERA_RTSP_URL` - Go2 front camera stream URL (default: `rtsp://localhost:8554/front_camera`)
+- `DOWN_CAMERA_RTSP_URL` - Go2 down camera stream URL (default: `rtsp://localhost:8554/down_camera`)
 - `AUDIO_RTSP_URL` - Audio stream URL (default: `rtsp://localhost:8555/live` — audio track of the video-processor's muxed session stream, gst-direct)
 - `VIDEO_FEATURES_LOG` - Path to the video-processor's feature-log JSONL on a shared volume (default: empty — ingestion disabled)
 - `LIDAR_ZENOH_ENDPOINT` - Zenoh endpoint for lidar (default: `tcp/127.0.0.1:7447`)
@@ -59,6 +89,7 @@ Any of the following override the selected profile / defaults:
 - `DEPTH_ZENOH_TOPIC` - Zenoh topic for depth frames (default: `camera/realsense2_camera_node/depth/image_rect_raw`)
 - `ODOM_ZENOH_ENDPOINT` - Zenoh endpoint for odometry (default: `tcp/127.0.0.1:7447`)
 - `ODOM_ZENOH_TOPIC` - Zenoh topic for odometry data (default: `odom`)
+- `LOWSTATE_ZENOH_TOPIC` - Zenoh topic for lowstate (default: `rt/lowstate`)
 - `RECORDINGS_DIR` - Base directory for recordings (default: `recordings`)
 
 ## Building
@@ -81,10 +112,10 @@ The binary will be created at `bin/om1-telemetry`.
 Or with custom settings:
 
 ```bash
+ROBOT_TYPE=g1 \
 ENABLE_COLLECTION=true \
-TOP_CAMERA_RTSP_URL="rtsp://localhost:8556/raw" \
-FRONT_CAMERA_RTSP_URL="rtsp://camera.local/front_camera" \
-DOWN_CAMERA_RTSP_URL="rtsp://camera.local/down_camera" \
+FRONT_CAMERA_RAW_RTSP_URL="rtsp://localhost:8556/raw" \
+REAR_CAMERA_RAW_RTSP_URL="rtsp://localhost:8558/raw" \
 AUDIO_RTSP_URL="rtsp://localhost:8555/live" \
 VIDEO_FEATURES_LOG="/shared/video-processor/features.jsonl" \
 LIDAR_ZENOH_ENDPOINT="tcp/192.168.1.10:7447" \
@@ -107,23 +138,28 @@ Each recording session creates a timestamped directory structure:
 recordings/
 └── 2026-05-15/
     └── 2026-05-15_14-30-00/
-        ├── meta.json                  # Session metadata
-        ├── top_camera.mp4             # Top camera recording
-        ├── front_camera.mp4           # Front camera recording
-        ├── down_camera.mp4            # Down camera recording
+        ├── meta.json                  # Session metadata (start time, boot id, clock state)
+        ├── clock_timebase.jsonl       # Monotonic<->UTC journal; see "Recording without a clock"
+        ├── front_camera_raw.mp4       # G1: front pre-CV camera recording
+        ├── rear_camera_raw.mp4        # G1: rear pre-CV camera recording
+        ├── front_camera_raw_frames.csv  # Per-frame: ...,wallclock_unix_ns,mono_ns
         ├── audio.ogg                  # Audio recording
         ├── video_features.jsonl       # Verbatim video-processor feature events (if VIDEO_FEATURES_LOG set)
         ├── video_features_timestamps.csv  # unix_ns,t_capture_ns,type,seq (capture time)
         ├── video_features_timebase.json   # monotonic<->UTC mapping from the log header
         ├── lidar_scans.bin            # Raw lidar point cloud data
-        ├── lidar_timestamps.csv       # Timestamps: unix_ns,seq,byte_offset
+        ├── lidar_timestamps.csv       # Timestamps: unix_ns,seq,byte_offset,mono_ns
         ├── pointcloud_frames.bin      # zstd-compressed Livox MID360 PointCloud2 frames
-        ├── pointcloud_timestamps.csv  # unix_ns,seq,byte_offset,byte_length,method
+        ├── pointcloud_timestamps.csv  # unix_ns,seq,byte_offset,byte_length,method,mono_ns
         ├── depth_frames.bin           # RVL-compressed depth frames (lossless)
-        ├── depth_timestamps.csv       # unix_ns,seq,byte_offset,byte_length,method,width,height,encoding
+        ├── depth_timestamps.csv       # unix_ns,seq,byte_offset,byte_length,method,width,height,encoding,mono_ns
         ├── odom_frames.bin            # Raw odometry messages
-        └── odom_timestamps.csv        # Timestamps: unix_ns,seq,byte_offset
+        └── odom_timestamps.csv        # Timestamps: unix_ns,seq,byte_offset,mono_ns
 ```
+
+Every timestamps CSV carries a **`mono_ns`** column alongside its wall-clock
+column. On a Go2, `top_camera.mp4` / `front_camera.mp4` / `down_camera.mp4`
+appear instead of the two G1 raw streams.
 
 ### Depth frames (RVL)
 
@@ -161,6 +197,75 @@ To decode a frame: read `byte_length` bytes at `byte_offset`, then zstd-decode
 
 **Fallback:** if compression wouldn't shrink a payload, it is stored verbatim
 with `method=raw`, so no data is ever lost.
+
+### Recording without a clock
+
+A robot that boots away from a network does not know the time. The G1's RTC is
+the PMIC's and is not battery-backed, so a cold boot comes up at whatever was
+last persisted — days stale in the worst case — and with no network, NTP never
+corrects it. `docker.service` is ordered `After=time-set.target`, which only
+means the clock has been set to *something*; it is not `time-sync.target`. So
+the recorder can and does start while the clock is wrong.
+
+Previously that meant one `time.Now()` at startup named the session directory,
+NTP corrected the clock seconds later, and every subsequent byte was written
+into a directory dated days in the past. Timestamps *inside* the files jumped
+mid-session too, leaving them non-monotonic.
+
+The recorder now separates the two clocks:
+
+- **`unix_ns`** — the wall clock. Wrong while the robot is offline.
+- **`mono_ns`** — `CLOCK_BOOTTIME`. Never jumps when NTP steps the clock, and
+  keeps counting across suspend. Correct from the first row.
+
+While the clock is untrustworthy the session is written to
+`recordings/pending/<boot-id>_<uptime-ms>/`, named from facts that hold
+regardless of the date, and recorders write through a `recordings/.current`
+symlink. `clock_timebase.jsonl` journals a record at startup, on every clock
+step, and once a minute.
+
+**When NTP synchronizes, everything is corrected automatically**, with no
+interruption to any recorder:
+
+1. The step is journaled with the exact offset.
+2. The true session start is back-computed along the monotonic timeline.
+3. The directory is renamed to its real date, and the symlink repointed —
+   atomically. Open file descriptors follow the inode; new segments open
+   through the symlink and land in the new directory. Neither notices.
+
+If the process dies before that (crash, power cut), the next start sweeps
+`pending/` and dates any session whose journal contains a synchronized record.
+
+A session that is **never** online from boot to shutdown stays in `pending/`,
+permanently. Its monotonic timeline ended with that boot, so no later sync can
+date it — the information does not exist. Leaving it undated is deliberate;
+inventing a date would be worse. Installing `fake-hwclock` on the host bounds
+that error to "since the last shutdown" instead of "since whenever".
+
+Detecting all this needs `/run/systemd/timesync` mounted read-only into the
+container (see `om1_telemetry.yml`). Without it the recorder cannot distinguish
+a stale clock from a good one and behaves exactly as it did before — dating
+every session directly.
+
+#### Correcting timestamps afterwards
+
+`align_recording.py` and `verify_recording.py` apply the correction when they
+read a session, so you normally do not need to do anything. The CSVs on disk are
+left as recorded on purpose: the recording should say what was observed.
+
+For a downstream tool that reads `unix_ns` directly:
+
+```bash
+./script/fix_session_time.py /path/to/session              # report only
+./script/fix_session_time.py /path/to/session --write      # corrected copies
+./script/fix_session_time.py /path/to/session --in-place   # rewrite, originals kept in <col>_recorded
+./script/fix_session_time.py recordings/ --all             # sweep every session
+```
+
+The correction is a per-row offset — the sum of every step that happened after
+that row was written — not a recomputed value. That preserves what each column
+meant: a Zenoh row's `unix_ns` is the *publisher's* stamp and `mono_ns` is when
+this recorder received it, so the transport latency between them survives.
 
 ### Video features & precision time
 

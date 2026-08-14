@@ -11,6 +11,7 @@ import (
 	"github.com/eclipse-zenoh/zenoh-go/zenoh"
 	"github.com/klauspost/compress/zstd"
 
+	"om1-telemetry/internal/clock"
 	"om1-telemetry/internal/heartbeat"
 	"om1-telemetry/internal/recordutil"
 	"om1-telemetry/internal/zenohutil"
@@ -142,7 +143,7 @@ func (c *PointCloudStream) record(ctx context.Context) error {
 	// Only write CSV header on first open (empty file).
 	if tsResult.PrevSize == 0 {
 		if _, err := fmt.Fprintln(tsFile,
-			"unix_ns,seq,byte_offset,byte_length,method"); err != nil {
+			"unix_ns,seq,byte_offset,byte_length,method,mono_ns"); err != nil {
 			return fmt.Errorf("write header: %w", err)
 		}
 	}
@@ -235,6 +236,11 @@ func (c *PointCloudStream) record(ctx context.Context) error {
 			} else {
 				unixNs = time.Now().UnixNano()
 			}
+			// Receive time on the boot clock. unixNs above is the publisher's
+			// stamp and shares this host's wall clock, so a clock step spoils
+			// both; monoNs is immune to the step and says which correction
+			// applies to this row. See internal/clock.
+			monoNs := clock.MonoNs()
 
 			data, method := encodeFrame(encoder, sample.Payload().Bytes())
 
@@ -243,8 +249,8 @@ func (c *PointCloudStream) record(ctx context.Context) error {
 				return fmt.Errorf("write data: %w", err)
 			}
 
-			if _, err := fmt.Fprintf(tsFile, "%d,%d,%d,%d,%s\n",
-				unixNs, seq, byteOffset, n, method); err != nil {
+			if _, err := fmt.Fprintf(tsFile, "%d,%d,%d,%d,%s,%d\n",
+				unixNs, seq, byteOffset, n, method, monoNs); err != nil {
 				return fmt.Errorf("write timestamp: %w", err)
 			}
 

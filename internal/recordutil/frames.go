@@ -21,7 +21,7 @@ func NewFrameCSVWriter(path string) *FrameCSVWriter {
 	return &FrameCSVWriter{path: path}
 }
 
-func (w *FrameCSVWriter) ExtractAndAppend(segmentFile, streamSelector string, segmentStartUnixNs int64) error {
+func (w *FrameCSVWriter) ExtractAndAppend(segmentFile, streamSelector string, segmentStartUnixNs, segmentStartMonoNs int64) error {
 	if w == nil || w.path == "" {
 		return nil
 	}
@@ -53,7 +53,7 @@ func (w *FrameCSVWriter) ExtractAndAppend(segmentFile, streamSelector string, se
 	}
 	if stat.Size() == 0 {
 		if _, err := fmt.Fprintln(f,
-			"segment_file,frame_idx,pts,pts_time_sec,wallclock_unix_ns"); err != nil {
+			"segment_file,frame_idx,pts,pts_time_sec,wallclock_unix_ns,mono_ns"); err != nil {
 			return fmt.Errorf("write header: %w", err)
 		}
 	}
@@ -86,10 +86,15 @@ func (w *FrameCSVWriter) ExtractAndAppend(segmentFile, streamSelector string, se
 			continue
 		}
 
-		wallclockNs := segmentStartUnixNs + int64(ptsTimeF*1e9)
+		offsetNs := int64(ptsTimeF * 1e9)
+		wallclockNs := segmentStartUnixNs + offsetNs
+		// Same offset on the boot clock. Both are anchored to when ffmpeg
+		// connected, so both carry the RTSP/pipeline latency; the difference is
+		// that monoNs stays correct if the wall clock is stepped mid-session.
+		monoNs := segmentStartMonoNs + offsetNs
 
-		if _, err := fmt.Fprintf(buf, "%s,%d,%s,%s,%d\n",
-			base, frameIdx, ptsStr, ptsTimeStr, wallclockNs); err != nil {
+		if _, err := fmt.Fprintf(buf, "%s,%d,%s,%s,%d,%d\n",
+			base, frameIdx, ptsStr, ptsTimeStr, wallclockNs, monoNs); err != nil {
 			return fmt.Errorf("write row: %w", err)
 		}
 		frameIdx++

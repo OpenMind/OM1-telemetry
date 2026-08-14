@@ -11,6 +11,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"om1-telemetry/internal/clock"
 	"om1-telemetry/internal/heartbeat"
 	"om1-telemetry/internal/recordutil"
 )
@@ -93,7 +94,7 @@ func (n *NetworkStream) record(ctx context.Context) error {
 	}()
 
 	if result.PrevSize == 0 {
-		if _, err := fmt.Fprintln(dataFile, "unix_ns,seq,reachable,rtt_ms,packet_loss_pct"); err != nil {
+		if _, err := fmt.Fprintln(dataFile, "unix_ns,seq,reachable,rtt_ms,packet_loss_pct,mono_ns"); err != nil {
 			return fmt.Errorf("write header: %w", err)
 		}
 	}
@@ -122,10 +123,11 @@ func (n *NetworkStream) record(ctx context.Context) error {
 		if ctx.Err() != nil {
 			return nil
 		}
-		if _, err := fmt.Fprintf(dataFile, "%d,%d,%t,%s,%s\n",
+		if _, err := fmt.Fprintf(dataFile, "%d,%d,%t,%s,%s,%d\n",
 			time.Now().UnixNano(), seq, sample.reachable,
 			formatFloat(sample.rttMs, sample.reachable),
 			formatFloat(sample.lossPct, true),
+			clock.MonoNs(),
 		); err != nil {
 			return fmt.Errorf("write sample: %w", err)
 		}

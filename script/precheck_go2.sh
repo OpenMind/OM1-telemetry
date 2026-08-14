@@ -122,10 +122,29 @@ check_rtsp() {
     fi
 }
 
-check_rtsp "rtsp://localhost:8556/raw"              "video top_camera (video-processor /raw)"
-check_rtsp "rtsp://localhost:8554/front_camera"     "video front_camera"
-check_rtsp "rtsp://localhost:8554/down_camera"      "video down_camera"
+# Which of these a robot actually records comes from its profile in
+# config/robots.yaml. All are checked here so the output shows what is present
+# on the host, not just what this robot is configured for.
+if [ "${ROBOT_TYPE:-go2}" = "g1" ]; then
+    check_rtsp "rtsp://localhost:8556/raw"          "video front_camera_raw (video-processor, gst-direct)"
+    check_rtsp "rtsp://localhost:8558/raw"          "video rear_camera_raw (video-processor, gst-direct)"
+else
+    check_rtsp "rtsp://localhost:8556/raw"          "video top_camera (video-processor /raw)"
+    check_rtsp "rtsp://localhost:8554/front_camera" "video front_camera"
+    check_rtsp "rtsp://localhost:8554/down_camera"  "video down_camera"
+fi
 check_rtsp "rtsp://localhost:8555/live"             "audio (video-processor /live)"
+
+
+hdr "Clock (session dating depends on this)"
+
+if [ -e /run/systemd/timesync/synchronized ]; then
+    ok "NTP synchronized — sessions are dated directly"
+elif [ -d /run/systemd/timesync ]; then
+    warn "NTP not synchronized yet — recording will start under recordings/pending/ and be dated automatically once it syncs"
+else
+    warn "cannot see /run/systemd/timesync — the recorder cannot tell a stale clock from a good one; mount it read-only into the container"
+fi
 
 
 hdr "Calibration / latched topics (dump once per session for sensor fusion)"

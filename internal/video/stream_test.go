@@ -113,7 +113,7 @@ func TestRecord_createsOutputFileDirectory(t *testing.T) {
 }
 
 func TestAppendSegmentEntry_emptyPath_isNoOp(t *testing.T) {
-	err := appendSegmentEntry("", time.Now(), "/data/video.mp4")
+	err := appendSegmentEntry("", time.Now(), 0, "/data/video.mp4")
 	require.NoError(t, err)
 }
 
@@ -122,13 +122,13 @@ func TestAppendSegmentEntry_writesHeaderAndEntry(t *testing.T) {
 	start := time.Unix(1_000_000_000, 123_456_789)
 	segFile := "/data/top_camera_20260612T164629_876543210Z.mp4"
 
-	err := appendSegmentEntry(path, start, segFile)
+	err := appendSegmentEntry(path, start, 12345, segFile)
 	require.NoError(t, err)
 
 	data, err := os.ReadFile(path)
 	require.NoError(t, err)
 	content := string(data)
-	require.Contains(t, content, "recording_start_unix_ns,segment_file")
+	require.Contains(t, content, "recording_start_unix_ns,segment_file,mono_ns")
 	require.Contains(t, content, fmt.Sprintf("%d", start.UnixNano()))
 	require.Contains(t, content, filepath.Base(segFile))
 }
@@ -138,8 +138,8 @@ func TestAppendSegmentEntry_headerWrittenOnce(t *testing.T) {
 	seg1 := "/data/video_seg1.mp4"
 	seg2 := "/data/video_seg2.mp4"
 
-	require.NoError(t, appendSegmentEntry(path, time.Unix(1_000_000_000, 0), seg1))
-	require.NoError(t, appendSegmentEntry(path, time.Unix(2_000_000_000, 0), seg2))
+	require.NoError(t, appendSegmentEntry(path, time.Unix(1_000_000_000, 0), 1, seg1))
+	require.NoError(t, appendSegmentEntry(path, time.Unix(2_000_000_000, 0), 2, seg2))
 
 	data, err := os.ReadFile(path)
 	require.NoError(t, err)

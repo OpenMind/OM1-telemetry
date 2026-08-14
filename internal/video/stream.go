@@ -10,6 +10,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"om1-telemetry/internal/clock"
 	"om1-telemetry/internal/heartbeat"
 	"om1-telemetry/internal/recordutil"
 )
@@ -90,6 +91,7 @@ func (v *VideoRTSPStream) loop(ctx context.Context) {
 
 func (v *VideoRTSPStream) record(ctx context.Context) error {
 	start := time.Now()
+	startMono := clock.MonoNs()
 	segmentFile := recordutil.UniqueSegmentFile(v.cfg.OutputFile, start)
 
 	cmd := exec.CommandContext(ctx, "ffmpeg",
@@ -107,7 +109,7 @@ func (v *VideoRTSPStream) record(ctx context.Context) error {
 	if err := cmd.Start(); err != nil {
 		return fmt.Errorf("start video recorder: %w", err)
 	}
-	if err := appendSegmentEntry(v.cfg.TimestampsFile, start, segmentFile); err != nil {
+	if err := appendSegmentEntry(v.cfg.TimestampsFile, start, startMono, segmentFile); err != nil {
 		slog.Error("failed to append video segment entry",
 			"file", v.cfg.TimestampsFile, "err", err)
 	}
@@ -137,16 +139,16 @@ func (v *VideoRTSPStream) record(ctx context.Context) error {
 
 	if v.cfg.FramesFile != "" {
 		v.pending.Add(1)
-		go func(segFile string, startUnixNs int64) {
+		go func(segFile string, startUnixNs, startMonoNs int64) {
 			defer v.markDone()
-			if err := v.framesWrite.ExtractAndAppend(segFile, "v:0", startUnixNs); err != nil {
+			if err := v.framesWrite.ExtractAndAppend(segFile, "v:0", startUnixNs, startMonoNs); err != nil {
 				slog.Error("video frames extraction failed",
 					"camera", v.cfg.HeartbeatName, "segment", segFile, "err", err)
 			} else {
 				slog.Info("video frames extracted",
 					"camera", v.cfg.HeartbeatName, "segment", filepath.Base(segFile))
 			}
-		}(segmentFile, start.UnixNano())
+		}(segmentFile, start.UnixNano(), startMono)
 	}
 
 	return waitErr
@@ -170,7 +172,7 @@ func (v *VideoRTSPStream) waitForPending() {
 	}
 }
 
-func appendSegmentEntry(path string, start time.Time, segmentFile string) error {
+func appendSegmentEntry(path string, start time.Time, startMonoNs int64, segmentFile string) error {
 	if path == "" {
 		return nil
 	}
@@ -185,12 +187,12 @@ func appendSegmentEntry(path string, start time.Time, segmentFile string) error 
 		return fmt.Errorf("stat: %w", err)
 	}
 	if stat.Size() == 0 {
-		if _, err := fmt.Fprintln(f, "recording_start_unix_ns,segment_file"); err != nil {
+		if _, err := fmt.Fprintln(f, "recording_start_unix_ns,segment_file,mono_ns"); err != nil {
 			return fmt.Errorf("write header: %w", err)
 		}
 	}
 
-	if _, err := fmt.Fprintf(f, "%d,%s\n", start.UnixNano(), filepath.Base(segmentFile)); err != nil {
+	if _, err := fmt.Fprintf(f, "%d,%s,%d\n", start.UnixNano(), filepath.Base(segmentFile), startMonoNs); err != nil {
 		return fmt.Errorf("write entry: %w", err)
 	}
 	return f.Sync()

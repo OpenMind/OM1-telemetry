@@ -10,6 +10,7 @@ import (
 
 	"github.com/eclipse-zenoh/zenoh-go/zenoh"
 
+	"om1-telemetry/internal/clock"
 	"om1-telemetry/internal/heartbeat"
 	"om1-telemetry/internal/recordutil"
 	"om1-telemetry/internal/zenohutil"
@@ -138,7 +139,7 @@ func (l *LidarStream) record(ctx context.Context) error {
 	}()
 
 	if tsResult.PrevSize == 0 {
-		if _, err := fmt.Fprintln(tsFile, "unix_ns,seq,byte_offset"); err != nil {
+		if _, err := fmt.Fprintln(tsFile, "unix_ns,seq,byte_offset,mono_ns"); err != nil {
 			return fmt.Errorf("write header: %w", err)
 		}
 	}
@@ -219,6 +220,11 @@ func (l *LidarStream) record(ctx context.Context) error {
 			} else {
 				unixNs = time.Now().UnixNano()
 			}
+			// Receive time on the boot clock. unixNs above is the publisher's
+			// stamp and shares this host's wall clock, so a clock step spoils
+			// both; monoNs is immune to the step and says which correction
+			// applies to this row. See internal/clock.
+			monoNs := clock.MonoNs()
 
 			payload := sample.Payload()
 			n, err := dataFile.Write(payload.Bytes())
@@ -226,7 +232,7 @@ func (l *LidarStream) record(ctx context.Context) error {
 				return fmt.Errorf("write data: %w", err)
 			}
 
-			if _, err := fmt.Fprintf(tsFile, "%d,%d,%d\n", unixNs, seq, byteOffset); err != nil {
+			if _, err := fmt.Fprintf(tsFile, "%d,%d,%d,%d\n", unixNs, seq, byteOffset, monoNs); err != nil {
 				return fmt.Errorf("write timestamp: %w", err)
 			}
 

@@ -1,0 +1,35 @@
+version: '3.8'
+
+services:
+  om1_telemetry:
+    image: public.ecr.aws/b8k9c8n5/openmind/om1_telemetry:latest
+    container_name: om1_telemetry
+    restart: unless-stopped
+    network_mode: host
+    env_file:
+      - /home/openmind/.ota/om1_telemetry_latest.env
+    environment:
+      - RECORDINGS_DIR=/app/recordings
+      # Pinned rather than defaulted from the host shell. This selects the
+      # recording profile in config/robots.yaml -- which cameras and which
+      # Zenoh topics -- so inheriting it from whatever environment happened to
+      # start docker is not something to leave to chance.
+      - ROBOT_TYPE=${ROBOT_TYPE:-g1}
+    volumes:
+      - /home/openmind/om1/om1_telemetry/recordings:/app/recordings
+      # Lets the recorder tell an NTP-synchronized clock from a stale one.
+      # docker.service is ordered After=time-set.target, which only means the
+      # clock has been set to *something* -- a robot that booted offline comes
+      # up with a stale RTC value and starts recording under it. With this
+      # mounted, such a session is written to recordings/pending/ and renamed
+      # to its true date automatically once NTP lands. Without it the recorder
+      # cannot tell, and behaves as it always did.
+      - /run/systemd/timesync:/run/systemd/timesync:ro
+      # Optional: mount a robots.yaml here and set ROBOT_PROFILES_FILE to
+      # change what is recorded without rebuilding the image.
+      # - ./config/robots.yaml:/app/robots.yaml:ro
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"

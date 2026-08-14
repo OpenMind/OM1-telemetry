@@ -23,6 +23,9 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
+import timebase
+
+# ── ANSI colors ───────────────────────────────────────────────────────
 G, R, Y, B, BOLD, END = (
     "\033[92m", "\033[91m", "\033[93m", "\033[94m", "\033[1m", "\033[0m"
 )
@@ -37,6 +40,10 @@ STREAMS = [
     ("depth",      "depth_timestamps.csv",      15,   "unix_ns"),
     ("odom",       "odom_timestamps.csv",       150,  "unix_ns"),   # Go2 publishes /odom at ~150 Hz
     ("audio",      "audio_packets.csv",         100, "unix_ns"),  # Opus 10ms frames → 100 pkt/s
+    # G1: the video-processor's two pre-CV streams.
+    ("front_cam_raw", "front_camera_raw_frames.csv", 30, "wallclock_unix_ns"),
+    ("rear_cam_raw",  "rear_camera_raw_frames.csv",  30, "wallclock_unix_ns"),
+    # Go2.
     ("top_cam",    "top_camera_frames.csv",     30,   "wallclock_unix_ns"),
     ("front_cam",  "front_camera_frames.csv",   30,   "wallclock_unix_ns"),
     ("down_cam",   "down_camera_frames.csv",    15,   "wallclock_unix_ns"),
@@ -44,7 +51,7 @@ STREAMS = [
 ]
 
 # ── 1. Per-stream statistics ─────────────────────────────────────────
-def stream_stats(csv_path: Path, expected_hz: float, time_col: str):
+def stream_stats(csv_path: Path, expected_hz: float, time_col: str, tb=None):
     """Return dict of stats, or None if file missing/unparseable."""
     if not csv_path.exists():
         return None
@@ -63,9 +70,24 @@ def stream_stats(csv_path: Path, expected_hz: float, time_col: str):
         else:
             return {"error": f"no time column in {df.columns.tolist()}"}
 
-    ts = df[time_col].astype(np.int64).values
+    # A session recorded across an NTP correction has a wall clock that jumps
+    # mid-file. Correcting on read is what keeps the monotonicity check below
+    # meaningful instead of flagging the clock fix as data corruption.
+    if tb is not None and tb.needs_correction:
+        df, _ = timebase.correct_dataframe(df, tb, time_col)
+
+    ts_series = pd.to_numeric(df[time_col], errors="coerce")
+    n_bad = int(ts_series.isna().sum())
+    if n_bad > 0:
+        # Drop rows with missing/non-numeric timestamps (e.g., last row
+        # written when ffmpeg/recorder was killed mid-line).
+        df = df.loc[ts_series.notna()].reset_index(drop=True)
+        ts_series = ts_series.dropna().reset_index(drop=True)
+    if len(ts_series) == 0:
+        return {"error": f"all {n_bad} rows had invalid timestamps"}
+    ts = ts_series.astype(np.int64).values
     if len(ts) < 2:
-        return {"error": "< 2 samples"}
+        return {"error": "< 2 valid samples"}
 
     duration = (ts[-1] - ts[0]) / 1e9
     rate = (len(ts) - 1) / duration if duration > 0 else 0
@@ -84,6 +106,7 @@ def stream_stats(csv_path: Path, expected_hz: float, time_col: str):
 
     return {
         "n": len(ts),
+        "n_bad": n_bad,
         "duration_s": duration,
         "rate_hz": rate,
         "expected_hz": expected_hz,
@@ -118,6 +141,8 @@ def print_stream_table(stats: dict):
         # Status: ok unless something wrong
         status = OK_
         notes = []
+        if s.get("n_bad", 0) > 0:
+            status = WARN; notes.append(f"{s['n_bad']} bad ts rows dropped")
         if not s["monotonic"]:
             status = BAD; notes.append("non-monotonic")
         elif s["gaps"] > 5:
@@ -144,6 +169,7 @@ def print_stream_table(stats: dict):
         print(line)
 
 
+# ── 2. Format validation ─────────────────────────────────────────────
 def ffprobe_streams(path: Path):
     try:
         r = subprocess.run(
@@ -237,7 +263,8 @@ def validate_formats(session: Path):
                   f"actual {info['actual_size']:,} B (off by {abs(info['expected_size']-info['actual_size'])} B)")
 
     # Video files
-    for prefix in ["top_camera", "front_camera", "down_camera"]:
+    for prefix in ["front_camera_raw", "rear_camera_raw",
+                   "top_camera", "front_camera", "down_camera"]:
         mp4 = session / f"{prefix}.mp4"
         if not mp4.exists():
             continue
@@ -269,6 +296,7 @@ def validate_formats(session: Path):
             print(f"  {OK_} audio.ogg: {codec} {sr} Hz, {ch} ch ({ogg.stat().st_size:,} B)")
 
 
+# ── 3. Cross-modal alignment ─────────────────────────────────────────
 def nearest_neighbor_align(master_ts, slave_ts):
     """For each master timestamp, find nearest slave timestamp."""
     if len(slave_ts) == 0:
@@ -372,6 +400,7 @@ def cross_alignment(stats: dict):
     return results, skipped
 
 
+# ── 4. Calibration check ─────────────────────────────────────────────
 def check_calibration(session: Path):
     print(f"\n{BOLD}Calibration{END}")
     cal = session.parent / "calibration"
@@ -401,6 +430,7 @@ def check_calibration(session: Path):
     return have_critical
 
 
+# ── 5. Final verdict ─────────────────────────────────────────────────
 def final_verdict(stats: dict, align: dict, skipped: list, has_calib: bool):
     print(f"\n{BOLD}ML training readiness verdict{END}")
     print("─" * 50)
@@ -465,6 +495,7 @@ def final_verdict(stats: dict, align: dict, skipped: list, has_calib: bool):
     return True
 
 
+# ── 6. Optional plot ─────────────────────────────────────────────────
 def plot_timeline(stats: dict, output_path: Path):
     try:
         import matplotlib.pyplot as plt
@@ -497,6 +528,7 @@ def plot_timeline(stats: dict, output_path: Path):
     print(f"  {OK_} Saved timeline plot to {output_path}")
 
 
+# ── main ─────────────────────────────────────────────────────────────
 def main():
     p = argparse.ArgumentParser()
     p.add_argument("session", help="Path to a recording session directory")
@@ -514,8 +546,16 @@ def main():
 
     # Collect per-stream stats
     stats = {}
+    tb = timebase.load(session)
+    print(f"\n{BOLD}Clock{END}: {timebase.describe(tb)}")
+    if tb.needs_correction:
+        print(f"  {WARN} recorded across an NTP correction; "
+              f"timestamps below are corrected on read (files unchanged)")
+    elif tb.records and not tb.saw_sync:
+        print(f"  {WARN} this session's timestamps cannot be trusted or corrected")
+
     for name, csv_name, expected_hz, time_col in STREAMS:
-        stats[name] = stream_stats(session / csv_name, expected_hz, time_col)
+        stats[name] = stream_stats(session / csv_name, expected_hz, time_col, tb)
 
     print_stream_table(stats)
     validate_formats(session)

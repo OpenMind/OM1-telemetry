@@ -1,6 +1,7 @@
 package config
 
 import (
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -17,13 +18,17 @@ import (
 	"om1-telemetry/internal/video"
 )
 
+const defaultZenohEndpoint = "tcp/127.0.0.1:7447"
+
 type Config struct {
 	Collect          bool
 	RobotType        RobotType
 	EnableLidar      bool
 	EnablePointCloud bool
+	EnableDepth      bool
+	EnableOdom       bool
+	EnableLowstate   bool
 	SessionDir       string
-	SessionStartNs   int64
 	Video            []VideoConfig
 	Audio            AudioConfig
 	Features         FeaturesConfig
@@ -61,6 +66,7 @@ type FeaturesConfig struct {
 type LidarConfig struct {
 	ZenohEndpoint  string
 	ZenohTopic     string
+	RateHz         float64
 	TimestampsFile string
 	DataFile       string
 }
@@ -68,6 +74,7 @@ type LidarConfig struct {
 type PointCloudConfig struct {
 	ZenohEndpoint  string
 	ZenohTopic     string
+	RateHz         float64
 	TimestampsFile string
 	DataFile       string
 }
@@ -75,6 +82,7 @@ type PointCloudConfig struct {
 type DepthConfig struct {
 	ZenohEndpoint  string
 	ZenohTopic     string
+	RateHz         float64
 	TimestampsFile string
 	DataFile       string
 }
@@ -82,6 +90,7 @@ type DepthConfig struct {
 type OdomConfig struct {
 	ZenohEndpoint  string
 	ZenohTopic     string
+	RateHz         float64
 	TimestampsFile string
 	DataFile       string
 }
@@ -89,6 +98,7 @@ type OdomConfig struct {
 type LowstateConfig struct {
 	ZenohEndpoint  string
 	ZenohTopic     string
+	RateHz         float64
 	TimestampsFile string
 	DataFile       string
 }
@@ -100,32 +110,41 @@ type NetworkConfig struct {
 	DataFile     string
 }
 
-func Load() Config {
-	now := time.Now()
-	baseDir := envStr("RECORDINGS_DIR", "recordings")
-	sessionDir := filepath.Join(
-		baseDir,
-		now.Format("2006-01-02"),
-		now.Format("2006-01-02_15-04-05"),
-	)
+// RecordingsDir is the root under which sessions are created. The session
+// package needs it before Load runs, since it decides the session directory
+// name (which depends on whether the clock can be trusted yet).
+func RecordingsDir() string {
+	return envStr("RECORDINGS_DIR", "recordings")
+}
 
+// Load builds the recorder configuration for a session directory that the
+// caller has already created.
+//
+// Every value resolves in the order: environment variable, then the robot
+// profile (config/robots.yaml), then a built-in default. The session directory
+// is passed in rather than derived from time.Now(): on a robot that booted
+// without a network the clock can be days off, and a directory named from it
+// would be wrong and frozen for the whole session. See internal/session.
+func Load(sessionDir string) Config {
 	robotType, profile := ResolveProfile()
 
 	return Config{
 		Collect:          envBool("ENABLE_COLLECTION", true),
 		RobotType:        robotType,
-		EnableLidar:      envBool("ENABLE_LIDAR", profile.EnableLidar),
-		EnablePointCloud: envBool("ENABLE_POINTCLOUD", profile.EnablePointCloud),
 		SessionDir:       sessionDir,
-		SessionStartNs:   now.UnixNano(),
-		Video:            videoConfigs(sessionDir),
+		EnableLidar:      topicEnabled(profile, TopicLidar, "ENABLE_LIDAR", "LIDAR_ZENOH_TOPIC"),
+		EnablePointCloud: topicEnabled(profile, TopicPointCloud, "ENABLE_POINTCLOUD", "POINTCLOUD_ZENOH_TOPIC"),
+		EnableDepth:      topicEnabled(profile, TopicDepth, "ENABLE_DEPTH", "DEPTH_ZENOH_TOPIC"),
+		EnableOdom:       topicEnabled(profile, TopicOdom, "ENABLE_ODOM", "ODOM_ZENOH_TOPIC"),
+		EnableLowstate:   topicEnabled(profile, TopicLowstate, "ENABLE_LOWSTATE", "LOWSTATE_ZENOH_TOPIC"),
+		Video:            videoConfigs(profile, sessionDir),
 		Audio: AudioConfig{
 			// Audio is the audio track of the video-processor's muxed session
 			// stream (single capture clock). ffmpeg selects it with -vn. Served
 			// gst-direct on :8555 for the lowest-latency, capture-stamped source;
 			// override to mediamtx (rtsp://localhost:8554/live) for an off-host
 			// recorder.
-			RTSPURL:        envStr("AUDIO_RTSP_URL", "rtsp://localhost:8555/live"),
+			RTSPURL:        envStr(orDefault(profile.Audio.Env, "AUDIO_RTSP_URL"), profile.Audio.URL),
 			OutputFile:     filepath.Join(sessionDir, "audio.ogg"),
 			TimestampsFile: filepath.Join(sessionDir, "audio_timestamps.csv"),
 		},
@@ -138,32 +157,37 @@ func Load() Config {
 			TimebaseFile:   filepath.Join(sessionDir, "video_features_timebase.json"),
 		},
 		Lidar: LidarConfig{
-			ZenohEndpoint:  envStr("LIDAR_ZENOH_ENDPOINT", "tcp/127.0.0.1:7447"),
-			ZenohTopic:     envStr("LIDAR_ZENOH_TOPIC", profile.LidarTopic),
+			ZenohEndpoint:  envStr("LIDAR_ZENOH_ENDPOINT", defaultZenohEndpoint),
+			ZenohTopic:     topicKey(profile, TopicLidar, "LIDAR_ZENOH_TOPIC"),
+			RateHz:         topicRate(profile, TopicLidar, 10),
 			TimestampsFile: filepath.Join(sessionDir, "lidar_timestamps.csv"),
 			DataFile:       filepath.Join(sessionDir, "lidar_scans.bin"),
 		},
 		PointCloud: PointCloudConfig{
-			ZenohEndpoint:  envStr("POINTCLOUD_ZENOH_ENDPOINT", "tcp/127.0.0.1:7447"),
-			ZenohTopic:     envStr("POINTCLOUD_ZENOH_TOPIC", profile.PointCloudTopic),
+			ZenohEndpoint:  envStr("POINTCLOUD_ZENOH_ENDPOINT", defaultZenohEndpoint),
+			ZenohTopic:     topicKey(profile, TopicPointCloud, "POINTCLOUD_ZENOH_TOPIC"),
+			RateHz:         topicRate(profile, TopicPointCloud, 10),
 			TimestampsFile: filepath.Join(sessionDir, "pointcloud_timestamps.csv"),
 			DataFile:       filepath.Join(sessionDir, "pointcloud_frames.bin"),
 		},
 		Depth: DepthConfig{
-			ZenohEndpoint:  envStr("DEPTH_ZENOH_ENDPOINT", "tcp/127.0.0.1:7447"),
-			ZenohTopic:     envStr("DEPTH_ZENOH_TOPIC", profile.DepthTopic),
+			ZenohEndpoint:  envStr("DEPTH_ZENOH_ENDPOINT", defaultZenohEndpoint),
+			ZenohTopic:     topicKey(profile, TopicDepth, "DEPTH_ZENOH_TOPIC"),
+			RateHz:         topicRate(profile, TopicDepth, 10),
 			TimestampsFile: filepath.Join(sessionDir, "depth_timestamps.csv"),
 			DataFile:       filepath.Join(sessionDir, "depth_frames.bin"),
 		},
 		Odom: OdomConfig{
-			ZenohEndpoint:  envStr("ODOM_ZENOH_ENDPOINT", "tcp/127.0.0.1:7447"),
-			ZenohTopic:     envStr("ODOM_ZENOH_TOPIC", profile.OdomTopic),
+			ZenohEndpoint:  envStr("ODOM_ZENOH_ENDPOINT", defaultZenohEndpoint),
+			ZenohTopic:     topicKey(profile, TopicOdom, "ODOM_ZENOH_TOPIC"),
+			RateHz:         topicRate(profile, TopicOdom, 30),
 			TimestampsFile: filepath.Join(sessionDir, "odom_timestamps.csv"),
 			DataFile:       filepath.Join(sessionDir, "odom_frames.bin"),
 		},
 		Lowstate: LowstateConfig{
-			ZenohEndpoint:  envStr("LOWSTATE_ZENOH_ENDPOINT", "tcp/127.0.0.1:7447"),
-			ZenohTopic:     envStr("LOWSTATE_ZENOH_TOPIC", profile.LowstateTopic),
+			ZenohEndpoint:  envStr("LOWSTATE_ZENOH_ENDPOINT", defaultZenohEndpoint),
+			ZenohTopic:     topicKey(profile, TopicLowstate, "LOWSTATE_ZENOH_TOPIC"),
+			RateHz:         topicRate(profile, TopicLowstate, 400),
 			TimestampsFile: filepath.Join(sessionDir, "lowstate_timestamps.csv"),
 			DataFile:       filepath.Join(sessionDir, "lowstate_frames.bin"),
 		},
@@ -176,31 +200,58 @@ func Load() Config {
 	}
 }
 
-func videoConfigs(sessionDir string) []VideoConfig {
-	cameras := []struct {
-		name       string
-		defaultURL string
-	}{
-		// top_camera is served by the OM1 video-processor's GStreamer pipeline.
-		// /raw is the clean (no overlay/blur) camera view — the ground-truth
-		// image a recorder wants — on gst-direct :8556. Use :8555/live instead
-		// to record the processed view, or mediamtx :8554/raw for an off-host
-		// recorder.
-		{"top_camera", "rtsp://localhost:8556/raw"},
-		// front/down cameras are served by other sources on the robot; left on
-		// their existing mountpoints.
-		{"front_camera", "rtsp://localhost:8554/front_camera"},
-		{"down_camera", "rtsp://localhost:8554/down_camera"},
+// topicKey resolves a topic's Zenoh key expression: environment variable first,
+// then the profile.
+func topicKey(p Profile, name, envKey string) string {
+	t, _ := p.Topic(name)
+	return envStr(envKey, t.Key)
+}
+
+// topicRate is the nominal publish rate, used only to size the stall detector.
+func topicRate(p Profile, name string, fallback float64) float64 {
+	if t, ok := p.Topic(name); ok && t.RateHz > 0 {
+		return t.RateHz
+	}
+	return fallback
+}
+
+// topicEnabled decides whether a topic is recorded.
+//
+// A topic the profile does not declare cannot be enabled by its ENABLE_ flag
+// alone -- there would be no key to subscribe to, and subscribing to "" records
+// nothing while reporting success. Supplying the key by environment variable
+// does enable it, which is how a robot gains a sensor its profile predates.
+func topicEnabled(p Profile, name, enableEnv, keyEnv string) bool {
+	t, declared := p.Topic(name)
+	enabled := declared && t.Enabled
+
+	switch os.Getenv(enableEnv) {
+	case "false", "0", "no":
+		return false
+	case "true", "1", "yes":
+		enabled = true
 	}
 
-	configs := make([]VideoConfig, 0, len(cameras))
-	for _, cam := range cameras {
-		envKey := strings.ToUpper(cam.name) + "_RTSP_URL"
+	if enabled && topicKey(p, name, keyEnv) == "" {
+		slog.Warn("topic enabled but no key configured; not recording",
+			"topic", name, "hint", "set "+keyEnv+" or add it to the robot profile")
+		return false
+	}
+	return enabled
+}
+
+// videoConfigs builds one recorder per camera in the profile.
+func videoConfigs(p Profile, sessionDir string) []VideoConfig {
+	configs := make([]VideoConfig, 0, len(p.Cameras))
+	for _, cam := range p.Cameras {
+		// The profile names the override variable so a camera can be renamed
+		// on disk without breaking deployments that set the old one.
+		envKey := orDefault(cam.Env, strings.ToUpper(cam.Name)+"_RTSP_URL")
 		configs = append(configs, VideoConfig{
-			Name:           cam.name,
-			RTSPURL:        envStr(envKey, cam.defaultURL),
-			OutputFile:     filepath.Join(sessionDir, cam.name+".mp4"),
-			TimestampsFile: filepath.Join(sessionDir, cam.name+"_timestamps.csv"),
+			Name:           cam.Name,
+			RTSPURL:        envStr(envKey, cam.URL),
+			OutputFile:     filepath.Join(sessionDir, cam.Name+".mp4"),
+			TimestampsFile: filepath.Join(sessionDir, cam.Name+"_timestamps.csv"),
 		})
 	}
 	return configs
@@ -288,6 +339,13 @@ func (c NetworkConfig) NetworkStreamConfig() network.Config {
 		PollInterval: c.PollInterval,
 		DataFile:     c.DataFile,
 	}
+}
+
+func orDefault(value, fallback string) string {
+	if value != "" {
+		return value
+	}
+	return fallback
 }
 
 func envStr(key, defaultValue string) string {

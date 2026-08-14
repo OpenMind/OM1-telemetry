@@ -18,6 +18,8 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
+import timebase
+
 
 # Per-stream timestamp column names + bin file (None = no bin, just timestamps)
 STREAMS = {
@@ -31,18 +33,30 @@ STREAMS = {
     # this aligns precisely with the source-stamped Zenoh streams — unlike the
     # camera streams, which are anchored to record-start wall clock.
     "video_features": ("video_features_timestamps.csv", None,            "unix_ns"),
+    # G1 records the video-processor's two pre-CV streams. Go2 records
+    # top/front/down. Both sets are listed; a session simply lacks the files
+    # for the cameras its robot does not have.
+    "front_cam_raw": ("front_camera_raw_frames.csv", None,               "wallclock_unix_ns"),
+    "rear_cam_raw":  ("rear_camera_raw_frames.csv",  None,               "wallclock_unix_ns"),
     "top_cam":    ("top_camera_frames.csv",     None,                    "wallclock_unix_ns"),
     "front_cam":  ("front_camera_frames.csv",   None,                    "wallclock_unix_ns"),
     "down_cam":   ("down_camera_frames.csv",    None,                    "wallclock_unix_ns"),
 }
 
 
-def load_stream(session: Path, csv_name: str, time_col: str):
-    """Load a timestamp CSV.  Returns (timestamps_ns, row_indices, df)."""
+def load_stream(session: Path, csv_name: str, time_col: str, tb=None):
+    """Load a timestamp CSV.  Returns (timestamps_ns, row_indices, df).
+
+    When the session was recorded across an NTP correction (a robot that booted
+    offline), the wall-clock column is shifted back to true UTC using the clock
+    journal. The file on disk is not modified.
+    """
     path = session / csv_name
     if not path.exists():
         return None, None, None
     df = pd.read_csv(path)
+    if tb is not None and tb.needs_correction:
+        df, _ = timebase.correct_dataframe(df, tb)
     if time_col not in df.columns:
         # fall through to alternative column names
         for alt in ("wallclock_unix_ns", "unix_ns"):
@@ -106,7 +120,12 @@ def main():
         print(f"❌ unknown master '{args.master}'. choices: {list(STREAMS)}")
         return 1
     master_csv, _, master_time_col = STREAMS[args.master]
-    master_ts, master_idx, master_df = load_stream(session, master_csv, master_time_col)
+    tb = timebase.load(session)
+    if tb.needs_correction:
+        print(f"clock: {timebase.describe(tb)}")
+        print("       timestamps below are corrected; the CSVs on disk are unchanged")
+
+    master_ts, master_idx, master_df = load_stream(session, master_csv, master_time_col, tb)
     if master_ts is None:
         print(f"❌ master stream '{args.master}' not found in session")
         return 1
@@ -122,7 +141,7 @@ def main():
     for name, (csv_name, _, time_col) in STREAMS.items():
         if name == args.master:
             continue
-        slave_ts, slave_idx, slave_df = load_stream(session, csv_name, time_col)
+        slave_ts, slave_idx, slave_df = load_stream(session, csv_name, time_col, tb)
         if slave_ts is None:
             print(f"  - {name}: not found, skipping")
             continue
