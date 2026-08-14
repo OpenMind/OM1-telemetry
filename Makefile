@@ -1,4 +1,4 @@
-.PHONY: build run download-zenohc test tidy
+.PHONY: build zenohdup run download-zenohc test tidy lint
 
 BIN       := om1-telemetry
 CMD       := ./cmd/main
@@ -55,6 +55,11 @@ download-zenohc:
 build: download-zenohc
 	@mkdir -p $(BUILD_DIR)
 	go build -o $(BUILD_DIR)/$(BIN) $(CMD)
+
+# Diagnostic: is a Zenoh topic being delivered more than once?
+zenohdup: download-zenohc
+	@mkdir -p $(BUILD_DIR)
+	go build -o $(BUILD_DIR)/zenohdup ./cmd/zenohdup
 
 run: download-zenohc
 	go run $(CMD)
