@@ -24,7 +24,7 @@ func TestResolveProfile_g1(t *testing.T) {
 	rt, p := ResolveProfile()
 
 	require.Equal(t, RobotG1, rt)
-	require.Len(t, p.Cameras, 2)
+	require.Len(t, p.Cameras, 3)
 
 	pc, ok := p.Topic(TopicPointCloud)
 	require.True(t, ok, "G1 records the Livox MID360")
@@ -115,7 +115,7 @@ func TestResolveProfile_unreadableFileFallsBackToEmbedded(t *testing.T) {
 
 	_, p := ResolveProfile()
 
-	require.Len(t, p.Cameras, 2, "fell back to the embedded G1 profile")
+	require.Len(t, p.Cameras, 3, "fell back to the embedded G1 profile")
 }
 
 func TestResolveProfile_malformedFileFallsBackToEmbedded(t *testing.T) {
@@ -127,7 +127,7 @@ func TestResolveProfile_malformedFileFallsBackToEmbedded(t *testing.T) {
 
 	_, p := ResolveProfile()
 
-	require.Len(t, p.Cameras, 2)
+	require.Len(t, p.Cameras, 3)
 }
 
 func TestParseProfiles_rejectsIncompleteEntries(t *testing.T) {

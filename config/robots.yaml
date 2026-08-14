@@ -35,6 +35,19 @@ robots:
       - name: rear_camera_raw
         url: rtsp://localhost:8558/raw
         env: REAR_CAMERA_RAW_RTSP_URL
+      # The RealSense's RGB view, which points down. om1_sensor's
+      # d435_camera_stream node publishes it here (see its
+      # get_rtsp_camera_name, which returns "down_camera"), already H.264 at
+      # 424x240/15 -- about 0.18 GB an hour. The same image is also on Zenoh as
+      # camera/realsense2_camera_node/color/image_raw, but as raw rgb8: 16.5 GB
+      # an hour, and re-encoding it here would cost 5x this stream for a
+      # picture the robot has already encoded.
+      #
+      # 404s on a G1 with no RealSense fitted, since the node has nothing to
+      # publish. Point DOWN_CAMERA_RTSP_URL elsewhere or remove this entry.
+      - name: down_camera
+        url: rtsp://localhost:8554/down_camera
+        env: DOWN_CAMERA_RTSP_URL
 
     audio:
       url: rtsp://localhost:8555/live

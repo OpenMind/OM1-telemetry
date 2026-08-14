@@ -40,7 +40,9 @@ STREAMS = [
     ("pointcloud", "pointcloud_timestamps.csv", 10,   "unix_ns"),
     ("depth",      "depth_timestamps.csv",      15,   "unix_ns"),
     ("odom",       "odom_timestamps.csv",       150,  "unix_ns"),   # Go2 publishes /odom at ~150 Hz
-    ("audio",      "audio_packets.csv",         100, "unix_ns"),  # Opus 10ms frames → 100 pkt/s
+    # 20 ms Opus frames -> 50 packets/s. Measured at exactly 50.0 Hz on the
+    # video-processor's /live stream; the previous 100 assumed 10 ms frames.
+    ("audio",      "audio_packets.csv",         50,  "unix_ns"),
     # G1: the video-processor's two pre-CV streams.
     ("front_cam_raw", "front_camera_raw_frames.csv", 30, "wallclock_unix_ns"),
     ("rear_cam_raw",  "rear_camera_raw_frames.csv",  30, "wallclock_unix_ns"),
@@ -194,10 +196,15 @@ def print_stream_table(stats: dict):
         if s["seq_gaps"] and s["seq_gaps"] > 5:
             status = WARN; notes.append(f"{s['seq_gaps']} seq gaps")
 
-        # Rate sanity: within 50% of expected
+        # Rate sanity. The upper bound is deliberately below 2.0: a stream
+        # delivered twice -- which a Zenoh/DDS bridge loop does, and which was
+        # observed on both RealSense topics -- lands at exactly 2.0x and would
+        # slip through a "> 2.0" test. Duplication should be caught here rather
+        # than silently de-duplicated by the recorder, which would hide a
+        # broken bridge while halving the symptom.
         if s["expected_hz"] > 0:
             ratio = s["rate_hz"] / s["expected_hz"]
-            if ratio < 0.5 or ratio > 2.0:
+            if ratio < 0.5 or ratio > 1.5:
                 status = WARN
                 notes.append(f"rate {ratio*100:.0f}% of expected")
 

@@ -1,8 +1,8 @@
+
 bin/
-
-.zenoh-c/
-
+.claude/
 .DS_Store
-
-recordings/
+myenv/
 __pycache__/
+recordings/
+.zenoh-c/

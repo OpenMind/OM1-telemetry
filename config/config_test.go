@@ -34,12 +34,15 @@ func TestLoad_g1RecordsBothRawCameras(t *testing.T) {
 
 	cfg := Load(testSessionDir)
 
-	require.Len(t, cfg.Video, 2, "G1 records the front and rear raw streams")
+	require.Len(t, cfg.Video, 3, "front raw, rear raw, and the RealSense RGB down view")
 	require.Equal(t, "front_camera_raw", cfg.Video[0].Name)
 	require.Equal(t, "rtsp://localhost:8556/raw", cfg.Video[0].RTSPURL)
 	require.Equal(t, "rear_camera_raw", cfg.Video[1].Name)
 	require.Equal(t, "rtsp://localhost:8558/raw", cfg.Video[1].RTSPURL,
 		"the rear camera is served gst-direct on 8558, not via mediamtx")
+	require.Equal(t, "down_camera", cfg.Video[2].Name)
+	require.Equal(t, "rtsp://localhost:8554/down_camera", cfg.Video[2].RTSPURL,
+		"the RealSense RGB view is already H.264 on mediamtx, published by om1_sensor")
 	require.Equal(t, "rtsp://localhost:8555/live", cfg.Audio.RTSPURL)
 }
 
@@ -155,6 +158,7 @@ func TestLoad_outputFilesInsideSessionDir(t *testing.T) {
 	require.Equal(t, testSessionDir, filepath.Dir(cfg.Video[0].OutputFile))
 	require.Equal(t, "front_camera_raw.mp4", filepath.Base(cfg.Video[0].OutputFile))
 	require.Equal(t, "rear_camera_raw.mp4", filepath.Base(cfg.Video[1].OutputFile))
+	require.Equal(t, "down_camera.mp4", filepath.Base(cfg.Video[2].OutputFile))
 	require.Equal(t, "audio.ogg", filepath.Base(cfg.Audio.OutputFile))
 	require.Equal(t, testSessionDir, filepath.Dir(cfg.PointCloud.DataFile))
 	require.Equal(t, "pointcloud_frames.bin", filepath.Base(cfg.PointCloud.DataFile))

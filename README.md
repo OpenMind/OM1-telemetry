@@ -28,11 +28,12 @@ at build time, so nothing needs mounting for the defaults to work.
 
 | | `ROBOT_TYPE=g1` | `ROBOT_TYPE=go2` |
 |---|---|---|
-| cameras | `front_camera_raw` (:8556/raw), `rear_camera_raw` (:8558/raw) | `top_camera` (:8556/raw), `front_camera`, `down_camera` |
+| cameras | `front_camera_raw` (:8556/raw), `rear_camera_raw` (:8558/raw), `down_camera` (:8554/down_camera) | `top_camera` (:8556/raw), `front_camera`, `down_camera` |
 | lidar `scan` | ✅ | ✅ |
 | point cloud | ✅ `rt/utlidar/cloud_livox_mid360` | — not published by this robot |
 | odometry, lowstate | ✅ | ✅ |
 | depth | ✅ D435i, 15 Hz (RVL, lossless) | ✅ |
+| down camera | ✅ RealSense RGB via `down_camera` RTSP, 15 Hz | ✅ |
 
 To change what a robot records **without rebuilding**, mount a replacement file
 and point `ROBOT_PROFILES_FILE` at it. A missing or malformed override falls
@@ -58,6 +59,22 @@ permanently broken.
 The profile has it enabled because this fleet's G1 has a D435i fitted
 (measured 14.9 Hz, 480x270 `16UC1`, RVL-compressed to ~34% of raw, lossless).
 On a G1 without one, set `ENABLE_DEPTH=false`.
+
+#### The G1's down camera is the RealSense RGB view
+
+There is no third USB camera on a G1 -- only `OM1FRONTCAM` and `OM1REARCAM`.
+The downward-facing view is the RealSense's colour image, and om1_sensor's
+`d435_camera_stream` node already publishes it to mediamtx as H.264 (see its
+`get_rtsp_camera_name`, which returns `"down_camera"`), so it is recorded like
+any other camera.
+
+The same image is also on Zenoh as
+`camera/realsense2_camera_node/color/image_raw`, but as raw rgb8: 305 KB a
+frame, 16.5 GB an hour. Re-encoding that here costs about 5x the RTSP stream
+(measured: JPEG q80 ~0.96 GB/h against 0.18 GB/h for the H.264 already being
+produced) for a picture the robot has encoded anyway. Record the stream.
+
+It 404s on a G1 with no RealSense fitted, since the node has nothing to publish.
 
 #### Why `go2` has no `pointcloud` entry
 
