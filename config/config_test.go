@@ -54,8 +54,8 @@ func TestLoad_g1TopicsMatchHardware(t *testing.T) {
 	require.Equal(t, "rt/utlidar/cloud_livox_mid360", cfg.PointCloud.ZenohTopic)
 	require.True(t, cfg.EnableOdom)
 	require.True(t, cfg.EnableLowstate)
-	require.False(t, cfg.EnableDepth,
-		"the G1 has no RealSense; recording depth produced a 0-byte file every session")
+	require.True(t, cfg.EnableDepth, "a D435i is fitted to this G1")
+	require.Equal(t, 15.0, cfg.Depth.RateHz, "measured 14.9 Hz on the robot")
 }
 
 func TestLoad_go2KeepsItsThreeCameras(t *testing.T) {
@@ -112,15 +112,16 @@ func TestLoad_envDisablesAProfileTopic(t *testing.T) {
 	require.False(t, cfg.EnableLidar)
 }
 
-func TestLoad_envEnablesDepthOnAG1ThatHasOne(t *testing.T) {
+// A G1 without the camera must be able to switch it off, because the node
+// publishes nothing and the recorder would write 0-byte files forever.
+func TestLoad_depthCanBeDisabledOnAG1WithoutTheCamera(t *testing.T) {
 	clearEnv(t)
 	t.Setenv("ROBOT_TYPE", string(RobotG1))
-	t.Setenv("ENABLE_DEPTH", "true")
+	t.Setenv("ENABLE_DEPTH", "false")
 
 	cfg := Load(testSessionDir)
 
-	require.True(t, cfg.EnableDepth, "a G1 fitted with a RealSense enables it without a rebuild")
-	require.Equal(t, "camera/realsense2_camera_node/depth/image_rect_raw", cfg.Depth.ZenohTopic)
+	require.False(t, cfg.EnableDepth)
 }
 
 // The profile names each camera's override variable, so the historical names

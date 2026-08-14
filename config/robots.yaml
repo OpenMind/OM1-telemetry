@@ -62,14 +62,16 @@ robots:
         key: scan
         rate_hz: 10
       depth:
-        # Disabled: this G1 has no RealSense. realsense2_camera_node starts
-        # inside om1_sensor and logs "No RealSense devices were found!", so the
-        # topic exists but never carries a message. Recording it produced a
-        # 0-byte depth_frames.bin every session and left the depth heartbeat
-        # permanently broken. Flip to true if a D435 is fitted.
-        enabled: false
+        # A D435i is fitted. Measured 14.9 Hz at 480x270 16UC1, RVL-compressed
+        # to ~34% of raw and lossless.
+        #
+        # Set ENABLE_DEPTH=false on a G1 without the camera: the node still
+        # starts inside om1_sensor and logs "No RealSense devices were found!",
+        # so the topic exists but never carries a message, and recording it
+        # writes a 0-byte depth_frames.bin and leaves the heartbeat broken.
+        enabled: true
         key: camera/realsense2_camera_node/depth/image_rect_raw
-        rate_hz: 10
+        rate_hz: 15
 
   # ── Go2 quadruped ──────────────────────────────────────────────────
   # Not verifiable from the G1 bench; kept byte-for-byte identical to the

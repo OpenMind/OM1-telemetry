@@ -32,8 +32,8 @@ func TestResolveProfile_g1(t *testing.T) {
 	require.Equal(t, "rt/utlidar/cloud_livox_mid360", pc.Key)
 
 	d, ok := p.Topic(TopicDepth)
-	require.True(t, ok, "depth stays documented so it can be switched on when hardware is fitted")
-	require.False(t, d.Enabled)
+	require.True(t, ok)
+	require.True(t, d.Enabled, "a D435i is fitted to this G1")
 }
 
 func TestResolveProfile_go2HasNoPointCloudEntry(t *testing.T) {

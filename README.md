@@ -32,7 +32,7 @@ at build time, so nothing needs mounting for the defaults to work.
 | lidar `scan` | ✅ | ✅ |
 | point cloud | ✅ `rt/utlidar/cloud_livox_mid360` | — not published by this robot |
 | odometry, lowstate | ✅ | ✅ |
-| depth | ❌ disabled — no RealSense fitted | ✅ |
+| depth | ✅ D435i, 15 Hz (RVL, lossless) | ✅ |
 
 To change what a robot records **without rebuilding**, mount a replacement file
 and point `ROBOT_PROFILES_FILE` at it. A missing or malformed override falls
@@ -46,14 +46,18 @@ decoder) still needs Go code.
 If `ROBOT_TYPE` is unset or unrecognized the recorder warns and falls back to
 `go2`.
 
-#### Why `depth` is off for the G1
+#### `depth` on a G1 without a RealSense
 
-`realsense2_camera_node` starts inside `om1_sensor` on every G1 and logs
-`No RealSense devices were found!` when none is fitted. The topic exists, is
-allowed through the Zenoh bridge, and is subscribed successfully — it simply
-never carries a message. That produced a 0-byte `depth_frames.bin` in every
-session and a permanently broken `depth` heartbeat. Fit a D435 and set
-`ENABLE_DEPTH=true` (or flip `enabled` in the profile) to record it.
+`realsense2_camera_node` starts inside `om1_sensor` on every G1 whether or not
+a camera is attached, and logs `No RealSense devices were found!` when there is
+none. The topic still exists, is allowed through the Zenoh bridge, and is
+subscribed successfully — it simply never carries a message, which writes a
+0-byte `depth_frames.bin` every session and leaves the `depth` heartbeat
+permanently broken.
+
+The profile has it enabled because this fleet's G1 has a D435i fitted
+(measured 14.9 Hz, 480x270 `16UC1`, RVL-compressed to ~34% of raw, lossless).
+On a G1 without one, set `ENABLE_DEPTH=false`.
 
 #### Why `go2` has no `pointcloud` entry
 
