@@ -28,7 +28,7 @@ STREAMS = {
     "audio":      ("audio_packets.csv",         None,                    "unix_ns"),
     # Capture-time-stamped, video-derived feature events from the
     # video-processor (VVAD/speaking, etc.). unix_ns is true capture time, so
-    # this aligns precisely with the source-stamped Zenoh streams — unlike the
+    # this aligns precisely with the source-stamped DDS streams — unlike the
     # camera streams, which are anchored to record-start wall clock.
     "video_features": ("video_features_timestamps.csv", None,            "unix_ns"),
     "top_cam":    ("top_camera_frames.csv",     None,                    "wallclock_unix_ns"),
