@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -59,36 +60,39 @@ type FeaturesConfig struct {
 }
 
 type LidarConfig struct {
-	ZenohEndpoint  string
-	ZenohTopic     string
+	DDSDomainID    uint32
+	DDSTopic       string
 	TimestampsFile string
 	DataFile       string
 }
 
 type PointCloudConfig struct {
-	ZenohEndpoint  string
-	ZenohTopic     string
+	DDSDomainID    uint32
+	DDSTopic       string
 	TimestampsFile string
 	DataFile       string
 }
 
 type DepthConfig struct {
-	ZenohEndpoint  string
-	ZenohTopic     string
+	DDSDomainID    uint32
+	DDSTopic       string
 	TimestampsFile string
 	DataFile       string
 }
 
 type OdomConfig struct {
-	ZenohEndpoint  string
-	ZenohTopic     string
+	DDSDomainID    uint32
+	DDSTopic       string
 	TimestampsFile string
 	DataFile       string
 }
 
 type LowstateConfig struct {
-	ZenohEndpoint  string
-	ZenohTopic     string
+	// RobotType selects the LowState DDS schema: "go2" (unitree_go/msg/
+	// LowState) or "g1" (unitree_hg/msg/LowState).
+	RobotType      string
+	DDSDomainID    uint32
+	DDSTopic       string
 	TimestampsFile string
 	DataFile       string
 }
@@ -138,32 +142,33 @@ func Load() Config {
 			TimebaseFile:   filepath.Join(sessionDir, "video_features_timebase.json"),
 		},
 		Lidar: LidarConfig{
-			ZenohEndpoint:  envStr("LIDAR_ZENOH_ENDPOINT", "tcp/127.0.0.1:7447"),
-			ZenohTopic:     envStr("LIDAR_ZENOH_TOPIC", profile.LidarTopic),
+			DDSDomainID:    envUint32("LIDAR_DDS_DOMAIN", 0),
+			DDSTopic:       envStr("LIDAR_DDS_TOPIC", profile.LidarTopic),
 			TimestampsFile: filepath.Join(sessionDir, "lidar_timestamps.csv"),
 			DataFile:       filepath.Join(sessionDir, "lidar_scans.bin"),
 		},
 		PointCloud: PointCloudConfig{
-			ZenohEndpoint:  envStr("POINTCLOUD_ZENOH_ENDPOINT", "tcp/127.0.0.1:7447"),
-			ZenohTopic:     envStr("POINTCLOUD_ZENOH_TOPIC", profile.PointCloudTopic),
+			DDSDomainID:    envUint32("POINTCLOUD_DDS_DOMAIN", 0),
+			DDSTopic:       envStr("POINTCLOUD_DDS_TOPIC", profile.PointCloudTopic),
 			TimestampsFile: filepath.Join(sessionDir, "pointcloud_timestamps.csv"),
 			DataFile:       filepath.Join(sessionDir, "pointcloud_frames.bin"),
 		},
 		Depth: DepthConfig{
-			ZenohEndpoint:  envStr("DEPTH_ZENOH_ENDPOINT", "tcp/127.0.0.1:7447"),
-			ZenohTopic:     envStr("DEPTH_ZENOH_TOPIC", profile.DepthTopic),
+			DDSDomainID:    envUint32("DEPTH_DDS_DOMAIN", 0),
+			DDSTopic:       envStr("DEPTH_DDS_TOPIC", profile.DepthTopic),
 			TimestampsFile: filepath.Join(sessionDir, "depth_timestamps.csv"),
 			DataFile:       filepath.Join(sessionDir, "depth_frames.bin"),
 		},
 		Odom: OdomConfig{
-			ZenohEndpoint:  envStr("ODOM_ZENOH_ENDPOINT", "tcp/127.0.0.1:7447"),
-			ZenohTopic:     envStr("ODOM_ZENOH_TOPIC", profile.OdomTopic),
+			DDSDomainID:    envUint32("ODOM_DDS_DOMAIN", 0),
+			DDSTopic:       envStr("ODOM_DDS_TOPIC", profile.OdomTopic),
 			TimestampsFile: filepath.Join(sessionDir, "odom_timestamps.csv"),
 			DataFile:       filepath.Join(sessionDir, "odom_frames.bin"),
 		},
 		Lowstate: LowstateConfig{
-			ZenohEndpoint:  envStr("LOWSTATE_ZENOH_ENDPOINT", "tcp/127.0.0.1:7447"),
-			ZenohTopic:     envStr("LOWSTATE_ZENOH_TOPIC", profile.LowstateTopic),
+			RobotType:      string(robotType),
+			DDSDomainID:    envUint32("LOWSTATE_DDS_DOMAIN", 0),
+			DDSTopic:       envStr("LOWSTATE_DDS_TOPIC", profile.LowstateTopic),
 			TimestampsFile: filepath.Join(sessionDir, "lowstate_timestamps.csv"),
 			DataFile:       filepath.Join(sessionDir, "lowstate_frames.bin"),
 		},
@@ -238,8 +243,8 @@ func (c FeaturesConfig) FeatureStreamConfig() features.Config {
 
 func (c LidarConfig) LidarStreamConfig() lidar.Config {
 	return lidar.Config{
-		ZenohEndpoint:  c.ZenohEndpoint,
-		ZenohTopic:     c.ZenohTopic,
+		DDSDomainID:    c.DDSDomainID,
+		DDSTopic:       c.DDSTopic,
 		TimestampsFile: c.TimestampsFile,
 		DataFile:       c.DataFile,
 	}
@@ -247,8 +252,8 @@ func (c LidarConfig) LidarStreamConfig() lidar.Config {
 
 func (c PointCloudConfig) PointCloudStreamConfig() pointcloud.Config {
 	return pointcloud.Config{
-		ZenohEndpoint:  c.ZenohEndpoint,
-		ZenohTopic:     c.ZenohTopic,
+		DDSDomainID:    c.DDSDomainID,
+		DDSTopic:       c.DDSTopic,
 		TimestampsFile: c.TimestampsFile,
 		DataFile:       c.DataFile,
 	}
@@ -256,8 +261,8 @@ func (c PointCloudConfig) PointCloudStreamConfig() pointcloud.Config {
 
 func (c DepthConfig) DepthStreamConfig() depth.Config {
 	return depth.Config{
-		ZenohEndpoint:  c.ZenohEndpoint,
-		ZenohTopic:     c.ZenohTopic,
+		DDSDomainID:    c.DDSDomainID,
+		DDSTopic:       c.DDSTopic,
 		TimestampsFile: c.TimestampsFile,
 		DataFile:       c.DataFile,
 	}
@@ -265,8 +270,8 @@ func (c DepthConfig) DepthStreamConfig() depth.Config {
 
 func (c OdomConfig) OdomStreamConfig() odom.Config {
 	return odom.Config{
-		ZenohEndpoint:  c.ZenohEndpoint,
-		ZenohTopic:     c.ZenohTopic,
+		DDSDomainID:    c.DDSDomainID,
+		DDSTopic:       c.DDSTopic,
 		TimestampsFile: c.TimestampsFile,
 		DataFile:       c.DataFile,
 	}
@@ -274,8 +279,9 @@ func (c OdomConfig) OdomStreamConfig() odom.Config {
 
 func (c LowstateConfig) LowstateStreamConfig() lowstate.Config {
 	return lowstate.Config{
-		ZenohEndpoint:  c.ZenohEndpoint,
-		ZenohTopic:     c.ZenohTopic,
+		RobotType:      c.RobotType,
+		DDSDomainID:    c.DDSDomainID,
+		DDSTopic:       c.DDSTopic,
 		TimestampsFile: c.TimestampsFile,
 		DataFile:       c.DataFile,
 	}
@@ -301,6 +307,15 @@ func envDuration(key string, defaultValue time.Duration) time.Duration {
 	if value := os.Getenv(key); value != "" {
 		if d, err := time.ParseDuration(value); err == nil {
 			return d
+		}
+	}
+	return defaultValue
+}
+
+func envUint32(key string, defaultValue uint32) uint32 {
+	if value := os.Getenv(key); value != "" {
+		if v, err := strconv.ParseUint(value, 10, 32); err == nil {
+			return uint32(v)
 		}
 	}
 	return defaultValue

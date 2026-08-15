@@ -1,0 +1,41 @@
+// Verbatim field layout from unitreerobotics/unitree_ros2
+// cyclonedds_ws/src/unitree/unitree_hg/msg/{LowState,IMUState,MotorState}.msg
+// — G1's robot-state message (distinct schema from Go2's unitree_go one).
+module unitree_hg {
+  module msg {
+    module dds_ {
+      struct IMUState_ {
+        float quaternion[4];
+        float gyroscope[3];
+        float accelerometer[3];
+        float rpy[3];
+        int16 temperature;
+      };
+
+      struct MotorState_ {
+        uint8 mode;
+        float q;
+        float dq;
+        float ddq;
+        float tau_est;
+        int16 temperature[2];
+        float vol;
+        uint32 sensor[2];
+        uint32 motorstate;
+        uint32 reserve[4];
+      };
+
+      struct LowState_ {
+        uint32 version[2];
+        uint8 mode_pr;
+        uint8 mode_machine;
+        uint32 tick;
+        unitree_hg::msg::dds_::IMUState_ imu_state;
+        unitree_hg::msg::dds_::MotorState_ motor_state[35];
+        uint8 wireless_remote[40];
+        uint32 reserve[4];
+        uint32 crc;
+      };
+    };
+  };
+};

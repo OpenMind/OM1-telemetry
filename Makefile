@@ -1,69 +1,54 @@
-.PHONY: build run download-zenohc test tidy
+.PHONY: build run check-cyclonedds idl-gen test tidy lint
 
 BIN       := om1-telemetry
 CMD       := ./cmd/main
 BUILD_DIR := bin
-
-ZENOH_C_VERSION=1.9.0
-ZENOH_C_DIR=.zenoh-c
-ZENOH_C_ABS_DIR=$(shell pwd)/$(ZENOH_C_DIR)
-UNAME_S := $(shell uname -s)
-UNAME_M := $(shell uname -m)
-
-ifeq ($(UNAME_S),Linux)
-	ifeq ($(UNAME_M),x86_64)
-		ZENOH_PLATFORM=x86_64-unknown-linux-gnu
-	else ifeq ($(UNAME_M),aarch64)
-		ZENOH_PLATFORM=aarch64-unknown-linux-gnu
-	endif
-	DYLD_VAR=LD_LIBRARY_PATH
-else ifeq ($(UNAME_S),Darwin)
-	ifeq ($(UNAME_M),arm64)
-		ZENOH_PLATFORM=aarch64-apple-darwin
-	else
-		ZENOH_PLATFORM=x86_64-apple-darwin
-	endif
-	DYLD_VAR=DYLD_LIBRARY_PATH
-endif
-
-ZENOH_URL=https://github.com/eclipse-zenoh/zenoh-c/releases/download/$(ZENOH_C_VERSION)/zenoh-c-$(ZENOH_C_VERSION)-$(ZENOH_PLATFORM)-standalone.zip
+IDL_DIR   := idl
+IDL_GEN_DIR := internal/ddsgen
 
 export CGO_ENABLED=1
-export CGO_CFLAGS=-I$(ZENOH_C_ABS_DIR)/include
-export CGO_LDFLAGS=-L$(ZENOH_C_ABS_DIR)/lib -lzenohc -Wl,-rpath,$(ZENOH_C_ABS_DIR)/lib
 
+# CycloneDDS (libddsc) is a build/runtime dependency of internal/ddscore and
+# every stream's dds_reader.go — unlike zenoh-c there is no prebuilt
+# per-platform archive to fetch, so it must be installed via package manager
+# or built from source before `make build`/`make test` will work:
+#
+#   Debian/Ubuntu: apt install libcyclonedds-dev cyclonedds-tools
+#   macOS (brew):  brew install cyclonedds       (formula may need --HEAD)
+#   from source:   https://github.com/eclipse-cyclonedds/cyclonedds
+#
+# `cyclonedds-tools` / the from-source build both provide `idlc`, needed by
+# `idl-gen`. See README's "Build prerequisites" section.
+check-cyclonedds:
+	@command -v pkg-config >/dev/null 2>&1 || { echo "pkg-config not found"; exit 1; }
+	@pkg-config --exists CycloneDDS || { \
+		echo "CycloneDDS not found via pkg-config. Install libddsc (see Makefile comments) before building."; \
+		exit 1; \
+	}
 
-download-zenohc:
-	@echo "Downloading zenoh-c $(ZENOH_C_VERSION) for $(ZENOH_PLATFORM)..."
-	@mkdir -p $(ZENOH_C_DIR)
-	@if [ ! -f "$(ZENOH_C_DIR)/lib/libzenohc.dylib" ] && [ ! -f "$(ZENOH_C_DIR)/lib/libzenohc.so" ]; then \
-		echo "Fetching $(ZENOH_URL)..."; \
-		curl -sSL -o /tmp/zenoh-c.zip $(ZENOH_URL); \
-		unzip -q /tmp/zenoh-c.zip -d $(ZENOH_C_DIR); \
-		rm /tmp/zenoh-c.zip; \
-		echo "zenoh-c installed to $(ZENOH_C_DIR)"; \
-		if [ "$(UNAME_S)" = "Darwin" ]; then \
-			echo "Patching dylib install names..."; \
-			if [ -f "$(ZENOH_C_ABS_DIR)/lib/libzenohc.dylib" ]; then \
-				install_name_tool -id "@rpath/libzenohc.dylib" "$(ZENOH_C_ABS_DIR)/lib/libzenohc.dylib"; \
-			fi; \
-		fi; \
-	else \
-		echo "zenoh-c already installed in $(ZENOH_C_DIR)"; \
-	fi
+# Regenerates the idlc type-support C sources for every message type this
+# recorder subscribes to, from idl/*.idl, into $(IDL_GEN_DIR). Must be rerun
+# whenever an .idl file changes; the generated *.c/*.h are gitignored.
+idl-gen: check-cyclonedds
+	@command -v idlc >/dev/null 2>&1 || { echo "idlc not found (part of cyclonedds-tools / a from-source build)"; exit 1; }
+	@mkdir -p $(IDL_GEN_DIR)
+	@for f in $(IDL_DIR)/*.idl; do \
+		echo "idlc $$f"; \
+		idlc -l c -I $(IDL_DIR) -o $(IDL_GEN_DIR) "$$f" || exit 1; \
+	done
 
-build: download-zenohc
+build: idl-gen
 	@mkdir -p $(BUILD_DIR)
 	go build -o $(BUILD_DIR)/$(BIN) $(CMD)
 
-run: download-zenohc
+run: idl-gen
 	go run $(CMD)
 
-test: download-zenohc
-	$(DYLD_VAR)=$(ZENOH_C_ABS_DIR)/lib go test -p 8 -v ./...
+test: idl-gen
+	go test -p 8 -v ./...
 
-lint: download-zenohc
-	$(DYLD_VAR)=$(ZENOH_C_ABS_DIR)/lib golangci-lint run --timeout=5m
+lint: idl-gen
+	golangci-lint run --timeout=5m
 
 tidy:
 	go mod tidy

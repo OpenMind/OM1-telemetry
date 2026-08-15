@@ -10,7 +10,7 @@ import (
 )
 
 func TestLoad_defaults(t *testing.T) {
-	for _, key := range []string{"RECORDINGS_DIR", "TOP_CAMERA_RTSP_URL", "FRONT_CAMERA_RTSP_URL", "DOWN_CAMERA_RTSP_URL", "AUDIO_RTSP_URL", "POINTCLOUD_ZENOH_ENDPOINT", "POINTCLOUD_ZENOH_TOPIC"} {
+	for _, key := range []string{"RECORDINGS_DIR", "TOP_CAMERA_RTSP_URL", "FRONT_CAMERA_RTSP_URL", "DOWN_CAMERA_RTSP_URL", "AUDIO_RTSP_URL", "POINTCLOUD_DDS_DOMAIN", "POINTCLOUD_DDS_TOPIC"} {
 		t.Setenv(key, "")
 	}
 	t.Setenv("ROBOT_TYPE", string(RobotG1))
@@ -23,21 +23,21 @@ func TestLoad_defaults(t *testing.T) {
 	require.Equal(t, "rtsp://localhost:8554/front_camera", cfg.Video[1].RTSPURL, "unexpected front camera RTSP URL")
 	require.Equal(t, "rtsp://localhost:8554/down_camera", cfg.Video[2].RTSPURL, "unexpected down camera RTSP URL")
 	require.Equal(t, "rtsp://localhost:8555/live", cfg.Audio.RTSPURL, "unexpected audio RTSP URL")
-	require.Equal(t, "tcp/127.0.0.1:7447", cfg.Lidar.ZenohEndpoint, "unexpected lidar zenoh endpoint")
-	require.Equal(t, "scan", cfg.Lidar.ZenohTopic, "unexpected lidar zenoh topic")
-	require.Equal(t, "tcp/127.0.0.1:7447", cfg.PointCloud.ZenohEndpoint, "unexpected point cloud zenoh endpoint")
-	require.Equal(t, "rt/utlidar/cloud_livox_mid360", cfg.PointCloud.ZenohTopic, "unexpected point cloud zenoh topic")
+	require.Equal(t, uint32(0), cfg.Lidar.DDSDomainID, "unexpected lidar dds domain")
+	require.Equal(t, "scan", cfg.Lidar.DDSTopic, "unexpected lidar dds topic")
+	require.Equal(t, uint32(0), cfg.PointCloud.DDSDomainID, "unexpected point cloud dds domain")
+	require.Equal(t, "rt/utlidar/cloud_livox_mid360", cfg.PointCloud.DDSTopic, "unexpected point cloud dds topic")
 	require.True(t, strings.HasPrefix(cfg.SessionDir, "recordings"), "session dir should be under recordings/, got: %s", cfg.SessionDir)
 }
 
 func TestLoad_pointCloudEnvOverrides(t *testing.T) {
-	t.Setenv("POINTCLOUD_ZENOH_ENDPOINT", "tcp/192.168.1.10:7447")
-	t.Setenv("POINTCLOUD_ZENOH_TOPIC", "rt/custom/cloud")
+	t.Setenv("POINTCLOUD_DDS_DOMAIN", "5")
+	t.Setenv("POINTCLOUD_DDS_TOPIC", "rt/custom/cloud")
 
 	cfg := Load()
 
-	require.Equal(t, "tcp/192.168.1.10:7447", cfg.PointCloud.ZenohEndpoint, "unexpected point cloud zenoh endpoint")
-	require.Equal(t, "rt/custom/cloud", cfg.PointCloud.ZenohTopic, "unexpected point cloud zenoh topic")
+	require.Equal(t, uint32(5), cfg.PointCloud.DDSDomainID, "unexpected point cloud dds domain")
+	require.Equal(t, "rt/custom/cloud", cfg.PointCloud.DDSTopic, "unexpected point cloud dds topic")
 }
 
 func TestLoad_pointCloudOutputFilesInsideSessionDir(t *testing.T) {
@@ -53,16 +53,16 @@ func TestLoad_pointCloudOutputFilesInsideSessionDir(t *testing.T) {
 
 func TestPointCloudStreamConfig_mapsFields(t *testing.T) {
 	cfg := PointCloudConfig{
-		ZenohEndpoint:  "tcp/10.0.0.1:7447",
-		ZenohTopic:     "rt/utlidar/cloud_livox_mid360",
+		DDSDomainID:    3,
+		DDSTopic:       "rt/utlidar/cloud_livox_mid360",
 		TimestampsFile: "/tmp/pointcloud_timestamps.csv",
 		DataFile:       "/tmp/pointcloud_frames.bin",
 	}
 
 	sc := cfg.PointCloudStreamConfig()
 
-	require.Equal(t, cfg.ZenohEndpoint, sc.ZenohEndpoint, "endpoint not mapped")
-	require.Equal(t, cfg.ZenohTopic, sc.ZenohTopic, "topic not mapped")
+	require.Equal(t, cfg.DDSDomainID, sc.DDSDomainID, "domain not mapped")
+	require.Equal(t, cfg.DDSTopic, sc.DDSTopic, "topic not mapped")
 	require.Equal(t, cfg.TimestampsFile, sc.TimestampsFile, "timestamps file not mapped")
 	require.Equal(t, cfg.DataFile, sc.DataFile, "data file not mapped")
 }

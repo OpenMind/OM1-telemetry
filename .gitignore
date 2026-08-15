@@ -1,6 +1,6 @@
 bin/
 
-.zenoh-c/
+internal/ddsgen/
 
 .DS_Store
 
