@@ -61,6 +61,19 @@ zenohdup: download-zenohc
 	@mkdir -p $(BUILD_DIR)
 	go build -o $(BUILD_DIR)/zenohdup ./cmd/zenohdup
 
+# One command that answers "is the bus healthy?" for everything a G1 records
+# over Zenoh. Run it before trusting a recording, or to show that a restart
+# left duplicate traffic behind.
+G1_TOPICS = scan \
+            odom \
+            rt/lowstate \
+            rt/utlidar/cloud_livox_mid360 \
+            camera/realsense2_camera_node/depth/image_rect_raw \
+            camera/realsense2_camera_node/color/image_raw
+
+zenoh-check: zenohdup
+	@$(DYLD_VAR)=$(ZENOH_C_ABS_DIR)/lib $(BUILD_DIR)/zenohdup $(G1_TOPICS)
+
 run: download-zenohc
 	go run $(CMD)
 

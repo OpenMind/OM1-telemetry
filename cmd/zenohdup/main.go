@@ -19,7 +19,7 @@
 // with a different fix.
 //
 //	zenohdup scan
-//	zenohdup -d 30s camera/realsense2_camera_node/depth/image_rect_raw
+//	zenohdup -d 30s scan odom camera/realsense2_camera_node/depth/image_rect_raw
 package main
 
 import (
@@ -28,6 +28,7 @@ import (
 	"fmt"
 	"os"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/eclipse-zenoh/zenoh-go/zenoh"
@@ -37,17 +38,16 @@ func main() {
 	endpoint := flag.String("e", "tcp/127.0.0.1:7447", "Zenoh endpoint to connect to")
 	duration := flag.Duration("d", 12*time.Second, "how long to sample")
 	flag.Usage = func() {
-		fmt.Fprintf(os.Stderr, "usage: zenohdup [-e endpoint] [-d duration] <key-expression>\n\n")
+		fmt.Fprintf(os.Stderr, "usage: zenohdup [-e endpoint] [-d duration] <key-expression>...\n\n")
 		fmt.Fprintf(os.Stderr, "Reports the delivery multiple for a Zenoh key: 1.00x is healthy,\n")
 		fmt.Fprintf(os.Stderr, "2.00x means every message is arriving twice.\n\n")
 		flag.PrintDefaults()
 	}
 	flag.Parse()
-	if flag.NArg() != 1 {
+	if flag.NArg() < 1 {
 		flag.Usage()
 		os.Exit(2)
 	}
-	key := flag.Arg(0)
 
 	cfg := zenoh.NewConfigDefault()
 	if err := cfg.InsertJson5(zenoh.ConfigModeKey, `"client"`); err != nil {
@@ -66,16 +66,47 @@ func main() {
 	}
 	defer session.Drop()
 
+	fmt.Printf("%-52s %10s %8s %8s  %s\n", "TOPIC", "RECEIVED", "UNIQUE", "RATIO", "VERDICT")
+	fmt.Println(strings.Repeat("-", 92))
+
+	duplicated := 0
+	for _, key := range flag.Args() {
+		if sampleKey(session, key, *duration) {
+			duplicated++
+		}
+	}
+
+	fmt.Println()
+	if duplicated == 0 {
+		fmt.Printf("All %d topic(s) healthy: every message delivered exactly once.\n", flag.NArg())
+		return
+	}
+	fmt.Printf("%d of %d topic(s) duplicated.\n\n", duplicated, flag.NArg())
+	fmt.Println("Copies sharing one source id are the zenoh-bridge-ros2dds stale-route bug")
+	fmt.Println("(github.com/eclipse-zenoh/zenoh-plugin-ros2dds issue #570): the bridge keeps")
+	fmt.Println("forwarding for ROS publishers that no longer exist, one extra copy for every")
+	fmt.Println("om1_sensor restart it has survived. Clear it with:")
+	fmt.Println()
+	fmt.Println("    docker restart zenoh_bridge")
+	fmt.Println()
+	fmt.Println("and restart with OM1-ros2-sdk/zenoh/restart_sensors.sh in future, which")
+	fmt.Println("restarts the bridge last so it never accumulates them.")
+	os.Exit(1)
+}
+
+// sampleKey subscribes for the given duration and reports one table row.
+// Returns true if the topic is being delivered more than once.
+func sampleKey(session zenoh.Session, key string, duration time.Duration) bool {
 	ke, err := zenoh.NewKeyExpr(key)
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "bad key expression:", err)
-		os.Exit(1)
+		fmt.Printf("%-52s %s\n", key, "bad key expression")
+		return false
 	}
 	handler := zenoh.NewFifoChannel[zenoh.Sample](8192)
 	sub, err := session.DeclareSubscriber(ke, handler, nil)
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "declare subscriber:", err)
-		os.Exit(1)
+		fmt.Printf("%-52s %s\n", key, "cannot subscribe")
+		return false
 	}
 	defer sub.Drop()
 
@@ -86,8 +117,7 @@ func main() {
 	bySource := map[string]int{}
 	total := 0
 
-	fmt.Fprintf(os.Stderr, "sampling %s for %s...\n", key, *duration)
-	deadline := time.After(*duration)
+	deadline := time.After(duration)
 	rx := sub.Handler()
 loop:
 	for {
@@ -109,41 +139,29 @@ loop:
 	}
 
 	if total == 0 {
-		fmt.Printf("%s: nothing received in %s -- topic not published, or the key is wrong\n",
-			key, *duration)
-		os.Exit(1)
+		fmt.Printf("%-52s %10s %8s %8s  %s\n", key, "-", "-", "-", "NOT PUBLISHED")
+		return false
 	}
 
 	unique := len(copies)
-	multiple := float64(total) / float64(unique)
+	ratio := float64(total) / float64(unique)
 	verdict := "OK"
-	if multiple >= 1.5 {
+	if ratio >= 1.5 {
 		verdict = "DUPLICATED"
 	}
 
-	fmt.Printf("%s\n", key)
-	fmt.Printf("  %-10s %d received, %d unique  -> %.2fx  [%s]\n",
-		"delivery:", total, unique, multiple, verdict)
-
 	sources := make([]string, 0, len(bySource))
-	for s := range bySource {
-		sources = append(sources, s)
+	for src := range bySource {
+		sources = append(sources, src)
 	}
 	sort.Strings(sources)
-	fmt.Printf("  %-10s\n", "sources:")
-	for _, s := range sources {
-		fmt.Printf("    %s  %d\n", s, bySource[s])
-	}
 
-	if verdict == "DUPLICATED" {
-		if len(sources) == 1 {
-			fmt.Printf("\n  One source sending each message %.0f times. This is the\n", multiple)
-			fmt.Printf("  zenoh-bridge-ros2dds stale-route bug: restart the bridge\n")
-			fmt.Printf("  (OM1-ros2-sdk zenoh/restart_sensors.sh) to clear it.\n")
-		} else {
-			fmt.Printf("\n  Copies from %d different sources: separate routes onto the bus,\n", len(sources))
-			fmt.Printf("  not the stale-route bug. Check which bridges forward this key.\n")
-		}
-		os.Exit(1)
+	detail := fmt.Sprintf("%d source", len(sources))
+	if len(sources) != 1 {
+		detail += "s"
 	}
+	fmt.Printf("%-52s %10d %8d %7.2fx  %-11s %s\n",
+		key, total, unique, ratio, verdict, detail)
+
+	return verdict == "DUPLICATED"
 }
