@@ -2,6 +2,7 @@ package pointcloud
 
 /*
 #cgo pkg-config: CycloneDDS
+#cgo CFLAGS: -I${SRCDIR}/../ddsgen
 #include "sensor_msgs_pointcloud2.h"
 */
 import "C"

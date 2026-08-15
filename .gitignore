@@ -2,6 +2,8 @@ bin/
 
 internal/ddsgen/
 
+.cyclonedds/
+
 .DS_Store
 
 recordings/

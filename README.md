@@ -28,7 +28,7 @@ IDL compiler on the build host:
 
 ```bash
 # Debian/Ubuntu
-apt install libcyclonedds-dev cyclonedds-tools
+apt install cyclonedds-dev cyclonedds-tools
 
 # macOS (Homebrew)
 brew install cyclonedds

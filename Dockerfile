@@ -6,7 +6,7 @@ RUN apk add --no-cache git gcc g++ musl-dev cmake make linux-headers
 # dependency this replaced), so it's built from source here. Alpine/musl is
 # not CycloneDDS's primary tested platform — if this build breaks, it's the
 # first place to look; consider switching the builder stage to a glibc base
-# (e.g. golang:1.25-bookworm + `apt install libcyclonedds-dev`) instead.
+# (e.g. golang:1.25-bookworm + `apt install cyclonedds-dev`) instead.
 ARG CYCLONEDDS_VERSION=0.10.5
 
 RUN git clone --branch ${CYCLONEDDS_VERSION} --depth 1 \

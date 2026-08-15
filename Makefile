@@ -1,4 +1,4 @@
-.PHONY: build run check-cyclonedds idl-gen test tidy lint
+.PHONY: build run install-cyclonedds check-cyclonedds idl-gen test tidy lint
 
 BIN       := om1-telemetry
 CMD       := ./cmd/main
@@ -8,29 +8,51 @@ IDL_GEN_DIR := internal/ddsgen
 
 export CGO_ENABLED=1
 
-# CycloneDDS (libddsc) is a build/runtime dependency of internal/ddscore and
-# every stream's dds_reader.go — unlike zenoh-c there is no prebuilt
-# per-platform archive to fetch, so it must be installed via package manager
-# or built from source before `make build`/`make test` will work:
-#
-#   Debian/Ubuntu: apt install libcyclonedds-dev cyclonedds-tools
-#   macOS (brew):  brew install cyclonedds       (formula may need --HEAD)
-#   from source:   https://github.com/eclipse-cyclonedds/cyclonedds
-#
-# `cyclonedds-tools` / the from-source build both provide `idlc`, needed by
-# `idl-gen`. See README's "Build prerequisites" section.
-check-cyclonedds:
+# CycloneDDS (libddsc + idlc) is a build/runtime dependency of
+# internal/ddscore and every stream's dds_reader.go — unlike zenoh-c there is
+# no prebuilt per-platform archive, so it's built from source here (same
+# eclipse-cyclonedds/cyclonedds repo everyone on the team builds locally),
+# rather than relying on distro packages that vary release-to-release.
+CYCLONEDDS_VERSION := releases/0.10.x
+CYCLONEDDS_DIR      := .cyclonedds
+CYCLONEDDS_SRC       := $(CYCLONEDDS_DIR)/src
+CYCLONEDDS_INSTALL   := $(shell pwd)/$(CYCLONEDDS_DIR)/install
+
+export PATH := $(CYCLONEDDS_INSTALL)/bin:$(PATH)
+export PKG_CONFIG_PATH := $(CYCLONEDDS_INSTALL)/lib/pkgconfig:$(PKG_CONFIG_PATH)
+
+install-cyclonedds:
+	@if [ ! -f "$(CYCLONEDDS_INSTALL)/lib/pkgconfig/CycloneDDS.pc" ]; then \
+		echo "Building CycloneDDS ($(CYCLONEDDS_VERSION)) into $(CYCLONEDDS_INSTALL)..."; \
+		rm -rf $(CYCLONEDDS_SRC); \
+		git clone --branch $(CYCLONEDDS_VERSION) --depth 1 \
+			https://github.com/eclipse-cyclonedds/cyclonedds.git $(CYCLONEDDS_SRC); \
+		mkdir -p $(CYCLONEDDS_SRC)/build; \
+		cd $(CYCLONEDDS_SRC)/build && \
+			cmake -DBUILD_EXAMPLES=OFF -DBUILD_TESTING=OFF \
+			      -DCMAKE_INSTALL_PREFIX=$(CYCLONEDDS_INSTALL) .. && \
+			cmake --build . --target install; \
+		echo "CycloneDDS installed to $(CYCLONEDDS_INSTALL)"; \
+	else \
+		echo "CycloneDDS already installed in $(CYCLONEDDS_INSTALL)"; \
+	fi
+
+check-cyclonedds: install-cyclonedds
 	@command -v pkg-config >/dev/null 2>&1 || { echo "pkg-config not found"; exit 1; }
 	@pkg-config --exists CycloneDDS || { \
-		echo "CycloneDDS not found via pkg-config. Install libddsc (see Makefile comments) before building."; \
+		echo "CycloneDDS not found via pkg-config after install-cyclonedds — something went wrong."; \
 		exit 1; \
 	}
+
+# libddsc's own .pc file doesn't embed an rpath, so binaries built against
+# this non-system install prefix fail at runtime with "Library not loaded:
+# @rpath/libddsc..." unless one is added explicitly.
+export CGO_LDFLAGS := -Wl,-rpath,$(CYCLONEDDS_INSTALL)/lib
 
 # Regenerates the idlc type-support C sources for every message type this
 # recorder subscribes to, from idl/*.idl, into $(IDL_GEN_DIR). Must be rerun
 # whenever an .idl file changes; the generated *.c/*.h are gitignored.
 idl-gen: check-cyclonedds
-	@command -v idlc >/dev/null 2>&1 || { echo "idlc not found (part of cyclonedds-tools / a from-source build)"; exit 1; }
 	@mkdir -p $(IDL_GEN_DIR)
 	@for f in $(IDL_DIR)/*.idl; do \
 		echo "idlc $$f"; \

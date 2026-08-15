@@ -2,6 +2,7 @@ package odom
 
 /*
 #cgo pkg-config: CycloneDDS
+#cgo CFLAGS: -I${SRCDIR}/../ddsgen
 #include "builtin_interfaces_time.h"
 #include "std_msgs_header.h"
 #include "geometry_msgs_common.h"

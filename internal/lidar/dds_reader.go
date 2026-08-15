@@ -2,6 +2,7 @@ package lidar
 
 /*
 #cgo pkg-config: CycloneDDS
+#cgo CFLAGS: -I${SRCDIR}/../ddsgen
 #include "sensor_msgs_laserscan.h"
 */
 import "C"
