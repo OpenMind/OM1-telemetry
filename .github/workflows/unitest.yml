@@ -33,10 +33,14 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-go-
 
-      - name: Install CycloneDDS
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y cyclonedds-dev cyclonedds-tools
+      - name: Cache CycloneDDS build
+        uses: actions/cache@v3
+        with:
+          path: .cyclonedds/install
+          key: ${{ runner.os }}-cyclonedds-0.10.x-v1
+
+      - name: Build CycloneDDS (from source; see Makefile)
+        run: make install-cyclonedds
 
       - name: Run unit tests
         run: make test

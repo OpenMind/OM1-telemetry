@@ -23,6 +23,7 @@ export PKG_CONFIG_PATH := $(CYCLONEDDS_INSTALL)/lib/pkgconfig:$(PKG_CONFIG_PATH)
 
 install-cyclonedds:
 	@if [ ! -f "$(CYCLONEDDS_INSTALL)/lib/pkgconfig/CycloneDDS.pc" ]; then \
+		set -e; \
 		echo "Building CycloneDDS ($(CYCLONEDDS_VERSION)) into $(CYCLONEDDS_INSTALL)..."; \
 		rm -rf $(CYCLONEDDS_SRC); \
 		git clone --branch $(CYCLONEDDS_VERSION) --depth 1 \

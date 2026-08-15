@@ -16,30 +16,28 @@ All streams are timestamped and organized into session directories for easy alig
 
 - **Go 1.25** or later
 - **ffmpeg** installed and available in PATH
-- **CycloneDDS** (`libddsc` + `idlc`) installed and discoverable via `pkg-config` — see "Build prerequisites" below
+- **CMake + a C compiler** (to build CycloneDDS — see "Build prerequisites" below)
 
 ### Build prerequisites (CycloneDDS)
 
 Sensor/state topics (lidar, point cloud, depth, odometry, lowstate) are read by
 subscribing directly to the robot's CycloneDDS domain, via a first-party cgo
-wrapper (`internal/ddscore`) — there's no zenoh-bridge-dds hop anymore. This
-means building or testing this recorder requires CycloneDDS's C library and
-IDL compiler on the build host:
+wrapper (`internal/ddscore`) — there's no zenoh-bridge-dds hop anymore.
 
-```bash
-# Debian/Ubuntu
-apt install cyclonedds-dev cyclonedds-tools
+Rather than relying on distro packages (which vary release-to-release and
+aren't available everywhere), CycloneDDS is built from source, the same way
+for every developer, CI, and Docker: `make build` / `make test` / `make run`
+all depend on `make install-cyclonedds`, which clones
+[eclipse-cyclonedds/cyclonedds](https://github.com/eclipse-cyclonedds/cyclonedds)
+(`releases/0.10.x`) and builds+installs it into `.cyclonedds/install`
+(gitignored) if not already present there — a no-op on repeat runs. You need
+`cmake` and a C compiler on PATH; nothing else to install manually.
 
-# macOS (Homebrew)
-brew install cyclonedds
-
-# or build from source: https://github.com/eclipse-cyclonedds/cyclonedds
-```
-
-`make build` / `make test` / `make run` all depend on `make idl-gen`, which
-runs `idlc` over `idl/*.idl` to produce the type-support C sources each
-stream's `dds_reader.go` `#include`s (generated into `internal/ddsgen/`,
-gitignored — regenerate after editing any `.idl` file).
+`make build` / `make test` / `make run` also depend on `make idl-gen`, which
+runs the freshly-built `idlc` over `idl/*.idl` to produce the type-support C
+sources each stream's `dds_reader.go` `#include`s (generated into
+`internal/ddsgen/`, gitignored — regenerate after editing any `.idl` file;
+`make` does this automatically).
 
 **Message schemas**: `idl/*.idl` mirror the exact field layout of the ROS 2 /
 Unitree messages published on the robot (`sensor_msgs/LaserScan`,
@@ -49,12 +47,8 @@ Unitree messages published on the robot (`sensor_msgs/LaserScan`,
 and [ros2/common_interfaces](https://github.com/ros2/common_interfaces). The
 generated C type/topic-descriptor symbol names each `dds_reader.go`
 references (e.g. `C.unitree_go_msg_dds__LowState_`,
-`C.unitree_go_msg_dds__LowState__desc`) follow idlc's standard flattened
-module-naming convention but have **not been confirmed against a real idlc
-run** (idlc isn't available in every dev environment) — the first
-`make build` on a host with CycloneDDS installed is the actual verification;
-if idlc emits different symbol names, fix the `C.*` references in the
-corresponding `dds_reader.go` to match.
+`C.unitree_go_msg_dds__LowState__desc`) have been confirmed against a real
+`idlc` (CycloneDDS 0.10.5) run and a full `make build` + `make test` pass.
 
 ## Configuration
 
@@ -114,11 +108,12 @@ recorder.
 
 ## Building
 
-Install CycloneDDS (see "Build prerequisites" above), then:
-
 ```bash
 make build
 ```
+
+The first run builds CycloneDDS from source (see "Build prerequisites"
+above) — a few minutes; subsequent runs reuse the cached `.cyclonedds/install`.
 
 The binary will be created at `bin/om1-telemetry`.
 

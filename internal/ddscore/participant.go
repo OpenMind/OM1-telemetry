@@ -27,6 +27,7 @@ import "C"
 import (
 	"errors"
 	"fmt"
+	"runtime"
 	"time"
 	"unsafe"
 )
@@ -116,6 +117,13 @@ type SampleInfo struct {
 // take may return ok=false with no error when woken by WaitForData without
 // new data (spurious wakeup).
 func Take(reader Entity, sampleBuf unsafe.Pointer) (ok bool, info SampleInfo, err error) {
+	// &sampleBuf below is a Go pointer to a Go variable that itself holds a
+	// Go pointer (into the caller's sample struct) — cgo's pointer checker
+	// rejects that unless the held pointer is pinned first.
+	var pinner runtime.Pinner
+	pinner.Pin(sampleBuf)
+	defer pinner.Unpin()
+
 	var cInfo C.dds_sample_info_t
 	ret := C.dds_take(C.dds_entity_t(reader), &sampleBuf, &cInfo, 1, 1)
 	if ret < 0 {

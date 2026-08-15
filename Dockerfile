@@ -1,24 +1,9 @@
 FROM golang:1.25-alpine AS builder
 
+# git/cmake/make/gcc build CycloneDDS from source (via `make build`'s
+# install-cyclonedds step, below) — Alpine/musl isn't CycloneDDS's primary
+# tested platform; if this build breaks, it's the first place to look.
 RUN apk add --no-cache git gcc g++ musl-dev cmake make linux-headers
-
-# CycloneDDS has no prebuilt static-musl release (unlike the old zenoh-c
-# dependency this replaced), so it's built from source here. Alpine/musl is
-# not CycloneDDS's primary tested platform — if this build breaks, it's the
-# first place to look; consider switching the builder stage to a glibc base
-# (e.g. golang:1.25-bookworm + `apt install cyclonedds-dev`) instead.
-ARG CYCLONEDDS_VERSION=0.10.5
-
-RUN git clone --branch ${CYCLONEDDS_VERSION} --depth 1 \
-        https://github.com/eclipse-cyclonedds/cyclonedds.git /tmp/cyclonedds && \
-    mkdir /tmp/cyclonedds/build && cd /tmp/cyclonedds/build && \
-    cmake -DCMAKE_INSTALL_PREFIX=/opt/cyclonedds -DBUILD_EXAMPLES=OFF -DBUILD_TESTING=OFF .. && \
-    cmake --build . --target install -- -j"$(nproc)" && \
-    rm -rf /tmp/cyclonedds
-
-ENV PKG_CONFIG_PATH=/opt/cyclonedds/lib/pkgconfig
-ENV PATH="/opt/cyclonedds/bin:${PATH}"
-ENV LD_LIBRARY_PATH="/opt/cyclonedds/lib"
 
 WORKDIR /app
 
@@ -28,8 +13,10 @@ RUN go mod download
 
 COPY . .
 
-RUN CGO_ENABLED=1 GOOS=linux make idl-gen && \
-    CGO_ENABLED=1 GOOS=linux go build -a -o main ./cmd/main
+# Builds CycloneDDS from source into .cyclonedds/install (see Makefile), then
+# generates the idlc type support and builds the binary — same recipe every
+# developer and CI use, no distro package divergence.
+RUN CGO_ENABLED=1 GOOS=linux make build
 
 FROM alpine:latest
 
@@ -37,7 +24,7 @@ RUN apk --no-cache add ca-certificates libgcc libstdc++ ffmpeg
 
 WORKDIR /root/
 
-COPY --from=builder /app/main .
-COPY --from=builder /opt/cyclonedds/lib/libddsc.so* /usr/lib/
+COPY --from=builder /app/bin/om1-telemetry ./main
+COPY --from=builder /app/.cyclonedds/install/lib/libddsc.so* /usr/lib/
 
 CMD ["./main"]
