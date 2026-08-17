@@ -69,8 +69,10 @@ func pollImage(ctx context.Context, reader ddscore.Entity, ws *ddscore.WaitSet, 
 		if err != nil || !ok {
 			continue
 		}
+		data := encodeImage(&sample)
+		C.dds_sample_free(unsafe.Pointer(&sample), &C.sensor_msgs_msg_dds__Image__desc, C.DDS_FREE_CONTENTS)
 		select {
-		case out <- rawSample{data: encodeImage(&sample), unixNs: info.SourceTimestamp}:
+		case out <- rawSample{data: data, unixNs: info.SourceTimestamp}:
 		case <-ctx.Done():
 			return
 		}

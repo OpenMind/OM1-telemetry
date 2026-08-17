@@ -69,8 +69,10 @@ func pollLaserScan(ctx context.Context, reader ddscore.Entity, ws *ddscore.WaitS
 		if err != nil || !ok {
 			continue
 		}
+		data := encodeLaserScan(&sample)
+		C.dds_sample_free(unsafe.Pointer(&sample), &C.sensor_msgs_msg_dds__LaserScan__desc, C.DDS_FREE_CONTENTS)
 		select {
-		case out <- rawSample{data: encodeLaserScan(&sample), unixNs: info.SourceTimestamp}:
+		case out <- rawSample{data: data, unixNs: info.SourceTimestamp}:
 		case <-ctx.Done():
 			return
 		}

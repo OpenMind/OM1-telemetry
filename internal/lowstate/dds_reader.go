@@ -81,8 +81,10 @@ func pollGo2(ctx context.Context, reader ddscore.Entity, ws *ddscore.WaitSet, ou
 		if err != nil || !ok {
 			continue
 		}
+		data := encodeGo2LowState(&sample)
+		C.dds_sample_free(unsafe.Pointer(&sample), &C.unitree_go_msg_dds__LowState__desc, C.DDS_FREE_CONTENTS)
 		select {
-		case out <- rawSample{data: encodeGo2LowState(&sample), unixNs: info.SourceTimestamp}:
+		case out <- rawSample{data: data, unixNs: info.SourceTimestamp}:
 		case <-ctx.Done():
 			return
 		}
@@ -101,8 +103,10 @@ func pollHg(ctx context.Context, reader ddscore.Entity, ws *ddscore.WaitSet, out
 		if err != nil || !ok {
 			continue
 		}
+		data := encodeHgLowState(&sample)
+		C.dds_sample_free(unsafe.Pointer(&sample), &C.unitree_hg_msg_dds__LowState__desc, C.DDS_FREE_CONTENTS)
 		select {
-		case out <- rawSample{data: encodeHgLowState(&sample), unixNs: info.SourceTimestamp}:
+		case out <- rawSample{data: data, unixNs: info.SourceTimestamp}:
 		case <-ctx.Done():
 			return
 		}
