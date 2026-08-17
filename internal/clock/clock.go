@@ -45,12 +45,17 @@ const (
 	// interpolate instead of assuming one constant offset for hours.
 	sampleInterval = 60 * time.Second
 
-	// syncMarkerPath is created by systemd-timesyncd once NTP has actually
-	// synchronized. This is deliberately not the same as time-set.target, which
-	// docker.service orders itself after: "the clock has been set to something"
-	// is true of a stale RTC value too, and that is precisely the failure this
-	// package exists to survive.
-	syncMarkerPath = "/run/systemd/timesync/synchronized"
+	// defaultSyncMarkerPath is created by systemd-timesyncd once NTP has
+	// actually synchronized. This is deliberately not the same as
+	// time-set.target, which docker.service orders itself after: "the clock has
+	// been set to something" is true of a stale RTC value too, and that is
+	// precisely the failure this package exists to survive.
+	defaultSyncMarkerPath = "/run/systemd/timesync/synchronized"
+
+	// SyncMarkerEnv points the sync check at a different file, for a deployment
+	// that establishes NTP state some other way -- and to exercise the
+	// unsynced-boot path without waiting for one.
+	SyncMarkerEnv = "CLOCK_SYNC_MARKER"
 
 	bootIDPath = "/proc/sys/kernel/random/boot_id"
 
@@ -130,7 +135,7 @@ func NewWithSync(sync SyncState) *Clock {
 	}
 	if c.startSync == SyncUnknown {
 		slog.Info("clock sync state unknown; treating the wall clock as trusted",
-			"marker", syncMarkerPath,
+			"marker", syncMarkerPath(),
 			"hint", "mount /run/systemd/timesync:ro to detect an unsynced boot")
 	}
 	return c
@@ -179,13 +184,22 @@ func (c *Clock) StartWallNsNow() int64 {
 	return wall - (mono - c.startMonoNs)
 }
 
+// syncMarkerPath is the file whose existence means "NTP has synchronized".
+func syncMarkerPath() string {
+	if p := os.Getenv(SyncMarkerEnv); p != "" {
+		return p
+	}
+	return defaultSyncMarkerPath
+}
+
 // Sync reports what can be determined about NTP synchronization.
 func Sync() SyncState {
-	if _, err := os.Stat(syncMarkerPath); err == nil {
+	marker := syncMarkerPath()
+	if _, err := os.Stat(marker); err == nil {
 		return SyncYes
 	}
 	// The marker's absence only means something if we can see its directory.
-	if _, err := os.Stat(filepath.Dir(syncMarkerPath)); err == nil {
+	if _, err := os.Stat(filepath.Dir(marker)); err == nil {
 		return SyncNo
 	}
 	return SyncUnknown

@@ -44,11 +44,22 @@ check-cyclonedds: install-cyclonedds
 
 export CGO_LDFLAGS := -Wl,-rpath,$(CYCLONEDDS_INSTALL)/lib
 
+# -x final pins the XTypes extensibility of every generated type.
+#
+# The .idl files do not annotate it, so idlc applies its own default -- final
+# today, which is also what the robot's ROS 2 typesupport uses, which is why the
+# two match and data flows. But idlc warns that the default may become
+# 'appendable' in a future release, per the XTypes spec. Were that to happen on
+# a CycloneDDS upgrade here, our types would stop matching the robot's and DDS
+# would simply deliver nothing -- no error, no warning, an empty recording.
+#
+# Stating it explicitly makes the upgrade a no-op. Verified byte-identical
+# against the unflagged output across all 20 generated files.
 idl-gen: check-cyclonedds
 	@mkdir -p $(IDL_GEN_DIR)
 	@for f in $(IDL_DIR)/*.idl; do \
 		echo "idlc $$f"; \
-		idlc -l c -I $(IDL_DIR) -o $(IDL_GEN_DIR) "$$f" || exit 1; \
+		idlc -l c -x final -I $(IDL_DIR) -o $(IDL_GEN_DIR) "$$f" || exit 1; \
 	done
 
 build: idl-gen
