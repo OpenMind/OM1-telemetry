@@ -18,26 +18,11 @@ import (
 	"om1-telemetry/internal/ddscore"
 )
 
-// NOTE ON GENERATED SYMBOL NAMES: the C type/descriptor names below
-// (C.unitree_go_msg_dds__LowState_, ..._desc, etc.) follow idlc's flattened-
-// module naming convention (module::module::struct -> module_module_struct_,
-// descriptor suffixed _desc) — confirmed by running idlc 0.10.5 against
-// idl/unitree_go_lowstate.idl / idl/unitree_hg_lowstate.idl and building this
-// package end-to-end (see internal/ddsgen/unitree_{go,hg}_lowstate.h).
-
-// rawSample is one decoded-then-re-encoded lowstate message, ready to
-// append to the data file, plus its DDS source timestamp.
 type rawSample struct {
 	data   []byte
 	unixNs int64
 }
 
-// subscribeDDS opens a CycloneDDS participant on domainID, subscribes to
-// topic using the LowState schema for robotType ("go2" or "g1" — anything
-// else defaults to go2, matching config.DefaultRobotType), and streams
-// samples (re-encoded to CDR bytes matching unitree_{go,hg}'s own wire
-// format) on the returned channel until ctx is cancelled or Stop() (the
-// returned closer) is called.
 func subscribeDDS(ctx context.Context, domainID uint32, topic string, robotType string) (<-chan rawSample, func(), error) {
 	participant, err := ddscore.NewParticipant(domainID)
 	if err != nil {
@@ -124,10 +109,6 @@ func pollHg(ctx context.Context, reader ddscore.Entity, ws *ddscore.WaitSet, out
 	}
 }
 
-// encodeGo2LowState re-serializes a decoded unitree_go/msg/LowState sample
-// to CDR bytes, field-for-field in IDL declaration order (see
-// idl/unitree_go_lowstate.idl), so downstream tools that expect the
-// original wire format can decode it unchanged.
 func encodeGo2LowState(s *C.unitree_go_msg_dds__LowState_) []byte {
 	w := cdr.NewWriter()
 
@@ -221,9 +202,6 @@ func writeGo2BmsState(w *cdr.Writer, s *C.unitree_go_msg_dds__BmsState_) {
 	}
 }
 
-// encodeHgLowState re-serializes a decoded unitree_hg/msg/LowState sample
-// (G1's distinct schema) to CDR bytes, field-for-field in IDL declaration
-// order (see idl/unitree_hg_lowstate.idl).
 func encodeHgLowState(s *C.unitree_hg_msg_dds__LowState_) []byte {
 	w := cdr.NewWriter()
 

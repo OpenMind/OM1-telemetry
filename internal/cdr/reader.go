@@ -6,10 +6,6 @@ import (
 	"math"
 )
 
-// Reader decodes a CDR-serialized payload, little- or big-endian depending
-// on the encapsulation header. Used by tests to verify Writer output; the
-// same rules are duplicated (independently) in internal/depth.ParseImage for
-// the one message type that needs decoding in production.
 type Reader struct {
 	body   []byte
 	pos    int
@@ -120,7 +116,6 @@ func (r *Reader) RawBytes(n int) ([]byte, error) {
 	return b, nil
 }
 
-// Seq reads a CDR byte sequence: a uint32 length followed by the raw bytes.
 func (r *Reader) Seq() ([]byte, error) {
 	n, err := r.U32()
 	if err != nil {

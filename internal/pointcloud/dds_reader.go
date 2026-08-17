@@ -17,30 +17,11 @@ import (
 	"om1-telemetry/internal/ddscore"
 )
 
-// NOTE ON GENERATED SYMBOL NAMES: the exact C type/descriptor names below
-// (C.sensor_msgs_msg_dds__PointCloud2_, ..._desc, etc.) are idlc's expected
-// flattened-module naming convention (module::module::struct ->
-// module_module_struct_, descriptor suffixed _desc) but have NOT been
-// verified by actually running idlc (not available in the authoring
-// environment — see Makefile's idl-gen target and README's "Build
-// prerequisites" section). The first `make build` on a host with
-// CycloneDDS installed will fail to compile here if idlc emitted
-// different names; fix by matching whatever
-// internal/ddsgen/sensor_msgs_pointcloud2.h actually declares.
-
-// rawSample is one decoded-then-re-encoded PointCloud2 message, ready to
-// append (after compression) to the data file, plus its DDS source
-// timestamp.
 type rawSample struct {
 	data   []byte
 	unixNs int64
 }
 
-// subscribeDDS opens a CycloneDDS participant on domainID, subscribes to
-// topic using the sensor_msgs/PointCloud2 schema, and streams samples
-// (re-encoded to CDR bytes matching sensor_msgs/PointCloud2's own wire
-// format) on the returned channel until ctx is cancelled or Stop() (the
-// returned closer) is called.
 func subscribeDDS(ctx context.Context, domainID uint32, topic string) (<-chan rawSample, func(), error) {
 	participant, err := ddscore.NewParticipant(domainID)
 	if err != nil {
@@ -96,14 +77,9 @@ func poll(ctx context.Context, reader ddscore.Entity, ws *ddscore.WaitSet, out c
 	}
 }
 
-// encodePointCloud2 re-serializes a decoded sensor_msgs/PointCloud2 sample
-// to CDR bytes, field-for-field in IDL declaration order (see
-// idl/sensor_msgs_pointcloud2.idl), so downstream tools that expect the
-// original wire format can decode it unchanged.
 func encodePointCloud2(s *C.sensor_msgs_msg_dds__PointCloud2_) []byte {
 	w := cdr.NewWriter()
 
-	// header: std_msgs/Header { builtin_interfaces/Time stamp; string frame_id; }
 	w.I32(int32(s.header.stamp.sec))
 	w.U32(uint32(s.header.stamp.nanosec))
 	w.Str(C.GoString(s.header.frame_id))
@@ -111,7 +87,6 @@ func encodePointCloud2(s *C.sensor_msgs_msg_dds__PointCloud2_) []byte {
 	w.U32(uint32(s.height))
 	w.U32(uint32(s.width))
 
-	// fields: sequence<sensor_msgs/PointField>
 	fieldCount := int(s.fields._length)
 	w.U32(uint32(fieldCount))
 	if fieldCount > 0 {

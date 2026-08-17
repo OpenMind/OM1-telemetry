@@ -17,28 +17,11 @@ import (
 	"om1-telemetry/internal/ddscore"
 )
 
-// NOTE ON GENERATED SYMBOL NAMES: the exact C type/descriptor names below
-// (C.sensor_msgs_msg_dds__LaserScan_, ..._desc) are idlc's expected
-// flattened-module naming convention (module::module::struct -> module_
-// module_struct_, descriptor suffixed _desc) but have NOT been verified by
-// actually running idlc (not available in the authoring environment — see
-// Makefile's idl-gen target and README's Build prerequisites). The first
-// `make build` on a host with CycloneDDS installed will fail to compile
-// here if idlc emitted different names; fix by matching whatever
-// internal/ddsgen/sensor_msgs_laserscan.h actually declares.
-
-// rawSample is one decoded-then-re-encoded LaserScan message, ready to
-// append to the data file, plus its DDS source timestamp.
 type rawSample struct {
 	data   []byte
 	unixNs int64
 }
 
-// subscribeDDS opens a CycloneDDS participant on domainID, subscribes to
-// topic using the sensor_msgs/LaserScan schema, and streams samples
-// (re-encoded to CDR bytes matching the message's own wire format) on the
-// returned channel until ctx is cancelled or Stop() (the returned closer)
-// is called.
 func subscribeDDS(ctx context.Context, domainID uint32, topic string) (<-chan rawSample, func(), error) {
 	participant, err := ddscore.NewParticipant(domainID)
 	if err != nil {
@@ -94,10 +77,6 @@ func pollLaserScan(ctx context.Context, reader ddscore.Entity, ws *ddscore.WaitS
 	}
 }
 
-// encodeLaserScan re-serializes a decoded sensor_msgs/LaserScan sample to
-// CDR bytes, field-for-field in IDL declaration order (see
-// idl/sensor_msgs_laserscan.idl), so downstream tools that expect the
-// original wire format can decode it unchanged.
 func encodeLaserScan(s *C.sensor_msgs_msg_dds__LaserScan_) []byte {
 	w := cdr.NewWriter()
 
@@ -119,10 +98,6 @@ func encodeLaserScan(s *C.sensor_msgs_msg_dds__LaserScan_) []byte {
 	return w.Bytes()
 }
 
-// writeFloatSeq writes a CDR sequence<float>: a uint32 length followed by
-// each element individually (per-element alignment, not a raw byte blob —
-// do NOT use cdr.Writer.Seq here, that's only for sequence<octet>-like raw
-// byte sequences).
 func writeFloatSeq(w *cdr.Writer, length C.uint32_t, buf *C.float) {
 	n := int(length)
 	w.U32(uint32(n))

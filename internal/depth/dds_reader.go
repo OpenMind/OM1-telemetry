@@ -17,29 +17,11 @@ import (
 	"om1-telemetry/internal/ddscore"
 )
 
-// NOTE ON GENERATED SYMBOL NAMES: the exact C type/descriptor names below
-// (C.sensor_msgs_msg_dds__Image_, C.sensor_msgs_msg_dds__Image__desc) are
-// idlc's expected flattened-module naming convention (module::module::struct
-// -> module_module_struct_, descriptor suffixed _desc) but have NOT been
-// verified by actually running idlc (not available in the authoring
-// environment — see Makefile's idl-gen target and README's Build
-// prerequisites). The first `make build` on a host with CycloneDDS installed
-// will fail to compile here if idlc emitted different names; fix by matching
-// whatever internal/ddsgen/sensor_msgs_image.h actually declares.
-
-// rawSample is one decoded-then-re-encoded sensor_msgs/Image message, ready
-// to be handed to encodeFrame (which calls ParseImage), plus its DDS source
-// timestamp.
 type rawSample struct {
 	data   []byte
 	unixNs int64
 }
 
-// subscribeDDS opens a CycloneDDS participant on domainID, subscribes to
-// topic using the sensor_msgs/Image schema, and streams samples (re-encoded
-// to CDR bytes matching sensor_msgs/Image's own wire format, byte-for-byte
-// compatible with ParseImage in image.go) on the returned channel until ctx
-// is cancelled or Stop() (the returned closer) is called.
 func subscribeDDS(ctx context.Context, domainID uint32, topic string) (<-chan rawSample, func(), error) {
 	participant, err := ddscore.NewParticipant(domainID)
 	if err != nil {
@@ -95,14 +77,6 @@ func pollImage(ctx context.Context, reader ddscore.Entity, ws *ddscore.WaitSet, 
 	}
 }
 
-// encodeImage re-serializes a decoded sensor_msgs/Image sample to CDR bytes,
-// field-for-field in IDL declaration order (see idl/sensor_msgs_image.idl),
-// so that image.go's ParseImage (which decodes the same layout as delivered
-// by the previous zenoh-ros bridge) can decode it unchanged.
-//
-// stamp.sec is written via w.U32 (not w.I32) even though the IDL field is
-// int32 — ParseImage reads it as u32 too, so this preserves identical bits
-// without caring about sign.
 func encodeImage(s *C.sensor_msgs_msg_dds__Image_) []byte {
 	w := cdr.NewWriter()
 

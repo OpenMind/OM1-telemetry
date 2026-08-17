@@ -12,37 +12,17 @@ import (
 	"om1-telemetry/internal/recordutil"
 )
 
-// HeartbeatName is the stream identifier used with heartbeat.Monitor.
-// Same name on Go2 and G1 — the messages have slightly different
-// schemas (unitree_go vs unitree_hg) but identical purpose; the data
-// pipeline doesn't need to distinguish them.
 const HeartbeatName = "lowstate"
-
-// /lowstate is the catch-all robot state message:
-// IMU, joint states, battery, foot forces, wireless remote, temperatures, etc.
-// We record raw payload bytes + per-message timestamps; downstream tools
-// deserialize when needed.
-//
-// Measured rates:
-//   Go2 (unitree_go/msg/LowState):  ~500 Hz,  ~2.5 KB / msg = ~1.25 MB/s
-//   G1  (unitree_hg/msg/LowState):  ~1053 Hz, ~2.1 KB / msg = ~2.21 MB/s
-//
-// Daily (8h continuous): Go2 ~36 GB, G1 ~62 GB
 
 const syncInterval = 2 * time.Second
 
 type Config struct {
-	// RobotType selects the LowState DDS schema to subscribe with: "go2"
-	// (unitree_go/msg/LowState) or "g1" (unitree_hg/msg/LowState). Anything
-	// else defaults to "go2".
 	RobotType      string
 	DDSDomainID    uint32
 	DDSTopic       string
 	TimestampsFile string
 	DataFile       string
 
-	// Monitor is optional; ticks once per message so the central
-	// heartbeat monitor can detect a stuck recorder.
 	Monitor *heartbeat.Monitor
 }
 
@@ -99,7 +79,6 @@ func (l *LowstateStream) record(ctx context.Context) error {
 	}
 	defer closeSub()
 
-	// Append-mode open: do NOT clobber prior data on reconnect.
 	tsResult, err := recordutil.OpenForAppend(l.cfg.TimestampsFile)
 	if err != nil {
 		return fmt.Errorf("open timestamps file: %w", err)
@@ -186,7 +165,6 @@ func (l *LowstateStream) record(ctx context.Context) error {
 			byteOffset += int64(n)
 			seq++
 
-			// Heartbeat tick. Safe if Monitor is nil.
 			l.cfg.Monitor.Tick(HeartbeatName)
 		}
 	}

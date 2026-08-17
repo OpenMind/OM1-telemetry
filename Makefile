@@ -8,11 +8,6 @@ IDL_GEN_DIR := internal/ddsgen
 
 export CGO_ENABLED=1
 
-# CycloneDDS (libddsc + idlc) is a build/runtime dependency of
-# internal/ddscore and every stream's dds_reader.go — unlike zenoh-c there is
-# no prebuilt per-platform archive, so it's built from source here (same
-# eclipse-cyclonedds/cyclonedds repo everyone on the team builds locally),
-# rather than relying on distro packages that vary release-to-release.
 CYCLONEDDS_VERSION := releases/0.10.x
 CYCLONEDDS_DIR      := .cyclonedds
 CYCLONEDDS_SRC       := $(CYCLONEDDS_DIR)/src
@@ -20,11 +15,6 @@ CYCLONEDDS_INSTALL   := $(shell pwd)/$(CYCLONEDDS_DIR)/install
 
 export PATH := $(CYCLONEDDS_INSTALL)/bin:$(PATH)
 export PKG_CONFIG_PATH := $(CYCLONEDDS_INSTALL)/lib/pkgconfig:$(PKG_CONFIG_PATH)
-
-# idlc itself is a plain executable (not something we link), so it needs its
-# own shared-library dependencies (libddsc, and optionally libiceoryx_*)
-# findable at runtime — the CGO_LDFLAGS rpath below only covers our own Go
-# binary, not idlc.
 export LD_LIBRARY_PATH := $(CYCLONEDDS_INSTALL)/lib:$(LD_LIBRARY_PATH)
 export DYLD_LIBRARY_PATH := $(CYCLONEDDS_INSTALL)/lib:$(DYLD_LIBRARY_PATH)
 
@@ -52,14 +42,8 @@ check-cyclonedds: install-cyclonedds
 		exit 1; \
 	}
 
-# libddsc's own .pc file doesn't embed an rpath, so binaries built against
-# this non-system install prefix fail at runtime with "Library not loaded:
-# @rpath/libddsc..." unless one is added explicitly.
 export CGO_LDFLAGS := -Wl,-rpath,$(CYCLONEDDS_INSTALL)/lib
 
-# Regenerates the idlc type-support C sources for every message type this
-# recorder subscribes to, from idl/*.idl, into $(IDL_GEN_DIR). Must be rerun
-# whenever an .idl file changes; the generated *.c/*.h are gitignored.
 idl-gen: check-cyclonedds
 	@mkdir -p $(IDL_GEN_DIR)
 	@for f in $(IDL_DIR)/*.idl; do \

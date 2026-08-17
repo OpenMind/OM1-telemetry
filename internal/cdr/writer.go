@@ -1,12 +1,3 @@
-// Package cdr implements just enough of the CDR (Common Data Representation)
-// wire encoding used by ROS 2 / DDS messages to re-serialize samples that
-// have already been decoded off a DDS reader (see internal/*/dds_reader.go).
-//
-// This mirrors the decode-side rules already relied on by
-// internal/depth.ParseImage (a little-endian XCDR1 body prefixed by a 4-byte
-// encapsulation header, with fields aligned to their own size), so that
-// bytes produced here decode identically to what the previous zenoh-bridge
-// pipeline delivered.
 package cdr
 
 import (
@@ -14,29 +5,22 @@ import (
 	"math"
 )
 
-// encapsulation header: [options, format, 0, 0]. format bit0 set = little-endian.
 var littleEndianHeader = [4]byte{0x00, 0x01, 0x00, 0x00}
 
-// Writer builds a little-endian CDR-encoded byte buffer, starting with the
-// standard 4-byte encapsulation header.
 type Writer struct {
 	buf []byte
 }
 
-// NewWriter returns a Writer preloaded with the CDR encapsulation header.
 func NewWriter() *Writer {
 	w := &Writer{buf: make([]byte, 4)}
 	copy(w.buf, littleEndianHeader[:])
 	return w
 }
 
-// Bytes returns the encoded buffer, including the encapsulation header.
 func (w *Writer) Bytes() []byte {
 	return w.buf
 }
 
-// bodyLen is the number of bytes written after the 4-byte header; alignment
-// is computed relative to this, matching the reader's convention.
 func (w *Writer) bodyLen() int {
 	return len(w.buf) - 4
 }
@@ -93,25 +77,17 @@ func (w *Writer) F64(v float64) {
 	w.U64(math.Float64bits(v))
 }
 
-// Str writes a CDR string: a uint32 length (including the trailing NUL)
-// followed by the bytes and a NUL terminator.
 func (w *Writer) Str(s string) {
 	w.U32(uint32(len(s) + 1))
 	w.buf = append(w.buf, s...)
 	w.buf = append(w.buf, 0)
 }
 
-// Seq writes a CDR byte sequence: a uint32 length followed by the raw bytes
-// (no terminator, no per-element alignment beyond the length prefix).
-// Pairs with Reader.Seq.
 func (w *Writer) Seq(b []byte) {
 	w.U32(uint32(len(b)))
 	w.buf = append(w.buf, b...)
 }
 
-// RawBytes appends raw bytes with no length prefix — use when the length is
-// (or will be) encoded separately, e.g. sensor_msgs/Image's data field where
-// step*height is implied by earlier fields. Pairs with Reader.RawBytes.
 func (w *Writer) RawBytes(b []byte) {
 	w.buf = append(w.buf, b...)
 }
