@@ -69,8 +69,13 @@ func pollLaserScan(ctx context.Context, reader ddscore.Entity, ws *ddscore.WaitS
 		if err != nil || !ok {
 			continue
 		}
+		// Encode first: the encoder reads members CycloneDDS allocated. Free
+		// immediately after, before the next Take reuses the struct.
+		data := encodeLaserScan(&sample)
+		ddscore.FreeSampleContents(unsafe.Pointer(&sample), unsafe.Pointer(&C.sensor_msgs_msg_dds__LaserScan__desc))
+
 		select {
-		case out <- rawSample{data: encodeLaserScan(&sample), unixNs: info.SourceTimestamp}:
+		case out <- rawSample{data: data, unixNs: info.SourceTimestamp}:
 		case <-ctx.Done():
 			return
 		}

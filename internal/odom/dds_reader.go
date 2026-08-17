@@ -72,8 +72,13 @@ func pollOdometry(ctx context.Context, reader ddscore.Entity, ws *ddscore.WaitSe
 		if err != nil || !ok {
 			continue
 		}
+		// Encode first: the encoder reads members CycloneDDS allocated. Free
+		// immediately after, before the next Take reuses the struct.
+		data := encodeOdometry(&sample)
+		ddscore.FreeSampleContents(unsafe.Pointer(&sample), unsafe.Pointer(&C.nav_msgs_msg_dds__Odometry__desc))
+
 		select {
-		case out <- rawSample{data: encodeOdometry(&sample), unixNs: info.SourceTimestamp}:
+		case out <- rawSample{data: data, unixNs: info.SourceTimestamp}:
 		case <-ctx.Done():
 			return
 		}
