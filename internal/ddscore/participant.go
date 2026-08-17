@@ -94,19 +94,6 @@ func Take(reader Entity, sampleBuf unsafe.Pointer) (ok bool, info SampleInfo, er
 	}, nil
 }
 
-// FreeSampleContents releases the memory CycloneDDS allocated inside a sample
-// taken into a caller-provided buffer, leaving the buffer itself alone.
-//
-// dds_take copies a sample into the struct handed to Take, but every
-// variable-length member of that struct -- strings, and the sequences carrying
-// scan ranges, point cloud bytes, depth pixels, joint arrays -- is a pointer to
-// memory CycloneDDS mallocs per take. That memory belongs to the caller and is
-// not covered by dds_return_loan, which applies to the other calling
-// convention, where the reader hands out its own buffer.
-//
-// Without this the recorder leaked at every message: measured at 8 MB/s on a
-// G1, which is 29 GB in an hour. Call it once the sample has been read, and
-// before the next Take reuses the struct.
 func FreeSampleContents(sampleBuf, descriptor unsafe.Pointer) {
 	var pinner runtime.Pinner
 	pinner.Pin(sampleBuf)
