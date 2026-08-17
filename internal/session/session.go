@@ -1,19 +1,3 @@
-// Package session owns the on-disk directory a recording writes into.
-//
-// Naming a directory after the wall clock is only safe when the wall clock is
-// right. On a robot that boots without a network it frequently is not, and the
-// old behaviour -- one time.Now() at startup, frozen for the life of the
-// process -- produced sessions filed under a date days in the past, which NTP
-// then corrected seconds later with the directory name already set in stone.
-//
-// So: when the clock cannot be trusted, the session starts under pending/ with
-// a name derived from the boot id and the monotonic clock, both of which are
-// correct regardless of the date. The moment NTP synchronizes, the directory is
-// renamed to its true date and a symlink the recorders write through is
-// repointed at it, atomically, without interrupting a single recorder.
-//
-// Sessions whose process died before that moment are swept by Janitor on the
-// next start, using the timebase journal left behind.
 package session
 
 import (

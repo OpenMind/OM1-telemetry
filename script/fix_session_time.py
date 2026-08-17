@@ -1,29 +1,3 @@
-#!/usr/bin/env python3
-"""Apply a session's clock corrections to its timestamp CSVs.
-
-A robot that boots without a network records with a wrong wall clock. The
-recorder writes a monotonic reading next to every timestamp and journals the
-moment NTP corrects the clock, which makes the error recoverable afterwards --
-see script/timebase.py for the arithmetic.
-
-You usually do not need this. align_recording.py and verify_recording.py apply
-the correction themselves when they read a session, and the raw CSVs are left
-as recorded on purpose: the recording should say what was actually observed.
-Reach for this when a downstream tool reads unix_ns directly and cannot be
-taught about the journal.
-
-    # what would change, nothing written
-    ./fix_session_time.py /path/to/session
-
-    # corrected copies alongside the originals
-    ./fix_session_time.py /path/to/session --write
-
-    # rewrite in place; originals kept in a <column>_recorded column
-    ./fix_session_time.py /path/to/session --in-place
-
-Pass a recordings root with --all to sweep every session under it.
-"""
-
 from __future__ import annotations
 
 import argparse

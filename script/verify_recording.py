@@ -26,7 +26,6 @@ import pandas as pd
 
 import timebase
 
-# ── ANSI colors ───────────────────────────────────────────────────────
 G, R, Y, B, BOLD, END = (
     "\033[92m", "\033[91m", "\033[93m", "\033[94m", "\033[1m", "\033[0m"
 )
@@ -54,15 +53,6 @@ STREAMS = [
 ]
 
 
-# ── Expected rates, measured per robot ──────────────────────────────
-# Rates differ enough between robots that one table misreports the other: a G1
-# publishes lowstate at ~1053 Hz and odom at ~495 Hz, so checking it against
-# Go2 numbers reported a perfectly healthy recording as "rate 263% of expected".
-#
-# G1 figures below are measured on a live G1 (2026-08); Go2 figures are the ones
-# this repo has always carried. meta.json records which robot a session came
-# from, so the right column is picked automatically; sessions predating that
-# field fall back to the values in STREAMS.
 ROBOT_RATES = {
     "g1": {
         "lowstate": 1053,   # measured 1052.5-1052.9 Hz
@@ -129,7 +119,6 @@ def apply_profile(session: Path):
     return rates, dropped
 
 
-# ── 1. Per-stream statistics ─────────────────────────────────────────
 def stream_stats(csv_path: Path, expected_hz: float, time_col: str, tb=None):
     """Return dict of stats, or None if file missing/unparseable."""
     if not csv_path.exists():
@@ -149,9 +138,6 @@ def stream_stats(csv_path: Path, expected_hz: float, time_col: str, tb=None):
         else:
             return {"error": f"no time column in {df.columns.tolist()}"}
 
-    # A session recorded across an NTP correction has a wall clock that jumps
-    # mid-file. Correcting on read is what keeps the monotonicity check below
-    # meaningful instead of flagging the clock fix as data corruption.
     if tb is not None and tb.needs_correction:
         df, _ = timebase.correct_dataframe(df, tb, time_col)
 
@@ -173,12 +159,6 @@ def stream_stats(csv_path: Path, expected_hz: float, time_col: str, tb=None):
     intervals = np.diff(ts) / 1e6  # ms
     monotonic = bool((intervals > 0).all())
 
-    # Gap threshold: 3x expected interval, or 1s if no expected rate
-    # 3x the nominal period, but never tighter than MIN_GAP_MS. At 1 kHz that
-    # rule alone gives a 3 ms threshold, which is below general-purpose Linux
-    # scheduler granularity -- it flagged 0.19% of a healthy G1 lowstate stream
-    # as gaps (max observed 7.6 ms) while the message count matched the nominal
-    # rate exactly. Below this floor you are measuring jitter, not loss.
     MIN_GAP_MS = 20.0
     gap_threshold = max(3 * (1000.0 / expected_hz), MIN_GAP_MS) if expected_hz > 0 else 1000.0
     gaps = int((intervals > gap_threshold).sum())
@@ -235,12 +215,6 @@ def print_stream_table(stats: dict):
         if s["seq_gaps"] and s["seq_gaps"] > 5:
             status = WARN; notes.append(f"{s['seq_gaps']} seq gaps")
 
-        # Rate sanity. The upper bound is deliberately below 2.0: a stream
-        # delivered twice -- which a Zenoh/DDS bridge loop does, and which was
-        # observed on both RealSense topics -- lands at exactly 2.0x and would
-        # slip through a "> 2.0" test. Duplication should be caught here rather
-        # than silently de-duplicated by the recorder, which would hide a
-        # broken bridge while halving the symptom.
         if s["expected_hz"] > 0:
             ratio = s["rate_hz"] / s["expected_hz"]
             if ratio < 0.5 or ratio > 1.5:
@@ -259,7 +233,6 @@ def print_stream_table(stats: dict):
         print(line)
 
 
-# ── 2. Format validation ─────────────────────────────────────────────
 def ffprobe_streams(path: Path):
     try:
         r = subprocess.run(
@@ -386,7 +359,6 @@ def validate_formats(session: Path):
             print(f"  {OK_} audio.ogg: {codec} {sr} Hz, {ch} ch ({ogg.stat().st_size:,} B)")
 
 
-# ── 3. Cross-modal alignment ─────────────────────────────────────────
 def nearest_neighbor_align(master_ts, slave_ts):
     """For each master timestamp, find nearest slave timestamp."""
     if len(slave_ts) == 0:
@@ -490,7 +462,6 @@ def cross_alignment(stats: dict):
     return results, skipped
 
 
-# ── 4. Calibration check ─────────────────────────────────────────────
 def check_calibration(session: Path):
     print(f"\n{BOLD}Calibration{END}")
     cal = session.parent / "calibration"
@@ -520,7 +491,6 @@ def check_calibration(session: Path):
     return have_critical
 
 
-# ── 5. Final verdict ─────────────────────────────────────────────────
 def final_verdict(stats: dict, align: dict, skipped: list, has_calib: bool):
     print(f"\n{BOLD}ML training readiness verdict{END}")
     print("─" * 50)
@@ -585,7 +555,6 @@ def final_verdict(stats: dict, align: dict, skipped: list, has_calib: bool):
     return True
 
 
-# ── 6. Optional plot ─────────────────────────────────────────────────
 def plot_timeline(stats: dict, output_path: Path):
     try:
         import matplotlib.pyplot as plt
@@ -618,7 +587,6 @@ def plot_timeline(stats: dict, output_path: Path):
     print(f"  {OK_} Saved timeline plot to {output_path}")
 
 
-# ── main ─────────────────────────────────────────────────────────────
 def main():
     p = argparse.ArgumentParser()
     p.add_argument("session", help="Path to a recording session directory")

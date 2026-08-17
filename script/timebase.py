@@ -1,26 +1,3 @@
-"""Read a session's clock journal and correct timestamps recorded before NTP.
-
-A robot that boots without a network records with a wall clock that may be days
-wrong. Every timestamps CSV carries a ``mono_ns`` column alongside its wall
-clock value; ``mono_ns`` comes from CLOCK_BOOTTIME and does not jump when NTP
-later steps the clock. ``clock_timebase.jsonl`` records each step. Together they
-make the correction arithmetic rather than guesswork.
-
-The correction is a per-row *offset*, not a replacement value::
-
-    offset(mono) = sum of every step that happened after that row was written
-
-which is exact because between steps the wall clock and the boot clock advance
-at the same rate to within NTP's slew (parts per million -- microseconds over a
-session). Applying an offset rather than recomputing the timestamp preserves
-what each column meant: a Zenoh row's ``unix_ns`` is the *publisher's* stamp,
-recorded on the same host clock, while ``mono_ns`` is when this recorder
-received it. Both are shifted by the same amount, so the transport latency
-between them survives the correction intact.
-
-Used by fix_session_time.py, align_recording.py and verify_recording.py.
-"""
-
 from __future__ import annotations
 
 import json

@@ -87,9 +87,6 @@ func TestLoad_envOverridesProfileEnableFlags(t *testing.T) {
 	require.False(t, cfg.EnableLidar, "ENABLE_LIDAR env should override profile")
 }
 
-// Cameras belong to the profile because a G1 and a Go2 do not have the same
-// ones, and recording a camera the robot lacks costs a reconnect every two
-// seconds plus a 0-byte mp4 each time.
 func TestResolveProfile_camerasArePerRobot(t *testing.T) {
 	t.Setenv("ROBOT_TYPE", "g1")
 	_, g1 := ResolveProfile()
