@@ -72,8 +72,10 @@ func pollOdometry(ctx context.Context, reader ddscore.Entity, ws *ddscore.WaitSe
 		if err != nil || !ok {
 			continue
 		}
+		data := encodeOdometry(&sample)
+		C.dds_sample_free(unsafe.Pointer(&sample), &C.nav_msgs_msg_dds__Odometry__desc, C.DDS_FREE_CONTENTS)
 		select {
-		case out <- rawSample{data: encodeOdometry(&sample), unixNs: info.SourceTimestamp}:
+		case out <- rawSample{data: data, unixNs: info.SourceTimestamp}:
 		case <-ctx.Done():
 			return
 		}

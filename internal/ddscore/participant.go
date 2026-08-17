@@ -70,6 +70,14 @@ func (p *Participant) CreateReader(topic Entity) (Entity, error) {
 	return e, nil
 }
 
+func (p *Participant) CreateWriter(topic Entity) (Entity, error) {
+	e, err := check(C.dds_create_writer(C.dds_entity_t(p.entity), C.dds_entity_t(topic), nil, nil))
+	if err != nil {
+		return 0, fmt.Errorf("dds_create_writer: %w", err)
+	}
+	return e, nil
+}
+
 type SampleInfo struct {
 	ValidData       bool
 	SourceTimestamp int64
