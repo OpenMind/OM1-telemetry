@@ -21,6 +21,13 @@ CYCLONEDDS_INSTALL   := $(shell pwd)/$(CYCLONEDDS_DIR)/install
 export PATH := $(CYCLONEDDS_INSTALL)/bin:$(PATH)
 export PKG_CONFIG_PATH := $(CYCLONEDDS_INSTALL)/lib/pkgconfig:$(PKG_CONFIG_PATH)
 
+# idlc itself is a plain executable (not something we link), so it needs its
+# own shared-library dependencies (libddsc, and optionally libiceoryx_*)
+# findable at runtime — the CGO_LDFLAGS rpath below only covers our own Go
+# binary, not idlc.
+export LD_LIBRARY_PATH := $(CYCLONEDDS_INSTALL)/lib:$(LD_LIBRARY_PATH)
+export DYLD_LIBRARY_PATH := $(CYCLONEDDS_INSTALL)/lib:$(DYLD_LIBRARY_PATH)
+
 install-cyclonedds:
 	@if [ ! -f "$(CYCLONEDDS_INSTALL)/lib/pkgconfig/CycloneDDS.pc" ]; then \
 		set -e; \
