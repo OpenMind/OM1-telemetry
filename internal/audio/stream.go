@@ -8,8 +8,10 @@ import (
 	"os/exec"
 	"path/filepath"
 	"sync/atomic"
+	"syscall"
 	"time"
 
+	"om1-telemetry/internal/clock"
 	"om1-telemetry/internal/heartbeat"
 	"om1-telemetry/internal/recordutil"
 )
@@ -81,21 +83,37 @@ func (a *AudioRTSPStream) loop(ctx context.Context) {
 
 func (a *AudioRTSPStream) record(ctx context.Context) error {
 	start := time.Now()
+	startMono := clock.MonoNs()
 	segmentFile := recordutil.UniqueSegmentFile(a.cfg.OutputFile, start)
 
 	cmd := exec.CommandContext(ctx, "ffmpeg",
 		"-loglevel", "error",
 		"-rtsp_transport", "tcp",
 		"-i", a.cfg.RTSPURL,
+		// The source is the video-processor's muxed session stream: h264 in
+		// stream 0, opus in stream 1. Without -vn, ffmpeg tries to copy the
+		// video into the Ogg container too and exits with "Unsupported codec
+		// id in stream 0", leaving a 0-byte file and a reconnect loop.
+		"-vn",
 		"-c", "copy",
 		"-metadata", "creation_time="+start.UTC().Format(time.RFC3339Nano),
 		segmentFile,
 	)
+	// Own process group. Ctrl-C in a terminal delivers SIGINT to the whole
+	// foreground group, so ffmpeg would get one from the terminal and a second
+	// from Cancel below -- and ffmpeg treats a second interrupt as "exit
+	// immediately", abandoning the container trailer. Detached, it only ever
+	// receives the one we send.
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	// Interrupt rather than the CommandContext default of SIGKILL: Ogg buffers
+	// pages, so a killed ffmpeg flushes nothing and leaves a 0-byte audio.ogg.
+	cmd.Cancel = func() error { return cmd.Process.Signal(os.Interrupt) }
+	cmd.WaitDelay = 5 * time.Second
 	cmd.Stderr = os.Stderr
 	if err := cmd.Start(); err != nil {
 		return fmt.Errorf("start audio recorder: %w", err)
 	}
-	if err := appendSegmentEntry(a.cfg.TimestampsFile, start, segmentFile); err != nil {
+	if err := appendSegmentEntry(a.cfg.TimestampsFile, start, startMono, segmentFile); err != nil {
 		slog.Error("failed to append audio segment entry",
 			"file", a.cfg.TimestampsFile, "err", err)
 	}
@@ -125,15 +143,15 @@ func (a *AudioRTSPStream) record(ctx context.Context) error {
 
 	if a.cfg.FramesFile != "" {
 		a.pending.Add(1)
-		go func(segFile string, startUnixNs int64) {
+		go func(segFile string, startUnixNs, startMonoNs int64) {
 			defer a.markDone()
-			if err := a.framesWrite.ExtractAndAppend(segFile, "a:0", startUnixNs); err != nil {
+			if err := a.framesWrite.ExtractAndAppend(segFile, "a:0", startUnixNs, startMonoNs); err != nil {
 				slog.Error("audio frames extraction failed",
 					"segment", segFile, "err", err)
 			} else {
 				slog.Info("audio frames extracted", "segment", filepath.Base(segFile))
 			}
-		}(segmentFile, start.UnixNano())
+		}(segmentFile, start.UnixNano(), startMono)
 	}
 
 	return waitErr
@@ -157,7 +175,7 @@ func (a *AudioRTSPStream) waitForPending() {
 	}
 }
 
-func appendSegmentEntry(path string, start time.Time, segmentFile string) error {
+func appendSegmentEntry(path string, start time.Time, startMonoNs int64, segmentFile string) error {
 	if path == "" {
 		return nil
 	}
@@ -172,12 +190,12 @@ func appendSegmentEntry(path string, start time.Time, segmentFile string) error 
 		return fmt.Errorf("stat: %w", err)
 	}
 	if stat.Size() == 0 {
-		if _, err := fmt.Fprintln(f, "recording_start_unix_ns,segment_file"); err != nil {
+		if _, err := fmt.Fprintln(f, "recording_start_unix_ns,segment_file,mono_ns"); err != nil {
 			return fmt.Errorf("write header: %w", err)
 		}
 	}
 
-	if _, err := fmt.Fprintf(f, "%d,%s\n", start.UnixNano(), filepath.Base(segmentFile)); err != nil {
+	if _, err := fmt.Fprintf(f, "%d,%s,%d\n", start.UnixNano(), filepath.Base(segmentFile), startMonoNs); err != nil {
 		return fmt.Errorf("write entry: %w", err)
 	}
 	return f.Sync()

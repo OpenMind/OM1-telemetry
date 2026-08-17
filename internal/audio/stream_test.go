@@ -74,7 +74,7 @@ func TestStop_idempotent(t *testing.T) {
 }
 
 func TestAppendSegmentEntry_emptyPath_isNoOp(t *testing.T) {
-	err := appendSegmentEntry("", time.Now(), "/data/audio.ogg")
+	err := appendSegmentEntry("", time.Now(), 0, "/data/audio.ogg")
 	require.NoError(t, err)
 }
 
@@ -83,13 +83,13 @@ func TestAppendSegmentEntry_writesHeaderAndEntry(t *testing.T) {
 	start := time.Unix(1_000_000_000, 123_456_789)
 	segFile := "/data/audio_20260612T164629_876543210Z.ogg"
 
-	err := appendSegmentEntry(path, start, segFile)
+	err := appendSegmentEntry(path, start, 12345, segFile)
 	require.NoError(t, err)
 
 	data, err := os.ReadFile(path)
 	require.NoError(t, err)
 	content := string(data)
-	require.Contains(t, content, "recording_start_unix_ns,segment_file")
+	require.Contains(t, content, "recording_start_unix_ns,segment_file,mono_ns")
 	require.Contains(t, content, fmt.Sprintf("%d", start.UnixNano()))
 	require.Contains(t, content, filepath.Base(segFile))
 }
@@ -99,8 +99,8 @@ func TestAppendSegmentEntry_headerWrittenOnce(t *testing.T) {
 	seg1 := "/data/audio_seg1.ogg"
 	seg2 := "/data/audio_seg2.ogg"
 
-	require.NoError(t, appendSegmentEntry(path, time.Unix(1_000_000_000, 0), seg1))
-	require.NoError(t, appendSegmentEntry(path, time.Unix(2_000_000_000, 0), seg2))
+	require.NoError(t, appendSegmentEntry(path, time.Unix(1_000_000_000, 0), 1, seg1))
+	require.NoError(t, appendSegmentEntry(path, time.Unix(2_000_000_000, 0), 2, seg2))
 
 	data, err := os.ReadFile(path)
 	require.NoError(t, err)

@@ -1,9 +1,9 @@
-bin/
-
-internal/ddsgen/
-
-.cyclonedds/
-
 .DS_Store
-
+.claude/
+.cyclonedds/
+.zenoh-c/
+__pycache__/
+bin/
+internal/ddsgen/
+myenv/
 recordings/

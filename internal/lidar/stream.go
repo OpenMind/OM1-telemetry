@@ -8,6 +8,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"om1-telemetry/internal/clock"
 	"om1-telemetry/internal/heartbeat"
 	"om1-telemetry/internal/recordutil"
 )
@@ -105,7 +106,7 @@ func (l *LidarStream) record(ctx context.Context) error {
 	}()
 
 	if tsResult.PrevSize == 0 {
-		if _, err := fmt.Fprintln(tsFile, "unix_ns,seq,byte_offset"); err != nil {
+		if _, err := fmt.Fprintln(tsFile, "unix_ns,seq,byte_offset,mono_ns"); err != nil {
 			return fmt.Errorf("write header: %w", err)
 		}
 	}
@@ -155,13 +156,18 @@ func (l *LidarStream) record(ctx context.Context) error {
 			if unixNs == 0 {
 				unixNs = time.Now().UnixNano()
 			}
+			// Boot-clock receive time. unixNs above is the publisher's stamp,
+			// taken on this host's wall clock, so a clock step spoils it;
+			// monoNs is immune and says which correction applies to this row.
+			// See internal/clock.
+			monoNs := clock.MonoNs()
 
 			n, err := dataFile.Write(sample.data)
 			if err != nil {
 				return fmt.Errorf("write data: %w", err)
 			}
 
-			if _, err := fmt.Fprintf(tsFile, "%d,%d,%d\n", unixNs, seq, byteOffset); err != nil {
+			if _, err := fmt.Fprintf(tsFile, "%d,%d,%d,%d\n", unixNs, seq, byteOffset, monoNs); err != nil {
 				return fmt.Errorf("write timestamp: %w", err)
 			}
 

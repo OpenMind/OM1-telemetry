@@ -1,0 +1,74 @@
+
+robots:
+  g1:
+    cameras:
+      - name: front_camera_raw
+        url: rtsp://localhost:8556/raw
+        env: FRONT_CAMERA_RAW_RTSP_URL
+      - name: rear_camera_raw
+        url: rtsp://localhost:8558/raw
+        env: REAR_CAMERA_RAW_RTSP_URL
+      - name: down_camera
+        url: rtsp://localhost:8554/down_camera
+        env: DOWN_CAMERA_RTSP_URL
+
+    audio:
+      url: rtsp://localhost:8555/live
+      env: AUDIO_RTSP_URL
+
+    topics:
+      lowstate:
+        enabled: true
+        key: rt/lowstate
+        rate_hz: 1000
+      pointcloud:
+        enabled: true
+        key: rt/utlidar/cloud_livox_mid360
+        rate_hz: 10
+      odom:
+        enabled: true
+        key: odom
+        rate_hz: 500
+      lidar:
+        enabled: true
+        key: scan
+        rate_hz: 10
+      depth:
+        enabled: true
+        key: camera/realsense2_camera_node/depth/image_rect_raw
+        rate_hz: 15
+
+  go2:
+    cameras:
+      - name: top_camera
+        url: rtsp://localhost:8556/raw
+        env: TOP_CAMERA_RTSP_URL
+      - name: front_camera
+        url: rtsp://localhost:8554/front_camera
+        env: FRONT_CAMERA_RTSP_URL
+      - name: down_camera
+        url: rtsp://localhost:8554/down_camera
+        env: DOWN_CAMERA_RTSP_URL
+
+    audio:
+      url: rtsp://localhost:8555/live
+      env: AUDIO_RTSP_URL
+
+    topics:
+      lowstate:
+        enabled: true
+        key: rt/lowstate
+        rate_hz: 500
+      odom:
+        enabled: true
+        key: odom
+        rate_hz: 150
+      lidar:
+        enabled: true
+        key: scan
+        rate_hz: 10
+      depth:
+        enabled: true
+        key: camera/realsense2_camera_node/depth/image_rect_raw
+        rate_hz: 15
+

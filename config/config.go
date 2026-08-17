@@ -23,8 +23,10 @@ type Config struct {
 	RobotType        RobotType
 	EnableLidar      bool
 	EnablePointCloud bool
+	EnableDepth      bool
+	EnableOdom       bool
+	EnableLowstate   bool
 	SessionDir       string
-	SessionStartNs   int64
 	Video            []VideoConfig
 	Audio            AudioConfig
 	Features         FeaturesConfig
@@ -104,15 +106,21 @@ type NetworkConfig struct {
 	DataFile     string
 }
 
-func Load() Config {
-	now := time.Now()
-	baseDir := envStr("RECORDINGS_DIR", "recordings")
-	sessionDir := filepath.Join(
-		baseDir,
-		now.Format("2006-01-02"),
-		now.Format("2006-01-02_15-04-05"),
-	)
+// RecordingsDir is the root under which sessions are created. The session
+// package needs it before Load runs, because it decides the session directory
+// name -- which depends on whether the clock can be trusted yet.
+func RecordingsDir() string {
+	return envStr("RECORDINGS_DIR", "recordings")
+}
 
+// Load builds the recorder configuration for a session directory the caller
+// has already created.
+//
+// The directory is passed in rather than derived from time.Now(): a robot that
+// booted without a network can have a wall clock days off, and a directory
+// named from it would be wrong and frozen for the whole session. See
+// internal/session.
+func Load(sessionDir string) Config {
 	robotType, profile := ResolveProfile()
 
 	return Config{
@@ -120,9 +128,11 @@ func Load() Config {
 		RobotType:        robotType,
 		EnableLidar:      envBool("ENABLE_LIDAR", profile.EnableLidar),
 		EnablePointCloud: envBool("ENABLE_POINTCLOUD", profile.EnablePointCloud),
+		EnableDepth:      envBool("ENABLE_DEPTH", profile.EnableDepth),
+		EnableOdom:       envBool("ENABLE_ODOM", profile.EnableOdom),
+		EnableLowstate:   envBool("ENABLE_LOWSTATE", profile.EnableLowstate),
 		SessionDir:       sessionDir,
-		SessionStartNs:   now.UnixNano(),
-		Video:            videoConfigs(sessionDir),
+		Video:            videoConfigs(profile, sessionDir),
 		Audio: AudioConfig{
 			// Audio is the audio track of the video-processor's muxed session
 			// stream (single capture clock). ffmpeg selects it with -vn. Served
@@ -181,31 +191,18 @@ func Load() Config {
 	}
 }
 
-func videoConfigs(sessionDir string) []VideoConfig {
-	cameras := []struct {
-		name       string
-		defaultURL string
-	}{
-		// top_camera is served by the OM1 video-processor's GStreamer pipeline.
-		// /raw is the clean (no overlay/blur) camera view — the ground-truth
-		// image a recorder wants — on gst-direct :8556. Use :8555/live instead
-		// to record the processed view, or mediamtx :8554/raw for an off-host
-		// recorder.
-		{"top_camera", "rtsp://localhost:8556/raw"},
-		// front/down cameras are served by other sources on the robot; left on
-		// their existing mountpoints.
-		{"front_camera", "rtsp://localhost:8554/front_camera"},
-		{"down_camera", "rtsp://localhost:8554/down_camera"},
-	}
-
-	configs := make([]VideoConfig, 0, len(cameras))
-	for _, cam := range cameras {
-		envKey := strings.ToUpper(cam.name) + "_RTSP_URL"
+func videoConfigs(p Profile, sessionDir string) []VideoConfig {
+	configs := make([]VideoConfig, 0, len(p.Cameras))
+	for _, cam := range p.Cameras {
+		envKey := cam.Env
+		if envKey == "" {
+			envKey = strings.ToUpper(cam.Name) + "_RTSP_URL"
+		}
 		configs = append(configs, VideoConfig{
-			Name:           cam.name,
-			RTSPURL:        envStr(envKey, cam.defaultURL),
-			OutputFile:     filepath.Join(sessionDir, cam.name+".mp4"),
-			TimestampsFile: filepath.Join(sessionDir, cam.name+"_timestamps.csv"),
+			Name:           cam.Name,
+			RTSPURL:        envStr(envKey, cam.URL),
+			OutputFile:     filepath.Join(sessionDir, cam.Name+".mp4"),
+			TimestampsFile: filepath.Join(sessionDir, cam.Name+"_timestamps.csv"),
 		})
 	}
 	return configs

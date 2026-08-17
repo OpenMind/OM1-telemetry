@@ -1,0 +1,25 @@
+version: '3.8'
+
+services:
+  om1_telemetry:
+    image: public.ecr.aws/b8k9c8n5/openmind/om1_telemetry:latest
+    container_name: om1_telemetry
+    restart: unless-stopped
+    network_mode: host
+    env_file:
+      - /home/openmind/.ota/om1_telemetry_latest.env
+    environment:
+      - RECORDINGS_DIR=/app/recordings
+      - ROBOT_TYPE=${ROBOT_TYPE:-g1}
+    volumes:
+      - /home/openmind/om1/om1_telemetry/recordings:/app/recordings
+      # Lets the recorder tell a synchronized clock from a stale one. Without
+      # this it cannot, and a robot that boots offline names its session folder
+      # from a clock that may be days behind -- then keeps that name after NTP
+      # corrects the clock. See internal/clock.
+      - /run/systemd/timesync:/run/systemd/timesync:ro
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"

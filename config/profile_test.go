@@ -60,7 +60,7 @@ func TestLoad_robotTypeSelectsProfile(t *testing.T) {
 	}
 
 	t.Setenv("ROBOT_TYPE", "go2")
-	go2 := Load()
+	go2 := Load(testSessionDir)
 	require.Equal(t, RobotGo2, go2.RobotType)
 	require.True(t, go2.EnableLidar)
 	require.False(t, go2.EnablePointCloud)
@@ -68,7 +68,7 @@ func TestLoad_robotTypeSelectsProfile(t *testing.T) {
 	require.Equal(t, "go2", go2.Lowstate.RobotType)
 
 	t.Setenv("ROBOT_TYPE", "g1")
-	g1 := Load()
+	g1 := Load(testSessionDir)
 	require.Equal(t, RobotG1, g1.RobotType)
 	require.True(t, g1.EnableLidar)
 	require.True(t, g1.EnablePointCloud)
@@ -81,8 +81,24 @@ func TestLoad_envOverridesProfileEnableFlags(t *testing.T) {
 	t.Setenv("ENABLE_POINTCLOUD", "true")
 	t.Setenv("ENABLE_LIDAR", "false")
 
-	cfg := Load()
+	cfg := Load(testSessionDir)
 
 	require.True(t, cfg.EnablePointCloud, "ENABLE_POINTCLOUD env should override profile")
 	require.False(t, cfg.EnableLidar, "ENABLE_LIDAR env should override profile")
+}
+
+func TestResolveProfile_camerasArePerRobot(t *testing.T) {
+	t.Setenv("ROBOT_TYPE", "g1")
+	_, g1 := ResolveProfile()
+	require.Len(t, g1.Cameras, 3)
+	require.Equal(t, "front_camera_raw", g1.Cameras[0].Name)
+	require.Equal(t, "rear_camera_raw", g1.Cameras[1].Name)
+	require.Equal(t, "down_camera", g1.Cameras[2].Name)
+
+	t.Setenv("ROBOT_TYPE", "go2")
+	_, go2 := ResolveProfile()
+	require.Len(t, go2.Cameras, 3)
+	require.Equal(t, "top_camera", go2.Cameras[0].Name)
+
+	require.NotEqual(t, g1.Cameras, go2.Cameras)
 }

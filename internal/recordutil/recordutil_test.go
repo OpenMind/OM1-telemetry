@@ -148,12 +148,12 @@ func TestNewFrameCSVWriter_emptyPath(t *testing.T) {
 
 func TestExtractAndAppend_nilWriter_isNoOp(t *testing.T) {
 	var w *FrameCSVWriter
-	err := w.ExtractAndAppend("/some/file.mp4", "v:0", 0)
+	err := w.ExtractAndAppend("/some/file.mp4", "v:0", 0, 0)
 	require.NoError(t, err)
 }
 
 func TestExtractAndAppend_emptyPath_isNoOp(t *testing.T) {
 	w := NewFrameCSVWriter("")
-	err := w.ExtractAndAppend("/some/file.mp4", "v:0", 0)
+	err := w.ExtractAndAppend("/some/file.mp4", "v:0", 0, 0)
 	require.NoError(t, err)
 }

@@ -48,7 +48,7 @@ idl-gen: check-cyclonedds
 	@mkdir -p $(IDL_GEN_DIR)
 	@for f in $(IDL_DIR)/*.idl; do \
 		echo "idlc $$f"; \
-		idlc -l c -I $(IDL_DIR) -o $(IDL_GEN_DIR) "$$f" || exit 1; \
+		idlc -l c -x final -I $(IDL_DIR) -o $(IDL_GEN_DIR) "$$f" || exit 1; \
 	done
 
 build: idl-gen

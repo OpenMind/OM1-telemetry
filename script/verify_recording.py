@@ -18,10 +18,13 @@ import argparse
 import os
 import subprocess
 import sys
+import json
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
+
+import timebase
 
 G, R, Y, B, BOLD, END = (
     "\033[92m", "\033[91m", "\033[93m", "\033[94m", "\033[1m", "\033[0m"
@@ -36,15 +39,87 @@ STREAMS = [
     ("pointcloud", "pointcloud_timestamps.csv", 10,   "unix_ns"),
     ("depth",      "depth_timestamps.csv",      15,   "unix_ns"),
     ("odom",       "odom_timestamps.csv",       150,  "unix_ns"),   # Go2 publishes /odom at ~150 Hz
-    ("audio",      "audio_packets.csv",         100, "unix_ns"),  # Opus 10ms frames → 100 pkt/s
+    # 20 ms Opus frames -> 50 packets/s. Measured at exactly 50.0 Hz on the
+    # video-processor's /live stream; the previous 100 assumed 10 ms frames.
+    ("audio",      "audio_packets.csv",         50,  "unix_ns"),
+    # G1: the video-processor's two pre-CV streams.
+    ("front_cam_raw", "front_camera_raw_frames.csv", 30, "wallclock_unix_ns"),
+    ("rear_cam_raw",  "rear_camera_raw_frames.csv",  30, "wallclock_unix_ns"),
+    # Go2.
     ("top_cam",    "top_camera_frames.csv",     30,   "wallclock_unix_ns"),
     ("front_cam",  "front_camera_frames.csv",   30,   "wallclock_unix_ns"),
     ("down_cam",   "down_camera_frames.csv",    15,   "wallclock_unix_ns"),
     ("network",    "network_status.csv",        0.2,  "unix_ns"),
 ]
 
-# ── 1. Per-stream statistics ─────────────────────────────────────────
-def stream_stats(csv_path: Path, expected_hz: float, time_col: str):
+
+ROBOT_RATES = {
+    "g1": {
+        "lowstate": 1053,   # measured 1052.5-1052.9 Hz
+        "odom": 495,        # measured 493.0-497.6 Hz
+        "lidar": 10,
+        "pointcloud": 10,
+        "depth": 15,        # measured 14.9 Hz
+        "down_cam": 15,     # RealSense RGB via mediamtx, measured 15.0 Hz
+        "front_cam_raw": 30,
+        "rear_cam_raw": 30,
+    },
+    "go2": {
+        "lowstate": 500,
+        "odom": 150,
+        "lidar": 10,
+        "depth": 15,
+        "top_cam": 30,
+        "front_cam": 30,
+        "down_cam": 15,
+    },
+}
+
+# Which streams each robot records, so the table stops listing the other
+# robot's cameras as `--- (not recorded)`. Mirrors config/profile.go.
+ROBOT_STREAMS = {
+    "g1": {"lowstate", "lidar", "pointcloud", "depth", "odom", "audio",
+           "front_cam_raw", "rear_cam_raw", "down_cam", "network"},
+    "go2": {"lowstate", "lidar", "depth", "odom", "audio",
+            "top_cam", "front_cam", "down_cam", "network"},
+}
+
+
+def session_robot(session: Path) -> str | None:
+    """Which robot this session was recorded on, per meta.json."""
+    try:
+        return json.loads((session / "meta.json").read_text()).get("robot_type")
+    except Exception:
+        return None
+
+
+def apply_profile(session: Path):
+    """Narrow STREAMS to this robot and use its measured rates.
+
+    Returns (rates, dropped); dropped names the streams belonging to other
+    robot types. A `---` row then means what it should: this robot records
+    this, and it is missing.
+    """
+    global STREAMS
+    robot = session_robot(session)
+    if robot is None or robot not in ROBOT_RATES:
+        return None, []
+
+    rates = ROBOT_RATES[robot]
+    STREAMS = [
+        (name, csv, rates.get(name, hz), col)
+        for name, csv, hz, col in STREAMS
+    ]
+    wanted = ROBOT_STREAMS.get(robot)
+    if wanted is None:
+        return rates, []
+    keep = [e for e in STREAMS if e[0] in wanted]
+    dropped = [e[0] for e in STREAMS if e[0] not in wanted]
+    STREAMS = keep
+    return rates, dropped
+
+
+def stream_stats(csv_path: Path, expected_hz: float, time_col: str, tb=None):
     """Return dict of stats, or None if file missing/unparseable."""
     if not csv_path.exists():
         return None
@@ -63,17 +138,29 @@ def stream_stats(csv_path: Path, expected_hz: float, time_col: str):
         else:
             return {"error": f"no time column in {df.columns.tolist()}"}
 
-    ts = df[time_col].astype(np.int64).values
+    if tb is not None and tb.needs_correction:
+        df, _ = timebase.correct_dataframe(df, tb, time_col)
+
+    ts_series = pd.to_numeric(df[time_col], errors="coerce")
+    n_bad = int(ts_series.isna().sum())
+    if n_bad > 0:
+        # Drop rows with missing/non-numeric timestamps (e.g., last row
+        # written when ffmpeg/recorder was killed mid-line).
+        df = df.loc[ts_series.notna()].reset_index(drop=True)
+        ts_series = ts_series.dropna().reset_index(drop=True)
+    if len(ts_series) == 0:
+        return {"error": f"all {n_bad} rows had invalid timestamps"}
+    ts = ts_series.astype(np.int64).values
     if len(ts) < 2:
-        return {"error": "< 2 samples"}
+        return {"error": "< 2 valid samples"}
 
     duration = (ts[-1] - ts[0]) / 1e9
     rate = (len(ts) - 1) / duration if duration > 0 else 0
     intervals = np.diff(ts) / 1e6  # ms
     monotonic = bool((intervals > 0).all())
 
-    # Gap threshold: 3x expected interval, or 1s if no expected rate
-    gap_threshold = 3 * (1000.0 / expected_hz) if expected_hz > 0 else 1000.0
+    MIN_GAP_MS = 20.0
+    gap_threshold = max(3 * (1000.0 / expected_hz), MIN_GAP_MS) if expected_hz > 0 else 1000.0
     gaps = int((intervals > gap_threshold).sum())
 
     # Sequence gaps
@@ -84,6 +171,7 @@ def stream_stats(csv_path: Path, expected_hz: float, time_col: str):
 
     return {
         "n": len(ts),
+        "n_bad": n_bad,
         "duration_s": duration,
         "rate_hz": rate,
         "expected_hz": expected_hz,
@@ -118,6 +206,8 @@ def print_stream_table(stats: dict):
         # Status: ok unless something wrong
         status = OK_
         notes = []
+        if s.get("n_bad", 0) > 0:
+            status = WARN; notes.append(f"{s['n_bad']} bad ts rows dropped")
         if not s["monotonic"]:
             status = BAD; notes.append("non-monotonic")
         elif s["gaps"] > 5:
@@ -125,10 +215,9 @@ def print_stream_table(stats: dict):
         if s["seq_gaps"] and s["seq_gaps"] > 5:
             status = WARN; notes.append(f"{s['seq_gaps']} seq gaps")
 
-        # Rate sanity: within 50% of expected
         if s["expected_hz"] > 0:
             ratio = s["rate_hz"] / s["expected_hz"]
-            if ratio < 0.5 or ratio > 2.0:
+            if ratio < 0.5 or ratio > 1.5:
                 status = WARN
                 notes.append(f"rate {ratio*100:.0f}% of expected")
 
@@ -237,7 +326,8 @@ def validate_formats(session: Path):
                   f"actual {info['actual_size']:,} B (off by {abs(info['expected_size']-info['actual_size'])} B)")
 
     # Video files
-    for prefix in ["top_camera", "front_camera", "down_camera"]:
+    for prefix in ["front_camera_raw", "rear_camera_raw",
+                   "top_camera", "front_camera", "down_camera"]:
         mp4 = session / f"{prefix}.mp4"
         if not mp4.exists():
             continue
@@ -514,8 +604,24 @@ def main():
 
     # Collect per-stream stats
     stats = {}
+    rates, dropped = apply_profile(session)
+    if rates:
+        robot = session_robot(session)
+        print(f"\n{BOLD}Profile{END}: {robot} measured rates "
+              f"({', '.join(f'{k}={v:g}Hz' for k, v in sorted(rates.items()))})")
+    if dropped:
+        print(f"  not on this robot, skipped: {', '.join(dropped)}")
+
+    tb = timebase.load(session)
+    print(f"\n{BOLD}Clock{END}: {timebase.describe(tb)}")
+    if tb.needs_correction:
+        print(f"  {WARN} recorded across an NTP correction; "
+              f"timestamps below are corrected on read (files unchanged)")
+    elif tb.records and not tb.saw_sync:
+        print(f"  {WARN} this session's timestamps cannot be trusted or corrected")
+
     for name, csv_name, expected_hz, time_col in STREAMS:
-        stats[name] = stream_stats(session / csv_name, expected_hz, time_col)
+        stats[name] = stream_stats(session / csv_name, expected_hz, time_col, tb)
 
     print_stream_table(stats)
     validate_formats(session)
