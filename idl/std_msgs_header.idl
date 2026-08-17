@@ -1,0 +1,12 @@
+#include "builtin_interfaces_time.idl"
+
+module std_msgs {
+  module msg {
+    module dds_ {
+      struct Header_ {
+        builtin_interfaces::msg::dds_::Time_ stamp;
+        string frame_id;
+      };
+    };
+  };
+};

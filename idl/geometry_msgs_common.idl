@@ -1,0 +1,47 @@
+// geometry_msgs types needed by nav_msgs/Odometry (Pose/Twist with
+// covariance). See builtin_interfaces_time.idl for the naming-convention
+// note.
+module geometry_msgs {
+  module msg {
+    module dds_ {
+      struct Vector3_ {
+        double x;
+        double y;
+        double z;
+      };
+
+      struct Point_ {
+        double x;
+        double y;
+        double z;
+      };
+
+      struct Quaternion_ {
+        double x;
+        double y;
+        double z;
+        double w;
+      };
+
+      struct Pose_ {
+        geometry_msgs::msg::dds_::Point_ position;
+        geometry_msgs::msg::dds_::Quaternion_ orientation;
+      };
+
+      struct Twist_ {
+        geometry_msgs::msg::dds_::Vector3_ linear;
+        geometry_msgs::msg::dds_::Vector3_ angular;
+      };
+
+      struct PoseWithCovariance_ {
+        geometry_msgs::msg::dds_::Pose_ pose;
+        double covariance[36];
+      };
+
+      struct TwistWithCovariance_ {
+        geometry_msgs::msg::dds_::Twist_ twist;
+        double covariance[36];
+      };
+    };
+  };
+};

@@ -31,20 +31,20 @@ var profiles = map[RobotType]Profile{
 	RobotGo2: {
 		EnableLidar:      true,
 		EnablePointCloud: false,
-		LidarTopic:       "scan",
+		LidarTopic:       "rt/scan",
 		PointCloudTopic:  "rt/utlidar/cloud_deskewed",
-		OdomTopic:        "odom",
+		OdomTopic:        "rt/odom",
 		LowstateTopic:    "rt/lowstate",
-		DepthTopic:       "camera/realsense2_camera_node/depth/image_rect_raw",
+		DepthTopic:       "rt/camera/realsense2_camera_node/depth/image_rect_raw",
 	},
 	RobotG1: {
 		EnableLidar:      true,
 		EnablePointCloud: true,
-		LidarTopic:       "scan",
+		LidarTopic:       "rt/scan",
 		PointCloudTopic:  "rt/utlidar/cloud_livox_mid360",
-		OdomTopic:        "odom",
+		OdomTopic:        "rt/odom",
 		LowstateTopic:    "rt/lowstate",
-		DepthTopic:       "camera/realsense2_camera_node/depth/image_rect_raw",
+		DepthTopic:       "rt/camera/realsense2_camera_node/depth/image_rect_raw",
 	},
 }
 

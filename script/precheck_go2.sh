@@ -168,18 +168,18 @@ else
     fail "ENABLE_POINTCLOUD=${ENABLE_POINTCLOUD} but Go2 should disable it"
 fi
 
-# LIDAR_ZENOH_TOPIC should be "scan" on Go2
-if [ "${LIDAR_ZENOH_TOPIC:-scan}" = "scan" ]; then
-    ok "LIDAR_ZENOH_TOPIC=scan"
+# LIDAR_DDS_TOPIC should be "rt/scan" on Go2
+if [ "${LIDAR_DDS_TOPIC:-rt/scan}" = "rt/scan" ]; then
+    ok "LIDAR_DDS_TOPIC=rt/scan"
 else
-    warn "LIDAR_ZENOH_TOPIC=${LIDAR_ZENOH_TOPIC} (expected 'scan' for Go2; non-default is OK if intentional)"
+    warn "LIDAR_DDS_TOPIC=${LIDAR_DDS_TOPIC} (expected 'rt/scan' for Go2; non-default is OK if intentional)"
 fi
 
-# LOWSTATE_ZENOH_TOPIC should be rt/lowstate
-if [ "${LOWSTATE_ZENOH_TOPIC:-rt/lowstate}" = "rt/lowstate" ]; then
-    ok "LOWSTATE_ZENOH_TOPIC=rt/lowstate"
+# LOWSTATE_DDS_TOPIC should be rt/lowstate
+if [ "${LOWSTATE_DDS_TOPIC:-rt/lowstate}" = "rt/lowstate" ]; then
+    ok "LOWSTATE_DDS_TOPIC=rt/lowstate"
 else
-    warn "LOWSTATE_ZENOH_TOPIC=${LOWSTATE_ZENOH_TOPIC} (expected 'rt/lowstate')"
+    warn "LOWSTATE_DDS_TOPIC=${LOWSTATE_DDS_TOPIC} (expected 'rt/lowstate')"
 fi
 
 # RECORDINGS_DIR

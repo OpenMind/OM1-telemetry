@@ -10,8 +10,9 @@ import (
 
 func TestNew_returnsNonNilStream(t *testing.T) {
 	stream := New(Config{
-		ZenohEndpoint:  "tcp/192.0.2.1:7447",
-		ZenohTopic:     "rt/lowstate",
+		RobotType:      "go2",
+		DDSDomainID:    0,
+		DDSTopic:       "rt/lowstate",
 		TimestampsFile: filepath.Join(t.TempDir(), "timestamps.csv"),
 		DataFile:       filepath.Join(t.TempDir(), "data.bin"),
 	})
@@ -20,8 +21,9 @@ func TestNew_returnsNonNilStream(t *testing.T) {
 
 func TestStartStop_cleanLifecycle(t *testing.T) {
 	stream := New(Config{
-		ZenohEndpoint:  "tcp/192.0.2.1:7447",
-		ZenohTopic:     "rt/lowstate/unreachable",
+		RobotType:      "go2",
+		DDSDomainID:    0,
+		DDSTopic:       "rt/lowstate/unreachable",
 		TimestampsFile: filepath.Join(t.TempDir(), "timestamps.csv"),
 		DataFile:       filepath.Join(t.TempDir(), "data.bin"),
 	})
@@ -45,8 +47,9 @@ func TestStartStop_cleanLifecycle(t *testing.T) {
 
 func TestStart_idempotent(t *testing.T) {
 	stream := New(Config{
-		ZenohEndpoint:  "tcp/192.0.2.1:7447",
-		ZenohTopic:     "rt/lowstate/unreachable",
+		RobotType:      "go2",
+		DDSDomainID:    0,
+		DDSTopic:       "rt/lowstate/unreachable",
 		TimestampsFile: filepath.Join(t.TempDir(), "timestamps.csv"),
 		DataFile:       filepath.Join(t.TempDir(), "data.bin"),
 	})
@@ -59,8 +62,9 @@ func TestStart_idempotent(t *testing.T) {
 
 func TestStop_beforeStart_isNoOp(t *testing.T) {
 	stream := New(Config{
-		ZenohEndpoint:  "tcp/192.0.2.1:7447",
-		ZenohTopic:     "rt/lowstate/unreachable",
+		RobotType:      "go2",
+		DDSDomainID:    0,
+		DDSTopic:       "rt/lowstate/unreachable",
 		TimestampsFile: filepath.Join(t.TempDir(), "timestamps.csv"),
 		DataFile:       filepath.Join(t.TempDir(), "data.bin"),
 	})
@@ -69,8 +73,9 @@ func TestStop_beforeStart_isNoOp(t *testing.T) {
 
 func TestStop_idempotent(t *testing.T) {
 	stream := New(Config{
-		ZenohEndpoint:  "tcp/192.0.2.1:7447",
-		ZenohTopic:     "rt/lowstate/unreachable",
+		RobotType:      "go2",
+		DDSDomainID:    0,
+		DDSTopic:       "rt/lowstate/unreachable",
 		TimestampsFile: filepath.Join(t.TempDir(), "timestamps.csv"),
 		DataFile:       filepath.Join(t.TempDir(), "data.bin"),
 	})

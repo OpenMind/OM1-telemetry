@@ -90,8 +90,8 @@ func (r *cdrReader) bytes(n int) ([]byte, error) {
 	return b, nil
 }
 
-// ParseImage decodes a CDR-serialized sensor_msgs/Image payload (as delivered
-// over the zenoh-ros bridge).
+// ParseImage decodes a CDR-serialized sensor_msgs/Image payload (as
+// re-encoded by dds_reader.go from the decoded DDS sample).
 func ParseImage(payload []byte) (*Image, error) {
 	r, err := newCDRReader(payload)
 	if err != nil {
