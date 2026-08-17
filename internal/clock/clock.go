@@ -15,13 +15,13 @@ import (
 )
 
 const (
-	pollInterval = time.Second
-	stepThreshold = time.Second
-	sampleInterval = 60 * time.Second
+	pollInterval          = time.Second
+	stepThreshold         = time.Second
+	sampleInterval        = 60 * time.Second
 	defaultSyncMarkerPath = "/run/systemd/timesync/synchronized"
-	SyncMarkerEnv = "CLOCK_SYNC_MARKER"
-	bootIDPath = "/proc/sys/kernel/random/boot_id"
-	TimebaseName = "clock_timebase.jsonl"
+	SyncMarkerEnv         = "CLOCK_SYNC_MARKER"
+	bootIDPath            = "/proc/sys/kernel/random/boot_id"
+	TimebaseName          = "clock_timebase.jsonl"
 )
 
 type SyncState int
@@ -47,13 +47,13 @@ func (s SyncState) String() string {
 func (s SyncState) Trusted() bool { return s != SyncNo }
 
 type Record struct {
-	Kind string `json:"kind"`
-	MonoNs int64 `json:"mono_ns"`
-	UTCNs int64 `json:"utc_ns"`
-	Synced bool `json:"synced"`
-	UTCBeforeNs int64 `json:"utc_before_ns,omitempty"`
-	StepNs      int64 `json:"step_ns,omitempty"`
-	BootID string `json:"boot_id,omitempty"`
+	Kind        string `json:"kind"`
+	MonoNs      int64  `json:"mono_ns"`
+	UTCNs       int64  `json:"utc_ns"`
+	Synced      bool   `json:"synced"`
+	UTCBeforeNs int64  `json:"utc_before_ns,omitempty"`
+	StepNs      int64  `json:"step_ns,omitempty"`
+	BootID      string `json:"boot_id,omitempty"`
 }
 
 // Clock reads the two timelines.
@@ -154,8 +154,8 @@ func (c *Clock) ShortBootID() string {
 }
 
 type Watcher struct {
-	clk  *Clock
-	path string
+	clk    *Clock
+	path   string
 	syncFn func() SyncState
 
 	mu       sync.Mutex
