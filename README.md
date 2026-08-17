@@ -86,13 +86,13 @@ Any of the following override the selected profile / defaults:
 - `AUDIO_RTSP_URL` - Audio stream URL (default: `rtsp://localhost:8555/live` — audio track of the video-processor's muxed session stream, gst-direct)
 - `VIDEO_FEATURES_LOG` - Path to the video-processor's feature-log JSONL on a shared volume (default: empty — ingestion disabled)
 - `LIDAR_DDS_DOMAIN` - CycloneDDS domain ID for lidar (default: `0`)
-- `LIDAR_DDS_TOPIC` - DDS topic for lidar data (default: `scan`)
+- `LIDAR_DDS_TOPIC` - DDS topic for lidar data (default: `rt/scan`)
 - `POINTCLOUD_DDS_DOMAIN` - CycloneDDS domain ID for point cloud (default: `0`)
 - `POINTCLOUD_DDS_TOPIC` - DDS topic for point cloud data (default: `rt/utlidar/cloud_livox_mid360`)
 - `DEPTH_DDS_DOMAIN` - CycloneDDS domain ID for depth (default: `0`)
-- `DEPTH_DDS_TOPIC` - DDS topic for depth frames (default: `camera/realsense2_camera_node/depth/image_rect_raw`)
+- `DEPTH_DDS_TOPIC` - DDS topic for depth frames (default: `rt/camera/realsense2_camera_node/depth/image_rect_raw`)
 - `ODOM_DDS_DOMAIN` - CycloneDDS domain ID for odometry (default: `0`)
-- `ODOM_DDS_TOPIC` - DDS topic for odometry data (default: `odom`)
+- `ODOM_DDS_TOPIC` - DDS topic for odometry data (default: `rt/odom`)
 - `LOWSTATE_DDS_DOMAIN` - CycloneDDS domain ID for lowstate (default: `0`)
 - `LOWSTATE_DDS_TOPIC` - DDS topic for lowstate data (default: `rt/lowstate`)
 - `RECORDINGS_DIR` - Base directory for recordings (default: `recordings`)
@@ -132,10 +132,10 @@ FRONT_CAMERA_RTSP_URL="rtsp://camera.local/front_camera" \
 DOWN_CAMERA_RTSP_URL="rtsp://camera.local/down_camera" \
 AUDIO_RTSP_URL="rtsp://localhost:8555/live" \
 VIDEO_FEATURES_LOG="/shared/video-processor/features.jsonl" \
-LIDAR_DDS_TOPIC="scan" \
+LIDAR_DDS_TOPIC="rt/scan" \
 POINTCLOUD_DDS_TOPIC="rt/utlidar/cloud_livox_mid360" \
-DEPTH_DDS_TOPIC="camera/realsense2_camera_node/depth/image_rect_raw" \
-ODOM_DDS_TOPIC="odom" \
+DEPTH_DDS_TOPIC="rt/camera/realsense2_camera_node/depth/image_rect_raw" \
+ODOM_DDS_TOPIC="rt/odom" \
 LOWSTATE_DDS_TOPIC="rt/lowstate" \
 RECORDINGS_DIR="/path/to/recordings" \
 ./bin/om1-telemetry

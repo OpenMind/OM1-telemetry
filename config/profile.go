@@ -28,23 +28,31 @@ type Profile struct {
 }
 
 var profiles = map[RobotType]Profile{
+	// LidarTopic/OdomTopic/DepthTopic are published by real rclcpp nodes
+	// (rmw_cyclonedds), which always prefixes the wire-level DDS topic name
+	// with "rt/" — invisible via `ros2 topic` (which shows the ROS-level
+	// name) and previously hidden by zenoh-bridge-ros2dds's own ROS<->DDS
+	// name mapping, but required now that we subscribe to CycloneDDS
+	// directly. PointCloudTopic/LowstateTopic are published straight to DDS
+	// by Unitree's own motion-control/lidar stack (no rclcpp involved), so
+	// their "rt/" is already the literal topic name, not a ROS convention.
 	RobotGo2: {
 		EnableLidar:      true,
 		EnablePointCloud: false,
-		LidarTopic:       "scan",
+		LidarTopic:       "rt/scan",
 		PointCloudTopic:  "rt/utlidar/cloud_deskewed",
-		OdomTopic:        "odom",
+		OdomTopic:        "rt/odom",
 		LowstateTopic:    "rt/lowstate",
-		DepthTopic:       "camera/realsense2_camera_node/depth/image_rect_raw",
+		DepthTopic:       "rt/camera/realsense2_camera_node/depth/image_rect_raw",
 	},
 	RobotG1: {
 		EnableLidar:      true,
 		EnablePointCloud: true,
-		LidarTopic:       "scan",
+		LidarTopic:       "rt/scan",
 		PointCloudTopic:  "rt/utlidar/cloud_livox_mid360",
-		OdomTopic:        "odom",
+		OdomTopic:        "rt/odom",
 		LowstateTopic:    "rt/lowstate",
-		DepthTopic:       "camera/realsense2_camera_node/depth/image_rect_raw",
+		DepthTopic:       "rt/camera/realsense2_camera_node/depth/image_rect_raw",
 	},
 }
 

@@ -24,7 +24,7 @@ func TestLoad_defaults(t *testing.T) {
 	require.Equal(t, "rtsp://localhost:8554/down_camera", cfg.Video[2].RTSPURL, "unexpected down camera RTSP URL")
 	require.Equal(t, "rtsp://localhost:8555/live", cfg.Audio.RTSPURL, "unexpected audio RTSP URL")
 	require.Equal(t, uint32(0), cfg.Lidar.DDSDomainID, "unexpected lidar dds domain")
-	require.Equal(t, "scan", cfg.Lidar.DDSTopic, "unexpected lidar dds topic")
+	require.Equal(t, "rt/scan", cfg.Lidar.DDSTopic, "unexpected lidar dds topic")
 	require.Equal(t, uint32(0), cfg.PointCloud.DDSDomainID, "unexpected point cloud dds domain")
 	require.Equal(t, "rt/utlidar/cloud_livox_mid360", cfg.PointCloud.DDSTopic, "unexpected point cloud dds topic")
 	require.True(t, strings.HasPrefix(cfg.SessionDir, "recordings"), "session dir should be under recordings/, got: %s", cfg.SessionDir)

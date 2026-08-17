@@ -14,7 +14,7 @@ func TestResolveProfile_go2(t *testing.T) {
 	require.Equal(t, RobotGo2, rt)
 	require.True(t, p.EnableLidar, "Go2 records 2D lidar")
 	require.False(t, p.EnablePointCloud, "Go2 has no 3D point cloud")
-	require.Equal(t, "scan", p.LidarTopic)
+	require.Equal(t, "rt/scan", p.LidarTopic)
 }
 
 func TestResolveProfile_g1(t *testing.T) {

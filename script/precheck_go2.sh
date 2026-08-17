@@ -168,11 +168,11 @@ else
     fail "ENABLE_POINTCLOUD=${ENABLE_POINTCLOUD} but Go2 should disable it"
 fi
 
-# LIDAR_DDS_TOPIC should be "scan" on Go2
-if [ "${LIDAR_DDS_TOPIC:-scan}" = "scan" ]; then
-    ok "LIDAR_DDS_TOPIC=scan"
+# LIDAR_DDS_TOPIC should be "rt/scan" on Go2
+if [ "${LIDAR_DDS_TOPIC:-rt/scan}" = "rt/scan" ]; then
+    ok "LIDAR_DDS_TOPIC=rt/scan"
 else
-    warn "LIDAR_DDS_TOPIC=${LIDAR_DDS_TOPIC} (expected 'scan' for Go2; non-default is OK if intentional)"
+    warn "LIDAR_DDS_TOPIC=${LIDAR_DDS_TOPIC} (expected 'rt/scan' for Go2; non-default is OK if intentional)"
 fi
 
 # LOWSTATE_DDS_TOPIC should be rt/lowstate
