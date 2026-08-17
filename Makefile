@@ -37,7 +37,7 @@ install-cyclonedds:
 			https://github.com/eclipse-cyclonedds/cyclonedds.git $(CYCLONEDDS_SRC); \
 		mkdir -p $(CYCLONEDDS_SRC)/build; \
 		cd $(CYCLONEDDS_SRC)/build && \
-			cmake -DBUILD_EXAMPLES=OFF -DBUILD_TESTING=OFF \
+			cmake -DBUILD_EXAMPLES=OFF -DBUILD_TESTING=OFF -DENABLE_ICEORYX=NO \
 			      -DCMAKE_INSTALL_PREFIX=$(CYCLONEDDS_INSTALL) .. && \
 			cmake --build . --target install; \
 		echo "CycloneDDS installed to $(CYCLONEDDS_INSTALL)"; \
