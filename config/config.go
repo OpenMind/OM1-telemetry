@@ -23,6 +23,9 @@ type Config struct {
 	RobotType        RobotType
 	EnableLidar      bool
 	EnablePointCloud bool
+	EnableDepth      bool
+	EnableOdom       bool
+	EnableLowstate   bool
 	SessionDir       string
 	Video            []VideoConfig
 	Audio            AudioConfig
@@ -125,6 +128,9 @@ func Load(sessionDir string) Config {
 		RobotType:        robotType,
 		EnableLidar:      envBool("ENABLE_LIDAR", profile.EnableLidar),
 		EnablePointCloud: envBool("ENABLE_POINTCLOUD", profile.EnablePointCloud),
+		EnableDepth:      envBool("ENABLE_DEPTH", profile.EnableDepth),
+		EnableOdom:       envBool("ENABLE_ODOM", profile.EnableOdom),
+		EnableLowstate:   envBool("ENABLE_LOWSTATE", profile.EnableLowstate),
 		SessionDir:       sessionDir,
 		Video:            videoConfigs(profile, sessionDir),
 		Audio: AudioConfig{

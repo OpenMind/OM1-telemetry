@@ -54,74 +54,80 @@ STREAMS = [
 ]
 
 
-# ── Expected rates: from the robot's own profile, not a hardcoded guess ──
-# The table above is the Go2's. A G1 publishes lowstate at ~1053 Hz and odom at
-# ~500 Hz, so checking it against Go2 numbers reported a perfectly good
-# recording as "rate 263% of expected". meta.json records which profile was
-# used; config/robots.yaml holds that profile's nominal rates.
-def robot_profile(session: Path) -> dict | None:
-    """This session's entry from config/robots.yaml, via meta.json's robot_type."""
+# ── Expected rates, measured per robot ──────────────────────────────
+# Rates differ enough between robots that one table misreports the other: a G1
+# publishes lowstate at ~1053 Hz and odom at ~495 Hz, so checking it against
+# Go2 numbers reported a perfectly healthy recording as "rate 263% of expected".
+#
+# G1 figures below are measured on a live G1 (2026-08); Go2 figures are the ones
+# this repo has always carried. meta.json records which robot a session came
+# from, so the right column is picked automatically; sessions predating that
+# field fall back to the values in STREAMS.
+ROBOT_RATES = {
+    "g1": {
+        "lowstate": 1053,   # measured 1052.5-1052.9 Hz
+        "odom": 495,        # measured 493.0-497.6 Hz
+        "lidar": 10,
+        "pointcloud": 10,
+        "depth": 15,        # measured 14.9 Hz
+        "down_cam": 15,     # RealSense RGB via mediamtx, measured 15.0 Hz
+        "front_cam_raw": 30,
+        "rear_cam_raw": 30,
+    },
+    "go2": {
+        "lowstate": 500,
+        "odom": 150,
+        "lidar": 10,
+        "depth": 15,
+        "top_cam": 30,
+        "front_cam": 30,
+        "down_cam": 15,
+    },
+}
+
+# Which streams each robot records, so the table stops listing the other
+# robot's cameras as `--- (not recorded)`. Mirrors config/profile.go.
+ROBOT_STREAMS = {
+    "g1": {"lowstate", "lidar", "pointcloud", "depth", "odom", "audio",
+           "front_cam_raw", "rear_cam_raw", "down_cam", "network"},
+    "go2": {"lowstate", "lidar", "depth", "odom", "audio",
+            "top_cam", "front_cam", "down_cam", "network"},
+}
+
+
+def session_robot(session: Path) -> str | None:
+    """Which robot this session was recorded on, per meta.json."""
     try:
-        robot = json.loads((session / "meta.json").read_text()).get("robot_type")
+        return json.loads((session / "meta.json").read_text()).get("robot_type")
     except Exception:
         return None
-    if not robot:
-        return None
-
-    yaml_path = Path(__file__).resolve().parent.parent / "config" / "robots.yaml"
-    try:
-        import yaml
-        return yaml.safe_load(yaml_path.read_text())["robots"].get(robot)
-    except Exception:
-        return None
-
-
-def profile_rates(session: Path) -> dict:
-    """Map stream name -> nominal Hz for the robot this session was recorded on."""
-    profile = robot_profile(session)
-    if not profile:
-        return {}
-    topics = profile.get("topics") or {}
-    return {name: t["rate_hz"] for name, t in topics.items() if t.get("rate_hz")}
-
-
-def profile_streams(session: Path) -> set | None:
-    """The CSV files this robot's profile says should exist, or None if unknown.
-
-    Without this the table lists every stream of every robot, so a G1 report
-    carries three `--- (not recorded)` rows for Go2 cameras it does not have --
-    which reads as missing data rather than as hardware that was never there.
-    """
-    profile = robot_profile(session)
-    if not profile:
-        return None
-    csvs = {f"{c['name']}_frames.csv" for c in (profile.get("cameras") or [])}
-    csvs |= {f"{t}_timestamps.csv" for t in (profile.get("topics") or {})}
-    # Recorded for every robot, so not listed in a profile.
-    csvs |= {"audio_packets.csv", "network_status.csv"}
-    return csvs
 
 
 def apply_profile(session: Path):
-    """Narrow STREAMS to this robot, and take its expected rates from the profile.
+    """Narrow STREAMS to this robot and use its measured rates.
 
-    Returns (rates, dropped) where dropped is the streams belonging to other
-    robot types.
+    Returns (rates, dropped); dropped names the streams belonging to other
+    robot types. A `---` row then means what it should: this robot records
+    this, and it is missing.
     """
     global STREAMS
-    rates = profile_rates(session)
-    if rates:
-        for i, (name, csv_name, expected_hz, time_col) in enumerate(STREAMS):
-            if name in rates:
-                STREAMS[i] = (name, csv_name, rates[name], time_col)
+    robot = session_robot(session)
+    if robot is None or robot not in ROBOT_RATES:
+        return None, []
 
-    wanted = profile_streams(session)
+    rates = ROBOT_RATES[robot]
+    STREAMS = [
+        (name, csv, rates.get(name, hz), col)
+        for name, csv, hz, col in STREAMS
+    ]
+    wanted = ROBOT_STREAMS.get(robot)
     if wanted is None:
         return rates, []
-    keep = [e for e in STREAMS if e[1] in wanted]
-    dropped = [e[0] for e in STREAMS if e[1] not in wanted]
+    keep = [e for e in STREAMS if e[0] in wanted]
+    dropped = [e[0] for e in STREAMS if e[0] not in wanted]
     STREAMS = keep
     return rates, dropped
+
 
 # ── 1. Per-stream statistics ─────────────────────────────────────────
 def stream_stats(csv_path: Path, expected_hz: float, time_col: str, tb=None):
@@ -632,7 +638,8 @@ def main():
     stats = {}
     rates, dropped = apply_profile(session)
     if rates:
-        print(f"\n{BOLD}Profile{END}: expected rates from config/robots.yaml "
+        robot = session_robot(session)
+        print(f"\n{BOLD}Profile{END}: {robot} measured rates "
               f"({', '.join(f'{k}={v:g}Hz' for k, v in sorted(rates.items()))})")
     if dropped:
         print(f"  not on this robot, skipped: {', '.join(dropped)}")

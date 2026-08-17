@@ -60,11 +60,17 @@ func main() {
 	if enablePointcloud {
 		mon.Register(pointcloud.HeartbeatName, 10) // ~10 Hz nominal
 	}
-	mon.Register(depth.HeartbeatName, 10)     // measured 15 Hz; floor at 10
-	mon.Register(odom.HeartbeatName, 30)      // 30-50 Hz typical
-	mon.Register(lowstate.HeartbeatName, 400) // Go2 ~500 / G1 ~1053; 400 = safe floor
-	mon.Register(network.HeartbeatName, 0)    // 0 = liveness check only
-	mon.Register(audio.HeartbeatName, 0)      // 0 = liveness check only
+	if cfg.EnableDepth {
+		mon.Register(depth.HeartbeatName, 10) // measured 14.9 Hz on a G1; floor at 10
+	}
+	if cfg.EnableOdom {
+		mon.Register(odom.HeartbeatName, 30) // Go2 ~150, G1 ~495; 30 = safe floor
+	}
+	if cfg.EnableLowstate {
+		mon.Register(lowstate.HeartbeatName, 400) // Go2 ~500, G1 ~1053; 400 = safe floor
+	}
+	mon.Register(network.HeartbeatName, 0) // 0 = liveness check only
+	mon.Register(audio.HeartbeatName, 0)   // 0 = liveness check only
 	if cfg.Features.Enabled() {
 		mon.Register(features.HeartbeatName, 0) // 0 = liveness check only
 	}
@@ -132,17 +138,26 @@ func main() {
 		pointCloudStream = pointcloud.New(pointCloudCfg)
 	}
 
-	depthCfg := cfg.Depth.DepthStreamConfig()
-	depthCfg.Monitor = mon
-	depthStream := depth.New(depthCfg)
+	var depthStream *depth.DepthStream
+	if cfg.EnableDepth {
+		depthCfg := cfg.Depth.DepthStreamConfig()
+		depthCfg.Monitor = mon
+		depthStream = depth.New(depthCfg)
+	}
 
-	odomCfg := cfg.Odom.OdomStreamConfig()
-	odomCfg.Monitor = mon
-	odomStream := odom.New(odomCfg)
+	var odomStream *odom.OdomStream
+	if cfg.EnableOdom {
+		odomCfg := cfg.Odom.OdomStreamConfig()
+		odomCfg.Monitor = mon
+		odomStream = odom.New(odomCfg)
+	}
 
-	lowstateCfg := cfg.Lowstate.LowstateStreamConfig()
-	lowstateCfg.Monitor = mon
-	lowstateStream := lowstate.New(lowstateCfg)
+	var lowstateStream *lowstate.LowstateStream
+	if cfg.EnableLowstate {
+		lowstateCfg := cfg.Lowstate.LowstateStreamConfig()
+		lowstateCfg.Monitor = mon
+		lowstateStream = lowstate.New(lowstateCfg)
+	}
 
 	networkCfg := cfg.Network.NetworkStreamConfig()
 	networkCfg.Monitor = mon
@@ -161,9 +176,15 @@ func main() {
 	if pointCloudStream != nil {
 		pointCloudStream.Start()
 	}
-	depthStream.Start()
-	odomStream.Start()
-	lowstateStream.Start()
+	if depthStream != nil {
+		depthStream.Start()
+	}
+	if odomStream != nil {
+		odomStream.Start()
+	}
+	if lowstateStream != nil {
+		lowstateStream.Start()
+	}
 	networkStream.Start()
 
 	videoURLs := make([]string, 0, len(cfg.Video))
@@ -181,6 +202,9 @@ func main() {
 		"features-enabled", cfg.Features.Enabled(),
 		"features-source", cfg.Features.SourcePath,
 		"lidar-enabled", enableLidar,
+		"depth-enabled", cfg.EnableDepth,
+		"odom-enabled", cfg.EnableOdom,
+		"lowstate-enabled", cfg.EnableLowstate,
 		"lidar-topic", cfg.Lidar.DDSTopic,
 		"pointcloud-enabled", enablePointcloud,
 		"pointcloud-topic", cfg.PointCloud.DDSTopic,
@@ -213,9 +237,15 @@ func main() {
 	if pointCloudStream != nil {
 		pointCloudStream.Stop()
 	}
-	depthStream.Stop()
-	odomStream.Stop()
-	lowstateStream.Stop()
+	if depthStream != nil {
+		depthStream.Stop()
+	}
+	if odomStream != nil {
+		odomStream.Stop()
+	}
+	if lowstateStream != nil {
+		lowstateStream.Stop()
+	}
 	networkStream.Stop()
 
 	clkCancel()

@@ -17,8 +17,15 @@ const (
 const DefaultRobotType = RobotGo2
 
 type Profile struct {
+	// What this class of robot records by default. An individual unit that
+	// deviates -- a G1 shipped without a RealSense, say -- overrides the one
+	// switch it needs with ENABLE_<TOPIC>, so ROBOT_TYPE stays the only
+	// variable a normal deployment sets.
 	EnableLidar      bool
 	EnablePointCloud bool
+	EnableDepth      bool
+	EnableOdom       bool
+	EnableLowstate   bool
 
 	LidarTopic      string
 	PointCloudTopic string
@@ -47,6 +54,9 @@ var profiles = map[RobotType]Profile{
 	RobotGo2: {
 		EnableLidar:      true,
 		EnablePointCloud: false,
+		EnableDepth:      true,
+		EnableOdom:       true,
+		EnableLowstate:   true,
 		LidarTopic:       "rt/scan",
 		PointCloudTopic:  "rt/utlidar/cloud_deskewed",
 		OdomTopic:        "rt/odom",
@@ -64,11 +74,20 @@ var profiles = map[RobotType]Profile{
 	RobotG1: {
 		EnableLidar:      true,
 		EnablePointCloud: true,
-		LidarTopic:       "rt/scan",
-		PointCloudTopic:  "rt/utlidar/cloud_livox_mid360",
-		OdomTopic:        "rt/odom",
-		LowstateTopic:    "rt/lowstate",
-		DepthTopic:       "rt/camera/realsense2_camera_node/depth/image_rect_raw",
+		// A D435i is fitted to this fleet's G1: measured 14.9 Hz at 480x270
+		// 16UC1. On a G1 without one, realsense2_camera_node still starts and
+		// logs "No RealSense devices were found!", so the topic exists but
+		// never carries a message -- recording it writes a 0-byte
+		// depth_frames.bin and leaves the heartbeat broken. Those units set
+		// ENABLE_DEPTH=false.
+		EnableDepth:     true,
+		EnableOdom:      true,
+		EnableLowstate:  true,
+		LidarTopic:      "rt/scan",
+		PointCloudTopic: "rt/utlidar/cloud_livox_mid360",
+		OdomTopic:       "rt/odom",
+		LowstateTopic:   "rt/lowstate",
+		DepthTopic:      "rt/camera/realsense2_camera_node/depth/image_rect_raw",
 		Cameras: []CameraSpec{
 			// The video-processor's two pre-CV streams, gst-direct. Verified on
 			// a live G1: both h264 1280x720 at 30 fps.
