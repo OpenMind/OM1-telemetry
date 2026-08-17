@@ -35,6 +35,15 @@ jobs:
       - name: Install dependencies
         run: go mod download
 
+      - name: Cache CycloneDDS build
+        uses: actions/cache@v3
+        with:
+          path: .cyclonedds/install
+          key: ${{ runner.os }}-cyclonedds-0.10.x-v2
+
+      - name: Build CycloneDDS (from source; see Makefile)
+        run: make install-cyclonedds
+
       - name: Install golangci-lint
         run: |
           curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/master/install.sh | sh -s -- -b $(go env GOPATH)/bin v2.7.2

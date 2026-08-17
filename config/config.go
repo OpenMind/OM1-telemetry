@@ -1,9 +1,9 @@
 package config
 
 import (
-	"log/slog"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -18,16 +18,11 @@ import (
 	"om1-telemetry/internal/video"
 )
 
-const defaultZenohEndpoint = "tcp/127.0.0.1:7447"
-
 type Config struct {
 	Collect          bool
 	RobotType        RobotType
 	EnableLidar      bool
 	EnablePointCloud bool
-	EnableDepth      bool
-	EnableOdom       bool
-	EnableLowstate   bool
 	SessionDir       string
 	Video            []VideoConfig
 	Audio            AudioConfig
@@ -64,41 +59,39 @@ type FeaturesConfig struct {
 }
 
 type LidarConfig struct {
-	ZenohEndpoint  string
-	ZenohTopic     string
-	RateHz         float64
+	DDSDomainID    uint32
+	DDSTopic       string
 	TimestampsFile string
 	DataFile       string
 }
 
 type PointCloudConfig struct {
-	ZenohEndpoint  string
-	ZenohTopic     string
-	RateHz         float64
+	DDSDomainID    uint32
+	DDSTopic       string
 	TimestampsFile string
 	DataFile       string
 }
 
 type DepthConfig struct {
-	ZenohEndpoint  string
-	ZenohTopic     string
-	RateHz         float64
+	DDSDomainID    uint32
+	DDSTopic       string
 	TimestampsFile string
 	DataFile       string
 }
 
 type OdomConfig struct {
-	ZenohEndpoint  string
-	ZenohTopic     string
-	RateHz         float64
+	DDSDomainID    uint32
+	DDSTopic       string
 	TimestampsFile string
 	DataFile       string
 }
 
 type LowstateConfig struct {
-	ZenohEndpoint  string
-	ZenohTopic     string
-	RateHz         float64
+	// RobotType selects the LowState DDS schema: "go2" (unitree_go/msg/
+	// LowState) or "g1" (unitree_hg/msg/LowState).
+	RobotType      string
+	DDSDomainID    uint32
+	DDSTopic       string
 	TimestampsFile string
 	DataFile       string
 }
@@ -111,32 +104,28 @@ type NetworkConfig struct {
 }
 
 // RecordingsDir is the root under which sessions are created. The session
-// package needs it before Load runs, since it decides the session directory
-// name (which depends on whether the clock can be trusted yet).
+// package needs it before Load runs, because it decides the session directory
+// name -- which depends on whether the clock can be trusted yet.
 func RecordingsDir() string {
 	return envStr("RECORDINGS_DIR", "recordings")
 }
 
-// Load builds the recorder configuration for a session directory that the
-// caller has already created.
+// Load builds the recorder configuration for a session directory the caller
+// has already created.
 //
-// Every value resolves in the order: environment variable, then the robot
-// profile (config/robots.yaml), then a built-in default. The session directory
-// is passed in rather than derived from time.Now(): on a robot that booted
-// without a network the clock can be days off, and a directory named from it
-// would be wrong and frozen for the whole session. See internal/session.
+// The directory is passed in rather than derived from time.Now(): a robot that
+// booted without a network can have a wall clock days off, and a directory
+// named from it would be wrong and frozen for the whole session. See
+// internal/session.
 func Load(sessionDir string) Config {
 	robotType, profile := ResolveProfile()
 
 	return Config{
 		Collect:          envBool("ENABLE_COLLECTION", true),
 		RobotType:        robotType,
+		EnableLidar:      envBool("ENABLE_LIDAR", profile.EnableLidar),
+		EnablePointCloud: envBool("ENABLE_POINTCLOUD", profile.EnablePointCloud),
 		SessionDir:       sessionDir,
-		EnableLidar:      topicEnabled(profile, TopicLidar, "ENABLE_LIDAR", "LIDAR_ZENOH_TOPIC"),
-		EnablePointCloud: topicEnabled(profile, TopicPointCloud, "ENABLE_POINTCLOUD", "POINTCLOUD_ZENOH_TOPIC"),
-		EnableDepth:      topicEnabled(profile, TopicDepth, "ENABLE_DEPTH", "DEPTH_ZENOH_TOPIC"),
-		EnableOdom:       topicEnabled(profile, TopicOdom, "ENABLE_ODOM", "ODOM_ZENOH_TOPIC"),
-		EnableLowstate:   topicEnabled(profile, TopicLowstate, "ENABLE_LOWSTATE", "LOWSTATE_ZENOH_TOPIC"),
 		Video:            videoConfigs(profile, sessionDir),
 		Audio: AudioConfig{
 			// Audio is the audio track of the video-processor's muxed session
@@ -144,7 +133,7 @@ func Load(sessionDir string) Config {
 			// gst-direct on :8555 for the lowest-latency, capture-stamped source;
 			// override to mediamtx (rtsp://localhost:8554/live) for an off-host
 			// recorder.
-			RTSPURL:        envStr(orDefault(profile.Audio.Env, "AUDIO_RTSP_URL"), profile.Audio.URL),
+			RTSPURL:        envStr("AUDIO_RTSP_URL", "rtsp://localhost:8555/live"),
 			OutputFile:     filepath.Join(sessionDir, "audio.ogg"),
 			TimestampsFile: filepath.Join(sessionDir, "audio_timestamps.csv"),
 		},
@@ -157,37 +146,33 @@ func Load(sessionDir string) Config {
 			TimebaseFile:   filepath.Join(sessionDir, "video_features_timebase.json"),
 		},
 		Lidar: LidarConfig{
-			ZenohEndpoint:  envStr("LIDAR_ZENOH_ENDPOINT", defaultZenohEndpoint),
-			ZenohTopic:     topicKey(profile, TopicLidar, "LIDAR_ZENOH_TOPIC"),
-			RateHz:         topicRate(profile, TopicLidar, 10),
+			DDSDomainID:    envUint32("LIDAR_DDS_DOMAIN", 0),
+			DDSTopic:       envStr("LIDAR_DDS_TOPIC", profile.LidarTopic),
 			TimestampsFile: filepath.Join(sessionDir, "lidar_timestamps.csv"),
 			DataFile:       filepath.Join(sessionDir, "lidar_scans.bin"),
 		},
 		PointCloud: PointCloudConfig{
-			ZenohEndpoint:  envStr("POINTCLOUD_ZENOH_ENDPOINT", defaultZenohEndpoint),
-			ZenohTopic:     topicKey(profile, TopicPointCloud, "POINTCLOUD_ZENOH_TOPIC"),
-			RateHz:         topicRate(profile, TopicPointCloud, 10),
+			DDSDomainID:    envUint32("POINTCLOUD_DDS_DOMAIN", 0),
+			DDSTopic:       envStr("POINTCLOUD_DDS_TOPIC", profile.PointCloudTopic),
 			TimestampsFile: filepath.Join(sessionDir, "pointcloud_timestamps.csv"),
 			DataFile:       filepath.Join(sessionDir, "pointcloud_frames.bin"),
 		},
 		Depth: DepthConfig{
-			ZenohEndpoint:  envStr("DEPTH_ZENOH_ENDPOINT", defaultZenohEndpoint),
-			ZenohTopic:     topicKey(profile, TopicDepth, "DEPTH_ZENOH_TOPIC"),
-			RateHz:         topicRate(profile, TopicDepth, 10),
+			DDSDomainID:    envUint32("DEPTH_DDS_DOMAIN", 0),
+			DDSTopic:       envStr("DEPTH_DDS_TOPIC", profile.DepthTopic),
 			TimestampsFile: filepath.Join(sessionDir, "depth_timestamps.csv"),
 			DataFile:       filepath.Join(sessionDir, "depth_frames.bin"),
 		},
 		Odom: OdomConfig{
-			ZenohEndpoint:  envStr("ODOM_ZENOH_ENDPOINT", defaultZenohEndpoint),
-			ZenohTopic:     topicKey(profile, TopicOdom, "ODOM_ZENOH_TOPIC"),
-			RateHz:         topicRate(profile, TopicOdom, 30),
+			DDSDomainID:    envUint32("ODOM_DDS_DOMAIN", 0),
+			DDSTopic:       envStr("ODOM_DDS_TOPIC", profile.OdomTopic),
 			TimestampsFile: filepath.Join(sessionDir, "odom_timestamps.csv"),
 			DataFile:       filepath.Join(sessionDir, "odom_frames.bin"),
 		},
 		Lowstate: LowstateConfig{
-			ZenohEndpoint:  envStr("LOWSTATE_ZENOH_ENDPOINT", defaultZenohEndpoint),
-			ZenohTopic:     topicKey(profile, TopicLowstate, "LOWSTATE_ZENOH_TOPIC"),
-			RateHz:         topicRate(profile, TopicLowstate, 400),
+			RobotType:      string(robotType),
+			DDSDomainID:    envUint32("LOWSTATE_DDS_DOMAIN", 0),
+			DDSTopic:       envStr("LOWSTATE_DDS_TOPIC", profile.LowstateTopic),
 			TimestampsFile: filepath.Join(sessionDir, "lowstate_timestamps.csv"),
 			DataFile:       filepath.Join(sessionDir, "lowstate_frames.bin"),
 		},
@@ -200,53 +185,13 @@ func Load(sessionDir string) Config {
 	}
 }
 
-// topicKey resolves a topic's Zenoh key expression: environment variable first,
-// then the profile.
-func topicKey(p Profile, name, envKey string) string {
-	t, _ := p.Topic(name)
-	return envStr(envKey, t.Key)
-}
-
-// topicRate is the nominal publish rate, used only to size the stall detector.
-func topicRate(p Profile, name string, fallback float64) float64 {
-	if t, ok := p.Topic(name); ok && t.RateHz > 0 {
-		return t.RateHz
-	}
-	return fallback
-}
-
-// topicEnabled decides whether a topic is recorded.
-//
-// A topic the profile does not declare cannot be enabled by its ENABLE_ flag
-// alone -- there would be no key to subscribe to, and subscribing to "" records
-// nothing while reporting success. Supplying the key by environment variable
-// does enable it, which is how a robot gains a sensor its profile predates.
-func topicEnabled(p Profile, name, enableEnv, keyEnv string) bool {
-	t, declared := p.Topic(name)
-	enabled := declared && t.Enabled
-
-	switch os.Getenv(enableEnv) {
-	case "false", "0", "no":
-		return false
-	case "true", "1", "yes":
-		enabled = true
-	}
-
-	if enabled && topicKey(p, name, keyEnv) == "" {
-		slog.Warn("topic enabled but no key configured; not recording",
-			"topic", name, "hint", "set "+keyEnv+" or add it to the robot profile")
-		return false
-	}
-	return enabled
-}
-
-// videoConfigs builds one recorder per camera in the profile.
 func videoConfigs(p Profile, sessionDir string) []VideoConfig {
 	configs := make([]VideoConfig, 0, len(p.Cameras))
 	for _, cam := range p.Cameras {
-		// The profile names the override variable so a camera can be renamed
-		// on disk without breaking deployments that set the old one.
-		envKey := orDefault(cam.Env, strings.ToUpper(cam.Name)+"_RTSP_URL")
+		envKey := cam.Env
+		if envKey == "" {
+			envKey = strings.ToUpper(cam.Name) + "_RTSP_URL"
+		}
 		configs = append(configs, VideoConfig{
 			Name:           cam.Name,
 			RTSPURL:        envStr(envKey, cam.URL),
@@ -289,8 +234,8 @@ func (c FeaturesConfig) FeatureStreamConfig() features.Config {
 
 func (c LidarConfig) LidarStreamConfig() lidar.Config {
 	return lidar.Config{
-		ZenohEndpoint:  c.ZenohEndpoint,
-		ZenohTopic:     c.ZenohTopic,
+		DDSDomainID:    c.DDSDomainID,
+		DDSTopic:       c.DDSTopic,
 		TimestampsFile: c.TimestampsFile,
 		DataFile:       c.DataFile,
 	}
@@ -298,8 +243,8 @@ func (c LidarConfig) LidarStreamConfig() lidar.Config {
 
 func (c PointCloudConfig) PointCloudStreamConfig() pointcloud.Config {
 	return pointcloud.Config{
-		ZenohEndpoint:  c.ZenohEndpoint,
-		ZenohTopic:     c.ZenohTopic,
+		DDSDomainID:    c.DDSDomainID,
+		DDSTopic:       c.DDSTopic,
 		TimestampsFile: c.TimestampsFile,
 		DataFile:       c.DataFile,
 	}
@@ -307,8 +252,8 @@ func (c PointCloudConfig) PointCloudStreamConfig() pointcloud.Config {
 
 func (c DepthConfig) DepthStreamConfig() depth.Config {
 	return depth.Config{
-		ZenohEndpoint:  c.ZenohEndpoint,
-		ZenohTopic:     c.ZenohTopic,
+		DDSDomainID:    c.DDSDomainID,
+		DDSTopic:       c.DDSTopic,
 		TimestampsFile: c.TimestampsFile,
 		DataFile:       c.DataFile,
 	}
@@ -316,8 +261,8 @@ func (c DepthConfig) DepthStreamConfig() depth.Config {
 
 func (c OdomConfig) OdomStreamConfig() odom.Config {
 	return odom.Config{
-		ZenohEndpoint:  c.ZenohEndpoint,
-		ZenohTopic:     c.ZenohTopic,
+		DDSDomainID:    c.DDSDomainID,
+		DDSTopic:       c.DDSTopic,
 		TimestampsFile: c.TimestampsFile,
 		DataFile:       c.DataFile,
 	}
@@ -325,8 +270,9 @@ func (c OdomConfig) OdomStreamConfig() odom.Config {
 
 func (c LowstateConfig) LowstateStreamConfig() lowstate.Config {
 	return lowstate.Config{
-		ZenohEndpoint:  c.ZenohEndpoint,
-		ZenohTopic:     c.ZenohTopic,
+		RobotType:      c.RobotType,
+		DDSDomainID:    c.DDSDomainID,
+		DDSTopic:       c.DDSTopic,
 		TimestampsFile: c.TimestampsFile,
 		DataFile:       c.DataFile,
 	}
@@ -341,13 +287,6 @@ func (c NetworkConfig) NetworkStreamConfig() network.Config {
 	}
 }
 
-func orDefault(value, fallback string) string {
-	if value != "" {
-		return value
-	}
-	return fallback
-}
-
 func envStr(key, defaultValue string) string {
 	if value := os.Getenv(key); value != "" {
 		return value
@@ -359,6 +298,15 @@ func envDuration(key string, defaultValue time.Duration) time.Duration {
 	if value := os.Getenv(key); value != "" {
 		if d, err := time.ParseDuration(value); err == nil {
 			return d
+		}
+	}
+	return defaultValue
+}
+
+func envUint32(key string, defaultValue uint32) uint32 {
+	if value := os.Getenv(key); value != "" {
+		if v, err := strconv.ParseUint(value, 10, 32); err == nil {
+			return uint32(v)
 		}
 	}
 	return defaultValue

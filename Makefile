@@ -1,87 +1,68 @@
-.PHONY: build zenohdup run download-zenohc test tidy lint
+.PHONY: build run install-cyclonedds check-cyclonedds idl-gen test tidy lint
 
 BIN       := om1-telemetry
 CMD       := ./cmd/main
 BUILD_DIR := bin
-
-ZENOH_C_VERSION=1.9.0
-ZENOH_C_DIR=.zenoh-c
-ZENOH_C_ABS_DIR=$(shell pwd)/$(ZENOH_C_DIR)
-UNAME_S := $(shell uname -s)
-UNAME_M := $(shell uname -m)
-
-ifeq ($(UNAME_S),Linux)
-	ifeq ($(UNAME_M),x86_64)
-		ZENOH_PLATFORM=x86_64-unknown-linux-gnu
-	else ifeq ($(UNAME_M),aarch64)
-		ZENOH_PLATFORM=aarch64-unknown-linux-gnu
-	endif
-	DYLD_VAR=LD_LIBRARY_PATH
-else ifeq ($(UNAME_S),Darwin)
-	ifeq ($(UNAME_M),arm64)
-		ZENOH_PLATFORM=aarch64-apple-darwin
-	else
-		ZENOH_PLATFORM=x86_64-apple-darwin
-	endif
-	DYLD_VAR=DYLD_LIBRARY_PATH
-endif
-
-ZENOH_URL=https://github.com/eclipse-zenoh/zenoh-c/releases/download/$(ZENOH_C_VERSION)/zenoh-c-$(ZENOH_C_VERSION)-$(ZENOH_PLATFORM)-standalone.zip
+IDL_DIR   := idl
+IDL_GEN_DIR := internal/ddsgen
 
 export CGO_ENABLED=1
-export CGO_CFLAGS=-I$(ZENOH_C_ABS_DIR)/include
-export CGO_LDFLAGS=-L$(ZENOH_C_ABS_DIR)/lib -lzenohc -Wl,-rpath,$(ZENOH_C_ABS_DIR)/lib
 
+CYCLONEDDS_VERSION := releases/0.10.x
+CYCLONEDDS_DIR      := .cyclonedds
+CYCLONEDDS_SRC       := $(CYCLONEDDS_DIR)/src
+CYCLONEDDS_INSTALL   := $(shell pwd)/$(CYCLONEDDS_DIR)/install
 
-download-zenohc:
-	@echo "Downloading zenoh-c $(ZENOH_C_VERSION) for $(ZENOH_PLATFORM)..."
-	@mkdir -p $(ZENOH_C_DIR)
-	@if [ ! -f "$(ZENOH_C_DIR)/lib/libzenohc.dylib" ] && [ ! -f "$(ZENOH_C_DIR)/lib/libzenohc.so" ]; then \
-		echo "Fetching $(ZENOH_URL)..."; \
-		curl -sSL -o /tmp/zenoh-c.zip $(ZENOH_URL); \
-		unzip -q /tmp/zenoh-c.zip -d $(ZENOH_C_DIR); \
-		rm /tmp/zenoh-c.zip; \
-		echo "zenoh-c installed to $(ZENOH_C_DIR)"; \
-		if [ "$(UNAME_S)" = "Darwin" ]; then \
-			echo "Patching dylib install names..."; \
-			if [ -f "$(ZENOH_C_ABS_DIR)/lib/libzenohc.dylib" ]; then \
-				install_name_tool -id "@rpath/libzenohc.dylib" "$(ZENOH_C_ABS_DIR)/lib/libzenohc.dylib"; \
-			fi; \
-		fi; \
+export PATH := $(CYCLONEDDS_INSTALL)/bin:$(PATH)
+export PKG_CONFIG_PATH := $(CYCLONEDDS_INSTALL)/lib/pkgconfig:$(PKG_CONFIG_PATH)
+export LD_LIBRARY_PATH := $(CYCLONEDDS_INSTALL)/lib:$(LD_LIBRARY_PATH)
+export DYLD_LIBRARY_PATH := $(CYCLONEDDS_INSTALL)/lib:$(DYLD_LIBRARY_PATH)
+
+install-cyclonedds:
+	@if [ ! -f "$(CYCLONEDDS_INSTALL)/lib/pkgconfig/CycloneDDS.pc" ]; then \
+		set -e; \
+		echo "Building CycloneDDS ($(CYCLONEDDS_VERSION)) into $(CYCLONEDDS_INSTALL)..."; \
+		rm -rf $(CYCLONEDDS_SRC); \
+		git clone --branch $(CYCLONEDDS_VERSION) --depth 1 \
+			https://github.com/eclipse-cyclonedds/cyclonedds.git $(CYCLONEDDS_SRC); \
+		mkdir -p $(CYCLONEDDS_SRC)/build; \
+		cd $(CYCLONEDDS_SRC)/build && \
+			cmake -DBUILD_EXAMPLES=OFF -DBUILD_TESTING=OFF -DENABLE_ICEORYX=NO \
+			      -DCMAKE_INSTALL_PREFIX=$(CYCLONEDDS_INSTALL) .. && \
+			cmake --build . --target install; \
+		echo "CycloneDDS installed to $(CYCLONEDDS_INSTALL)"; \
 	else \
-		echo "zenoh-c already installed in $(ZENOH_C_DIR)"; \
+		echo "CycloneDDS already installed in $(CYCLONEDDS_INSTALL)"; \
 	fi
 
-build: download-zenohc
+check-cyclonedds: install-cyclonedds
+	@command -v pkg-config >/dev/null 2>&1 || { echo "pkg-config not found"; exit 1; }
+	@pkg-config --exists CycloneDDS || { \
+		echo "CycloneDDS not found via pkg-config after install-cyclonedds — something went wrong."; \
+		exit 1; \
+	}
+
+export CGO_LDFLAGS := -Wl,-rpath,$(CYCLONEDDS_INSTALL)/lib
+
+idl-gen: check-cyclonedds
+	@mkdir -p $(IDL_GEN_DIR)
+	@for f in $(IDL_DIR)/*.idl; do \
+		echo "idlc $$f"; \
+		idlc -l c -I $(IDL_DIR) -o $(IDL_GEN_DIR) "$$f" || exit 1; \
+	done
+
+build: idl-gen
 	@mkdir -p $(BUILD_DIR)
 	go build -o $(BUILD_DIR)/$(BIN) $(CMD)
 
-# Diagnostic: is a Zenoh topic being delivered more than once?
-zenohdup: download-zenohc
-	@mkdir -p $(BUILD_DIR)
-	go build -o $(BUILD_DIR)/zenohdup ./cmd/zenohdup
-
-# One command that answers "is the bus healthy?" for everything a G1 records
-# over Zenoh. Run it before trusting a recording, or to show that a restart
-# left duplicate traffic behind.
-G1_TOPICS = scan \
-            odom \
-            rt/lowstate \
-            rt/utlidar/cloud_livox_mid360 \
-            camera/realsense2_camera_node/depth/image_rect_raw \
-            camera/realsense2_camera_node/color/image_raw
-
-zenoh-check: zenohdup
-	@$(DYLD_VAR)=$(ZENOH_C_ABS_DIR)/lib $(BUILD_DIR)/zenohdup $(G1_TOPICS)
-
-run: download-zenohc
+run: idl-gen
 	go run $(CMD)
 
-test: download-zenohc
-	$(DYLD_VAR)=$(ZENOH_C_ABS_DIR)/lib go test -p 8 -v ./...
+test: idl-gen
+	go test -p 8 -v ./...
 
-lint: download-zenohc
-	$(DYLD_VAR)=$(ZENOH_C_ABS_DIR)/lib golangci-lint run --timeout=5m
+lint: idl-gen
+	golangci-lint run --timeout=5m
 
 tidy:
 	go mod tidy

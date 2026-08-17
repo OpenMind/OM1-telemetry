@@ -1,21 +1,11 @@
 package config
 
 import (
-	_ "embed"
-	"fmt"
 	"log/slog"
 	"os"
 	"sort"
 	"strings"
-
-	"gopkg.in/yaml.v3"
 )
-
-// robots.yaml is embedded so the binary carries a working profile set with no
-// volume mounted. ROBOT_PROFILES_FILE replaces it at runtime.
-//
-//go:embed robots.yaml
-var embeddedProfiles []byte
 
 type RobotType string
 
@@ -26,121 +16,80 @@ const (
 
 const DefaultRobotType = RobotGo2
 
-// Topic names referenced by the recorder. A profile that omits one records
-// nothing for it; a profile that sets enabled:false records nothing but keeps
-// the key documented for whoever fits the hardware later.
-const (
-	TopicLidar      = "lidar"
-	TopicPointCloud = "pointcloud"
-	TopicOdom       = "odom"
-	TopicLowstate   = "lowstate"
-	TopicDepth      = "depth"
-)
-
-// CameraProfile is one RTSP source recorded to <name>.mp4 in the session dir.
-type CameraProfile struct {
-	Name string `yaml:"name"`
-	URL  string `yaml:"url"`
-	// Env optionally names an environment variable that overrides URL. Kept in
-	// the file rather than derived from Name so the historical variable names
-	// (TOP_CAMERA_RTSP_URL) survive a camera being renamed.
-	Env string `yaml:"env"`
-}
-
-// AudioProfile is the RTSP source recorded to audio.ogg.
-type AudioProfile struct {
-	URL string `yaml:"url"`
-	Env string `yaml:"env"`
-}
-
-// TopicProfile is one Zenoh topic recorded to <name>_frames.bin.
-type TopicProfile struct {
-	Enabled bool    `yaml:"enabled"`
-	Key     string  `yaml:"key"`
-	RateHz  float64 `yaml:"rate_hz"`
-}
-
-// Profile is everything one robot type records.
 type Profile struct {
-	Cameras []CameraProfile         `yaml:"cameras"`
-	Audio   AudioProfile            `yaml:"audio"`
-	Topics  map[string]TopicProfile `yaml:"topics"`
+	EnableLidar      bool
+	EnablePointCloud bool
+
+	LidarTopic      string
+	PointCloudTopic string
+	OdomTopic       string
+	LowstateTopic   string
+	DepthTopic      string
+
+	// Cameras this robot records. A G1 and a Go2 do not have the same ones, so
+	// the list belongs to the profile rather than being global: recording a
+	// camera the robot does not have costs a reconnect every two seconds and a
+	// 0-byte mp4 each time.
+	Cameras []CameraSpec
 }
 
-// Topic returns the profile entry for name and whether the profile declares it.
-func (p Profile) Topic(name string) (TopicProfile, bool) {
-	t, ok := p.Topics[name]
-	return t, ok
+// CameraSpec is one RTSP source recorded to <Name>.mp4.
+type CameraSpec struct {
+	Name string
+	URL  string
+	// Env optionally names the variable that overrides URL. Held here rather
+	// than derived from Name so the historical variable names survive a camera
+	// being renamed.
+	Env string
 }
 
-type profileFile struct {
-	Robots map[RobotType]Profile `yaml:"robots"`
+var profiles = map[RobotType]Profile{
+	RobotGo2: {
+		EnableLidar:      true,
+		EnablePointCloud: false,
+		LidarTopic:       "rt/scan",
+		PointCloudTopic:  "rt/utlidar/cloud_deskewed",
+		OdomTopic:        "rt/odom",
+		LowstateTopic:    "rt/lowstate",
+		DepthTopic:       "rt/camera/realsense2_camera_node/depth/image_rect_raw",
+		Cameras: []CameraSpec{
+			// top_camera is the video-processor's clean (pre-CV) view on
+			// gst-direct :8556. front/down are served by other sources on the
+			// robot, on their existing mountpoints.
+			{Name: "top_camera", URL: "rtsp://localhost:8556/raw", Env: "TOP_CAMERA_RTSP_URL"},
+			{Name: "front_camera", URL: "rtsp://localhost:8554/front_camera", Env: "FRONT_CAMERA_RTSP_URL"},
+			{Name: "down_camera", URL: "rtsp://localhost:8554/down_camera", Env: "DOWN_CAMERA_RTSP_URL"},
+		},
+	},
+	RobotG1: {
+		EnableLidar:      true,
+		EnablePointCloud: true,
+		LidarTopic:       "rt/scan",
+		PointCloudTopic:  "rt/utlidar/cloud_livox_mid360",
+		OdomTopic:        "rt/odom",
+		LowstateTopic:    "rt/lowstate",
+		DepthTopic:       "rt/camera/realsense2_camera_node/depth/image_rect_raw",
+		Cameras: []CameraSpec{
+			// The video-processor's two pre-CV streams, gst-direct. Verified on
+			// a live G1: both h264 1280x720 at 30 fps.
+			{Name: "front_camera_raw", URL: "rtsp://localhost:8556/raw", Env: "FRONT_CAMERA_RAW_RTSP_URL"},
+			{Name: "rear_camera_raw", URL: "rtsp://localhost:8558/raw", Env: "REAR_CAMERA_RAW_RTSP_URL"},
+			// The RealSense's RGB view, which points down. om1_sensor's
+			// d435_camera_stream publishes it to mediamtx as H.264 already (its
+			// get_rtsp_camera_name returns "down_camera"), about 0.18 GB/h. The
+			// same image is on DDS as raw rgb8 -- 16.5 GB/h -- so record the
+			// stream the robot has already encoded. 404s if no RealSense is
+			// fitted, since the node then has nothing to publish.
+			{Name: "down_camera", URL: "rtsp://localhost:8554/down_camera", Env: "DOWN_CAMERA_RTSP_URL"},
+		},
+	},
 }
 
-// loadProfiles reads the profile set from ROBOT_PROFILES_FILE, falling back to
-// the embedded copy. A malformed override falls back rather than exiting: a bad
-// mount should not stop a robot from recording.
-func loadProfiles() map[RobotType]Profile {
-	if path := os.Getenv("ROBOT_PROFILES_FILE"); path != "" {
-		raw, err := os.ReadFile(path)
-		if err != nil {
-			slog.Error("cannot read ROBOT_PROFILES_FILE; using embedded profiles",
-				"path", path, "err", err)
-		} else if parsed, err := parseProfiles(raw); err != nil {
-			slog.Error("cannot parse ROBOT_PROFILES_FILE; using embedded profiles",
-				"path", path, "err", err)
-		} else {
-			slog.Info("loaded robot profiles from file", "path", path,
-				"robots", robotNames(parsed))
-			return parsed
-		}
-	}
-
-	parsed, err := parseProfiles(embeddedProfiles)
-	if err != nil {
-		// Unreachable short of shipping a broken build: the embedded file is
-		// parsed by TestEmbeddedProfiles_parse in CI.
-		slog.Error("embedded robot profiles are unparseable", "err", err)
-		return map[RobotType]Profile{}
-	}
-	return parsed
-}
-
-func parseProfiles(raw []byte) (map[RobotType]Profile, error) {
-	var f profileFile
-	if err := yaml.Unmarshal(raw, &f); err != nil {
-		return nil, err
-	}
-	if len(f.Robots) == 0 {
-		return nil, fmt.Errorf("no robots defined")
-	}
-	for rt, p := range f.Robots {
-		for i, cam := range p.Cameras {
-			if cam.Name == "" {
-				return nil, fmt.Errorf("robot %s: camera %d has no name", rt, i)
-			}
-			if cam.URL == "" {
-				return nil, fmt.Errorf("robot %s: camera %q has no url", rt, cam.Name)
-			}
-		}
-		for name, t := range p.Topics {
-			if t.Key == "" {
-				return nil, fmt.Errorf("robot %s: topic %q has no key", rt, name)
-			}
-		}
-	}
-	return f.Robots, nil
-}
-
-// ResolveProfile picks the profile for ROBOT_TYPE, falling back to the default
-// robot type when it is unset or unrecognized.
 func ResolveProfile() (RobotType, Profile) {
-	profiles := loadProfiles()
-
 	raw := strings.ToLower(strings.TrimSpace(os.Getenv("ROBOT_TYPE")))
 	if raw == "" {
 		slog.Warn("ROBOT_TYPE unset; using default profile",
-			"default", DefaultRobotType, "supported", robotNames(profiles))
+			"default", DefaultRobotType, "supported", supportedRobotTypes())
 		return DefaultRobotType, profiles[DefaultRobotType]
 	}
 
@@ -148,13 +97,13 @@ func ResolveProfile() (RobotType, Profile) {
 	profile, ok := profiles[rt]
 	if !ok {
 		slog.Warn("unrecognized ROBOT_TYPE; using default profile",
-			"got", raw, "default", DefaultRobotType, "supported", robotNames(profiles))
+			"got", raw, "default", DefaultRobotType, "supported", supportedRobotTypes())
 		return DefaultRobotType, profiles[DefaultRobotType]
 	}
 	return rt, profile
 }
 
-func robotNames(profiles map[RobotType]Profile) []string {
+func supportedRobotTypes() []string {
 	names := make([]string, 0, len(profiles))
 	for rt := range profiles {
 		names = append(names, string(rt))

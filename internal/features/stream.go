@@ -3,14 +3,14 @@
 // (VVAD/speaking today; pose, recognition, etc. later).
 //
 // Why this exists (precision time): every other modality this recorder captures
-// carries a *source* timestamp — Zenoh sensors stamp at the source, and the
+// carries a *source* timestamp — DDS sensors stamp at the source, and the
 // feature events are stamped at frame-capture on the video-processor's shared
 // CLOCK_MONOTONIC (with a monotonic->UTC mapping recorded in a header record).
 // The recorded video/audio, by contrast, is only anchored to ffmpeg
 // record-start wall-clock + PTS, which is offset from true capture by the
 // RTSP/pipeline latency. Ingesting the feature log gives a *capture-accurate*
 // video-derived timeline that aligns cleanly, on the common UTC-ns clock, with
-// the Zenoh sensors — without depending on fragile A/V stream sync.
+// the DDS sensors — without depending on fragile A/V stream sync.
 //
 // The video-processor writes the log to the path given by its --feature-log /
 // OM_FEATURE_LOG option. For this recorder to read it, that path must be on a

@@ -1,54 +1,34 @@
 package config
 
 import (
-	"os"
-	"path/filepath"
 	"testing"
 
 	"github.com/stretchr/testify/require"
 )
 
-// The embedded file is what every deployment gets when no override is mounted,
-// so a typo in it is a shipping bug, not a runtime warning.
-func TestEmbeddedProfiles_parse(t *testing.T) {
-	profiles, err := parseProfiles(embeddedProfiles)
-	require.NoError(t, err)
-	require.Contains(t, profiles, RobotG1)
-	require.Contains(t, profiles, RobotGo2)
-}
-
-func TestResolveProfile_g1(t *testing.T) {
-	t.Setenv("ROBOT_PROFILES_FILE", "")
-	t.Setenv("ROBOT_TYPE", "g1")
-
-	rt, p := ResolveProfile()
-
-	require.Equal(t, RobotG1, rt)
-	require.Len(t, p.Cameras, 3)
-
-	pc, ok := p.Topic(TopicPointCloud)
-	require.True(t, ok, "G1 records the Livox MID360")
-	require.True(t, pc.Enabled)
-	require.Equal(t, "rt/utlidar/cloud_livox_mid360", pc.Key)
-
-	d, ok := p.Topic(TopicDepth)
-	require.True(t, ok)
-	require.True(t, d.Enabled, "a D435i is fitted to this G1")
-}
-
-func TestResolveProfile_go2HasNoPointCloudEntry(t *testing.T) {
-	t.Setenv("ROBOT_PROFILES_FILE", "")
+func TestResolveProfile_go2(t *testing.T) {
 	t.Setenv("ROBOT_TYPE", "go2")
 
 	rt, p := ResolveProfile()
 
 	require.Equal(t, RobotGo2, rt)
-	_, ok := p.Topic(TopicPointCloud)
-	require.False(t, ok, "the Go2 publishes no point cloud; the placeholder topic was removed")
+	require.True(t, p.EnableLidar, "Go2 records 2D lidar")
+	require.False(t, p.EnablePointCloud, "Go2 has no 3D point cloud")
+	require.Equal(t, "rt/scan", p.LidarTopic)
+}
+
+func TestResolveProfile_g1(t *testing.T) {
+	t.Setenv("ROBOT_TYPE", "g1")
+
+	rt, p := ResolveProfile()
+
+	require.Equal(t, RobotG1, rt)
+	require.True(t, p.EnableLidar, "G1 records 2D lidar")
+	require.True(t, p.EnablePointCloud, "G1 records the 3D point cloud")
+	require.Equal(t, "rt/utlidar/cloud_livox_mid360", p.PointCloudTopic)
 }
 
 func TestResolveProfile_isCaseInsensitiveAndTrimmed(t *testing.T) {
-	t.Setenv("ROBOT_PROFILES_FILE", "")
 	t.Setenv("ROBOT_TYPE", "  G1  ")
 
 	rt, _ := ResolveProfile()
@@ -57,89 +37,71 @@ func TestResolveProfile_isCaseInsensitiveAndTrimmed(t *testing.T) {
 }
 
 func TestResolveProfile_unsetFallsBackToDefault(t *testing.T) {
-	t.Setenv("ROBOT_PROFILES_FILE", "")
 	t.Setenv("ROBOT_TYPE", "")
 
 	rt, p := ResolveProfile()
 
 	require.Equal(t, DefaultRobotType, rt)
-	require.NotEmpty(t, p.Cameras)
+	require.Equal(t, profiles[DefaultRobotType], p)
 }
 
 func TestResolveProfile_unknownFallsBackToDefault(t *testing.T) {
-	t.Setenv("ROBOT_PROFILES_FILE", "")
 	t.Setenv("ROBOT_TYPE", "spot")
 
 	rt, p := ResolveProfile()
 
 	require.Equal(t, DefaultRobotType, rt)
-	require.NotEmpty(t, p.Cameras)
+	require.Equal(t, profiles[DefaultRobotType], p)
 }
 
-// Changing what a robot records should not need a rebuild.
-func TestResolveProfile_fileOverridesEmbedded(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "robots.yaml")
-	require.NoError(t, os.WriteFile(path, []byte(`
-robots:
-  g1:
-    cameras:
-      - name: only_camera
-        url: rtsp://example/one
-    audio:
-      url: rtsp://example/audio
-    topics:
-      lidar:
-        enabled: true
-        key: custom/scan
-        rate_hz: 5
-`), 0o644))
+func TestLoad_robotTypeSelectsProfile(t *testing.T) {
+	for _, key := range []string{"ENABLE_LIDAR", "ENABLE_POINTCLOUD", "LIDAR_DDS_TOPIC", "POINTCLOUD_DDS_TOPIC"} {
+		t.Setenv(key, "")
+	}
 
-	t.Setenv("ROBOT_PROFILES_FILE", path)
+	t.Setenv("ROBOT_TYPE", "go2")
+	go2 := Load(testSessionDir)
+	require.Equal(t, RobotGo2, go2.RobotType)
+	require.True(t, go2.EnableLidar)
+	require.False(t, go2.EnablePointCloud)
+	require.Equal(t, "rt/utlidar/cloud_deskewed", go2.PointCloud.DDSTopic)
+	require.Equal(t, "go2", go2.Lowstate.RobotType)
+
 	t.Setenv("ROBOT_TYPE", "g1")
-
-	_, p := ResolveProfile()
-
-	require.Len(t, p.Cameras, 1)
-	require.Equal(t, "only_camera", p.Cameras[0].Name)
-
-	l, ok := p.Topic(TopicLidar)
-	require.True(t, ok)
-	require.Equal(t, "custom/scan", l.Key)
-	require.Equal(t, 5.0, l.RateHz)
+	g1 := Load(testSessionDir)
+	require.Equal(t, RobotG1, g1.RobotType)
+	require.True(t, g1.EnableLidar)
+	require.True(t, g1.EnablePointCloud)
+	require.Equal(t, "rt/utlidar/cloud_livox_mid360", g1.PointCloud.DDSTopic)
+	require.Equal(t, "g1", g1.Lowstate.RobotType)
 }
 
-// A bad mount must not stop a robot from recording.
-func TestResolveProfile_unreadableFileFallsBackToEmbedded(t *testing.T) {
-	t.Setenv("ROBOT_PROFILES_FILE", filepath.Join(t.TempDir(), "does-not-exist.yaml"))
+func TestLoad_envOverridesProfileEnableFlags(t *testing.T) {
+	t.Setenv("ROBOT_TYPE", "go2") // profile would disable point cloud
+	t.Setenv("ENABLE_POINTCLOUD", "true")
+	t.Setenv("ENABLE_LIDAR", "false")
+
+	cfg := Load(testSessionDir)
+
+	require.True(t, cfg.EnablePointCloud, "ENABLE_POINTCLOUD env should override profile")
+	require.False(t, cfg.EnableLidar, "ENABLE_LIDAR env should override profile")
+}
+
+// Cameras belong to the profile because a G1 and a Go2 do not have the same
+// ones, and recording a camera the robot lacks costs a reconnect every two
+// seconds plus a 0-byte mp4 each time.
+func TestResolveProfile_camerasArePerRobot(t *testing.T) {
 	t.Setenv("ROBOT_TYPE", "g1")
+	_, g1 := ResolveProfile()
+	require.Len(t, g1.Cameras, 3)
+	require.Equal(t, "front_camera_raw", g1.Cameras[0].Name)
+	require.Equal(t, "rear_camera_raw", g1.Cameras[1].Name)
+	require.Equal(t, "down_camera", g1.Cameras[2].Name)
 
-	_, p := ResolveProfile()
+	t.Setenv("ROBOT_TYPE", "go2")
+	_, go2 := ResolveProfile()
+	require.Len(t, go2.Cameras, 3)
+	require.Equal(t, "top_camera", go2.Cameras[0].Name)
 
-	require.Len(t, p.Cameras, 3, "fell back to the embedded G1 profile")
-}
-
-func TestResolveProfile_malformedFileFallsBackToEmbedded(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "robots.yaml")
-	require.NoError(t, os.WriteFile(path, []byte("robots: [this is not a map"), 0o644))
-
-	t.Setenv("ROBOT_PROFILES_FILE", path)
-	t.Setenv("ROBOT_TYPE", "g1")
-
-	_, p := ResolveProfile()
-
-	require.Len(t, p.Cameras, 3)
-}
-
-func TestParseProfiles_rejectsIncompleteEntries(t *testing.T) {
-	_, err := parseProfiles([]byte("robots:\n  g1:\n    cameras:\n      - url: rtsp://x\n"))
-	require.Error(t, err, "a camera with no name has no file to write to")
-
-	_, err = parseProfiles([]byte("robots:\n  g1:\n    cameras:\n      - name: c\n"))
-	require.Error(t, err, "a camera with no url has nothing to record")
-
-	_, err = parseProfiles([]byte("robots:\n  g1:\n    topics:\n      lidar:\n        enabled: true\n"))
-	require.Error(t, err, "a topic with no key would subscribe to nothing")
-
-	_, err = parseProfiles([]byte("robots: {}\n"))
-	require.Error(t, err, "an empty profile set is a broken file, not a valid one")
+	require.NotEqual(t, g1.Cameras, go2.Cameras)
 }

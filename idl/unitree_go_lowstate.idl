@@ -1,0 +1,70 @@
+// Verbatim field layout from unitreerobotics/unitree_ros2
+// cyclonedds_ws/src/unitree/unitree_go/msg/{LowState,IMUState,MotorState,
+// BmsState}.msg — Go2's robot-state message. See
+// builtin_interfaces_time.idl for the naming-convention note; module/struct
+// names here must match unitree_go's own generated type names exactly for
+// DDS type matching to succeed.
+module unitree_go {
+  module msg {
+    module dds_ {
+      struct IMUState_ {
+        float quaternion[4];
+        float gyroscope[3];
+        float accelerometer[3];
+        float rpy[3];
+        int8 temperature;
+      };
+
+      struct MotorState_ {
+        uint8 mode;
+        float q;
+        float dq;
+        float ddq;
+        float tau_est;
+        float q_raw;
+        float dq_raw;
+        float ddq_raw;
+        int8 temperature;
+        uint32 lost;
+        uint32 reserve[2];
+      };
+
+      struct BmsState_ {
+        uint8 version_high;
+        uint8 version_low;
+        uint8 status;
+        uint8 soc;
+        int32 current;
+        uint16 cycle;
+        int8 bq_ntc[2];
+        int8 mcu_ntc[2];
+        uint16 cell_vol[15];
+      };
+
+      struct LowState_ {
+        uint8 head[2];
+        uint8 level_flag;
+        uint8 frame_reserve;
+        uint32 sn[2];
+        uint32 version[2];
+        uint16 bandwidth;
+        unitree_go::msg::dds_::IMUState_ imu_state;
+        unitree_go::msg::dds_::MotorState_ motor_state[20];
+        unitree_go::msg::dds_::BmsState_ bms_state;
+        int16 foot_force[4];
+        int16 foot_force_est[4];
+        uint32 tick;
+        uint8 wireless_remote[40];
+        uint8 bit_flag;
+        float adc_reel;
+        int8 temperature_ntc1;
+        int8 temperature_ntc2;
+        float power_v;
+        float power_a;
+        uint16 fan_frequency[4];
+        uint32 reserve;
+        uint32 crc;
+      };
+    };
+  };
+};

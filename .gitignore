@@ -1,8 +1,9 @@
-
-bin/
-.claude/
 .DS_Store
-myenv/
-__pycache__/
-recordings/
+.claude/
+.cyclonedds/
 .zenoh-c/
+__pycache__/
+bin/
+internal/ddsgen/
+myenv/
+recordings/

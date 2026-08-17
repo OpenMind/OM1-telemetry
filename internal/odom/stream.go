@@ -8,12 +8,9 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/eclipse-zenoh/zenoh-go/zenoh"
-
 	"om1-telemetry/internal/clock"
 	"om1-telemetry/internal/heartbeat"
 	"om1-telemetry/internal/recordutil"
-	"om1-telemetry/internal/zenohutil"
 )
 
 // HeartbeatName is the stream identifier used with heartbeat.Monitor.
@@ -22,8 +19,8 @@ const HeartbeatName = "odom"
 const syncInterval = 2 * time.Second
 
 type Config struct {
-	ZenohEndpoint  string
-	ZenohTopic     string
+	DDSDomainID    uint32
+	DDSTopic       string
 	TimestampsFile string
 	DataFile       string
 
@@ -38,16 +35,6 @@ type OdomStream struct {
 	cancel  context.CancelFunc
 	done    chan struct{}
 	wg      sync.WaitGroup
-}
-
-type SessionResult struct {
-	session zenoh.Session
-	err     error
-}
-
-type SubscriberResult struct {
-	subscriber zenoh.Subscriber
-	err        error
 }
 
 func New(cfg Config) *OdomStream {
@@ -89,32 +76,11 @@ func (o *OdomStream) loop(ctx context.Context) {
 }
 
 func (o *OdomStream) record(ctx context.Context) error {
-	config := zenoh.NewConfigDefault()
-	if err := config.InsertJson5(zenoh.ConfigModeKey, `"client"`); err != nil {
-		return err
+	receiver, closeSub, err := subscribeDDS(ctx, o.cfg.DDSDomainID, o.cfg.DDSTopic)
+	if err != nil {
+		return fmt.Errorf("subscribe dds: %w", err)
 	}
-	endpoint := o.cfg.ZenohEndpoint
-	if err := config.InsertJson5(zenoh.ConfigConnectKey, `["`+endpoint+`"]`); err != nil {
-		return fmt.Errorf("set connect endpoint: %w", err)
-	}
-
-	sessionChan := make(chan SessionResult, 1)
-	go func() {
-		session, err := zenoh.Open(config, nil)
-		sessionChan <- SessionResult{session, err}
-	}()
-
-	var session zenoh.Session
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	case result := <-sessionChan:
-		if result.err != nil {
-			return fmt.Errorf("open zenoh session: %w", result.err)
-		}
-		session = result.session
-	}
-	defer session.Drop()
+	defer closeSub()
 
 	// Open files in APPEND mode so reconnects do NOT wipe data.
 	tsResult, err := recordutil.OpenForAppend(o.cfg.TimestampsFile)
@@ -159,34 +125,7 @@ func (o *OdomStream) record(ctx context.Context) error {
 			"starting_byte_offset", byteOffset)
 	}
 
-	keyExpr, err := zenoh.NewKeyExpr(o.cfg.ZenohTopic)
-	if err != nil {
-		return fmt.Errorf("create key expression: %w", err)
-	}
-
-	handler := zenoh.NewFifoChannel[zenoh.Sample](1024)
-
-	subscriberChan := make(chan SubscriberResult, 1)
-	go func() {
-		subscriber, err := session.DeclareSubscriber(keyExpr, handler, nil)
-		subscriberChan <- SubscriberResult{subscriber, err}
-	}()
-
-	var subscriber zenoh.Subscriber
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	case result := <-subscriberChan:
-		if result.err != nil {
-			return fmt.Errorf("declare subscriber: %w", result.err)
-		}
-		subscriber = result.subscriber
-	}
-	defer subscriber.Drop()
-
-	slog.Info("odom recorder started", "topic", o.cfg.ZenohTopic)
-
-	receiver := subscriber.Handler()
+	slog.Info("odom recorder started", "domain", o.cfg.DDSDomainID, "topic", o.cfg.DDSTopic)
 
 	syncTicker := time.NewTicker(syncInterval)
 	defer syncTicker.Stop()
@@ -210,25 +149,20 @@ func (o *OdomStream) record(ctx context.Context) error {
 		case sample, ok := <-receiver:
 			if !ok {
 				flush()
-				return fmt.Errorf("subscriber channel closed")
+				return fmt.Errorf("dds subscriber channel closed")
 			}
 
-			var unixNs int64
-			tsOpt := sample.TimeStamp()
-			if tsOpt.IsSome() {
-				ts := tsOpt.Unwrap()
-				unixNs = zenohutil.TimestampToUnixNs(ts)
-			} else {
+			unixNs := sample.unixNs
+			if unixNs == 0 {
 				unixNs = time.Now().UnixNano()
 			}
-			// Receive time on the boot clock. unixNs above is the publisher's
-			// stamp and shares this host's wall clock, so a clock step spoils
-			// both; monoNs is immune to the step and says which correction
-			// applies to this row. See internal/clock.
+			// Boot-clock receive time. unixNs above is the publisher's stamp,
+			// taken on this host's wall clock, so a clock step spoils it;
+			// monoNs is immune and says which correction applies to this row.
+			// See internal/clock.
 			monoNs := clock.MonoNs()
 
-			payload := sample.Payload()
-			n, err := dataFile.Write(payload.Bytes())
+			n, err := dataFile.Write(sample.data)
 			if err != nil {
 				return fmt.Errorf("write data: %w", err)
 			}

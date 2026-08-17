@@ -5,10 +5,11 @@ A Go application that synchronously records multi-modal sensor data:
   the front and rear pre-CV streams from the OM1 video-processor
 - **Audio** from RTSP streams (via ffmpeg)
 - **Video features** (capture-time-stamped, video-derived events) from the OM1 video-processor's feature log
-- **Lidar** scans from Zenoh topics
-- **Point clouds** (Livox MID360) from Zenoh topics (zstd-compressed, lossless)
-- **Depth** frames from Zenoh topics (RVL-compressed, lossless)
-- **Odometry** messages from Zenoh topics
+- **Lidar** scans from a CycloneDDS topic
+- **Point clouds** (Livox MID360) from a CycloneDDS topic (zstd-compressed, lossless)
+- **Depth** frames from a CycloneDDS topic (RVL-compressed, lossless)
+- **Odometry** messages from a CycloneDDS topic
+- **Lowstate** (IMU/joints/battery/etc.) from a CycloneDDS topic
 
 All streams are timestamped and organized into session directories for easy alignment and analysis.
 
@@ -16,15 +17,50 @@ All streams are timestamped and organized into session directories for easy alig
 
 - **Go 1.25** or later
 - **ffmpeg** installed and available in PATH
-- **zenoh-c library** (automatically downloaded via `make download-zenohc`)
+- **CMake + a C compiler** (to build CycloneDDS — see "Build prerequisites" below)
+
+### Build prerequisites (CycloneDDS)
+
+Sensor/state topics (lidar, point cloud, depth, odometry, lowstate) are read by
+subscribing directly to the robot's CycloneDDS domain, via a first-party cgo
+wrapper (`internal/ddscore`) — there's no zenoh-bridge-dds hop anymore.
+
+Rather than relying on distro packages (which vary release-to-release and
+aren't available everywhere), CycloneDDS is built from source, the same way
+for every developer, CI, and Docker: `make build` / `make test` / `make run`
+all depend on `make install-cyclonedds`, which clones
+[eclipse-cyclonedds/cyclonedds](https://github.com/eclipse-cyclonedds/cyclonedds)
+(`releases/0.10.x`) and builds+installs it into `.cyclonedds/install`
+(gitignored) if not already present there — a no-op on repeat runs. You need
+`cmake` and a C compiler on PATH; nothing else to install manually.
+
+`make build` / `make test` / `make run` also depend on `make idl-gen`, which
+runs the freshly-built `idlc` over `idl/*.idl` to produce the type-support C
+sources each stream's `dds_reader.go` `#include`s (generated into
+`internal/ddsgen/`, gitignored — regenerate after editing any `.idl` file;
+`make` does this automatically).
+
+**Message schemas**: `idl/*.idl` mirror the exact field layout of the ROS 2 /
+Unitree messages published on the robot (`sensor_msgs/LaserScan`,
+`sensor_msgs/PointCloud2`, `sensor_msgs/Image`, `nav_msgs/Odometry`,
+`unitree_go/msg/LowState`, `unitree_hg/msg/LowState`), authored from
+[unitreerobotics/unitree_ros2](https://github.com/unitreerobotics/unitree_ros2)
+and [ros2/common_interfaces](https://github.com/ros2/common_interfaces). The
+generated C type/topic-descriptor symbol names each `dds_reader.go`
+references (e.g. `C.unitree_go_msg_dds__LowState_`,
+`C.unitree_go_msg_dds__LowState__desc`) have been confirmed against a real
+`idlc` (CycloneDDS 0.10.5) run and a full `make build` + `make test` pass.
 
 ## Configuration
 
 ### Robot profile (`config/robots.yaml`)
 
-`ROBOT_TYPE` selects a profile, which lists the cameras and Zenoh topics that
-robot records. Profiles live in `config/robots.yaml`, embedded into the binary
-at build time, so nothing needs mounting for the defaults to work.
+Set `ROBOT_TYPE` to select a built-in recording profile. The profile decides
+which sensors are recorded, the robot-specific DDS topic defaults, which
+cameras exist, and (for lowstate) which message schema to subscribe with --
+`unitree_go/msg/LowState` for Go2 vs `unitree_hg/msg/LowState` for G1. It is
+defined in code (`config/profile.go`), so no profile files need to ship with
+the binary.
 
 | | `ROBOT_TYPE=g1` | `ROBOT_TYPE=go2` |
 |---|---|---|
@@ -35,15 +71,6 @@ at build time, so nothing needs mounting for the defaults to work.
 | depth | ✅ D435i, 15 Hz (RVL, lossless) | ✅ |
 | down camera | ✅ RealSense RGB via `down_camera` RTSP, 15 Hz | ✅ |
 
-To change what a robot records **without rebuilding**, mount a replacement file
-and point `ROBOT_PROFILES_FILE` at it. A missing or malformed override falls
-back to the embedded profiles with a logged error, rather than stopping a robot
-from recording.
-
-Adding a camera or switching a topic on is a few lines of YAML. Adding a topic
-of a *kind* the recorder has no module for (a new message shape needing its own
-decoder) still needs Go code.
-
 If `ROBOT_TYPE` is unset or unrecognized the recorder warns and falls back to
 `go2`.
 
@@ -51,8 +78,7 @@ If `ROBOT_TYPE` is unset or unrecognized the recorder warns and falls back to
 
 `realsense2_camera_node` starts inside `om1_sensor` on every G1 whether or not
 a camera is attached, and logs `No RealSense devices were found!` when there is
-none. The topic still exists, is allowed through the Zenoh bridge, and is
-subscribed successfully — it simply never carries a message, which writes a
+none. The topic still exists and is subscribed successfully — it simply never carries a message, which writes a
 0-byte `depth_frames.bin` every session and leaves the `depth` heartbeat
 permanently broken.
 
@@ -68,8 +94,8 @@ The downward-facing view is the RealSense's colour image, and om1_sensor's
 `get_rtsp_camera_name`, which returns `"down_camera"`), so it is recorded like
 any other camera.
 
-The same image is also on Zenoh as
-`camera/realsense2_camera_node/color/image_raw`, but as raw rgb8: 305 KB a
+The same image is also on DDS as
+`rt/camera/realsense2_camera_node/color/image_raw`, but as raw rgb8: 305 KB a
 frame, 16.5 GB an hour. Re-encoding that here costs about 5x the RTSP stream
 (measured: JPEG q80 ~0.96 GB/h against 0.18 GB/h for the H.264 already being
 produced) for a picture the robot has encoded anyway. Record the stream.
@@ -82,7 +108,7 @@ It previously carried `rt/utlidar/cloud_deskewed` behind `EnablePointCloud:
 false` — a topic the Go2 does not publish, disabled but still written down,
 which read as "flip the switch and it records". The entry is gone. Setting
 `ENABLE_POINTCLOUD=true` on a Go2 now logs that no topic is configured instead
-of silently subscribing to nothing; supplying `POINTCLOUD_ZENOH_TOPIC` as well
+of silently subscribing to nothing; supplying `POINTCLOUD_DDS_TOPIC` as well
 enables it properly.
 
 ### Environment variables
@@ -102,25 +128,35 @@ Any of the following override the selected profile / defaults:
 - `DOWN_CAMERA_RTSP_URL` - Go2 down camera stream URL (default: `rtsp://localhost:8554/down_camera`)
 - `AUDIO_RTSP_URL` - Audio stream URL (default: `rtsp://localhost:8555/live` — audio track of the video-processor's muxed session stream, gst-direct)
 - `VIDEO_FEATURES_LOG` - Path to the video-processor's feature-log JSONL on a shared volume (default: empty — ingestion disabled)
-- `LIDAR_ZENOH_ENDPOINT` - Zenoh endpoint for lidar (default: `tcp/127.0.0.1:7447`)
-- `LIDAR_ZENOH_TOPIC` - Zenoh topic for lidar data (default: `scan`)
-- `POINTCLOUD_ZENOH_ENDPOINT` - Zenoh endpoint for point cloud (default: `tcp/127.0.0.1:7447`)
-- `POINTCLOUD_ZENOH_TOPIC` - Zenoh topic for point cloud data (default: `rt/utlidar/cloud_livox_mid360`)
-- `DEPTH_ZENOH_ENDPOINT` - Zenoh endpoint for depth (default: `tcp/127.0.0.1:7447`)
-- `DEPTH_ZENOH_TOPIC` - Zenoh topic for depth frames (default: `camera/realsense2_camera_node/depth/image_rect_raw`)
-- `ODOM_ZENOH_ENDPOINT` - Zenoh endpoint for odometry (default: `tcp/127.0.0.1:7447`)
-- `ODOM_ZENOH_TOPIC` - Zenoh topic for odometry data (default: `odom`)
-- `LOWSTATE_ZENOH_TOPIC` - Zenoh topic for lowstate (default: `rt/lowstate`)
+- `LIDAR_DDS_DOMAIN` - CycloneDDS domain ID for lidar (default: `0`)
+- `LIDAR_DDS_TOPIC` - DDS topic for lidar data (default: `rt/scan`)
+- `POINTCLOUD_DDS_DOMAIN` - CycloneDDS domain ID for point cloud (default: `0`)
+- `POINTCLOUD_DDS_TOPIC` - DDS topic for point cloud data (default: `rt/utlidar/cloud_livox_mid360`)
+- `DEPTH_DDS_DOMAIN` - CycloneDDS domain ID for depth (default: `0`)
+- `DEPTH_DDS_TOPIC` - DDS topic for depth frames (default: `rt/camera/realsense2_camera_node/depth/image_rect_raw`)
+- `ODOM_DDS_DOMAIN` - CycloneDDS domain ID for odometry (default: `0`)
+- `ODOM_DDS_TOPIC` - DDS topic for odometry data (default: `rt/odom`)
+- `LOWSTATE_DDS_DOMAIN` - CycloneDDS domain ID for lowstate (default: `0`)
+- `LOWSTATE_DDS_TOPIC` - DDS topic for lowstate data (default: `rt/lowstate`)
 - `RECORDINGS_DIR` - Base directory for recordings (default: `recordings`)
+
+CycloneDDS domain IDs (not endpoints/addresses) are how independent DDS
+"networks" on the same host/subnet are separated — leave at the default `0`
+unless the robot's network config uses a non-default domain. To reach the
+robot on a specific network interface, or a non-default domain, set
+`CYCLONEDDS_URI` per [CycloneDDS's config
+documentation](https://cyclonedds.io/docs/cyclonedds/latest/config/) rather
+than anything in this table — it's read directly by libddsc, not this
+recorder.
 
 ## Building
 
-Download the zenoh-c library and build the binary:
-
 ```bash
-make download-zenohc
 make build
 ```
+
+The first run builds CycloneDDS from source (see "Build prerequisites"
+above) — a few minutes; subsequent runs reuse the cached `.cyclonedds/install`.
 
 The binary will be created at `bin/om1-telemetry`.
 
@@ -139,14 +175,11 @@ FRONT_CAMERA_RAW_RTSP_URL="rtsp://localhost:8556/raw" \
 REAR_CAMERA_RAW_RTSP_URL="rtsp://localhost:8558/raw" \
 AUDIO_RTSP_URL="rtsp://localhost:8555/live" \
 VIDEO_FEATURES_LOG="/shared/video-processor/features.jsonl" \
-LIDAR_ZENOH_ENDPOINT="tcp/192.168.1.10:7447" \
-LIDAR_ZENOH_TOPIC="scan" \
-POINTCLOUD_ZENOH_ENDPOINT="tcp/192.168.1.10:7447" \
-POINTCLOUD_ZENOH_TOPIC="rt/utlidar/cloud_livox_mid360" \
-DEPTH_ZENOH_ENDPOINT="tcp/192.168.1.10:7447" \
-DEPTH_ZENOH_TOPIC="camera/realsense2_camera_node/depth/image_rect_raw" \
-ODOM_ZENOH_ENDPOINT="tcp/192.168.1.10:7447" \
-ODOM_ZENOH_TOPIC="odom" \
+LIDAR_DDS_TOPIC="rt/scan" \
+POINTCLOUD_DDS_TOPIC="rt/utlidar/cloud_livox_mid360" \
+DEPTH_DDS_TOPIC="rt/camera/realsense2_camera_node/depth/image_rect_raw" \
+ODOM_DDS_TOPIC="rt/odom" \
+LOWSTATE_DDS_TOPIC="rt/lowstate" \
 RECORDINGS_DIR="/path/to/recordings" \
 ./bin/om1-telemetry
 ```
@@ -291,11 +324,13 @@ this recorder received it, so the transport latency between them survives.
 ### Video features & precision time
 
 The recorder captures data on a common **UTC-nanosecond** clock so that
-`align_recording.py` can nearest-neighbour join every modality. The Zenoh
+`align_recording.py` can nearest-neighbour join every modality. The DDS
 streams (lidar, point cloud, depth, odometry, lowstate) carry a *source*
-timestamp — precise. The camera/audio streams, however, are anchored to the
-ffmpeg **record-start wall clock** plus each segment's PTS offset, so they are
-skewed from true capture by the RTSP/pipeline latency at connect time.
+timestamp — precise (CycloneDDS's `dds_sample_info_t.source_timestamp`,
+nanoseconds since the Unix epoch). The camera/audio streams, however, are
+anchored to the ffmpeg **record-start wall clock** plus each segment's PTS
+offset, so they are skewed from true capture by the RTSP/pipeline latency at
+connect time.
 
 To recover a *capture-accurate* video timeline, point `VIDEO_FEATURES_LOG` at
 the OM1 video-processor's feature-log JSONL. The video-processor stamps every
@@ -303,7 +338,7 @@ feature event (VVAD/speaking today; pose, recognition, etc. later) at
 frame-capture on its shared `CLOCK_MONOTONIC`, and writes a monotonic→UTC
 mapping in a header record. This recorder tails that file and emits
 `video_features_timestamps.csv` keyed to **true capture UTC time** — directly
-comparable to the source-stamped Zenoh streams, without relying on fragile A/V
+comparable to the source-stamped DDS streams, without relying on fragile A/V
 stream synchronisation.
 
 Deployment requirement: the feature log is written *inside* the video-processor
