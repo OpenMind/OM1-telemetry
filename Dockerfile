@@ -1,6 +1,6 @@
 FROM golang:1.25-alpine AS builder
 
-RUN apk add --no-cache git gcc g++ musl-dev cmake make linux-headers
+RUN apk add --no-cache git gcc g++ musl-dev cmake make linux-headers pkgconfig
 
 WORKDIR /app
 
