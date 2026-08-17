@@ -13,10 +13,11 @@ services:
       - ROBOT_TYPE=${ROBOT_TYPE:-g1}
     volumes:
       - /home/openmind/om1/om1_telemetry/recordings:/app/recordings
+      # Lets the recorder tell a synchronized clock from a stale one. Without
+      # this it cannot, and a robot that boots offline names its session folder
+      # from a clock that may be days behind -- then keeps that name after NTP
+      # corrects the clock. See internal/clock.
       - /run/systemd/timesync:/run/systemd/timesync:ro
-      # Optional: mount a robots.yaml here and set ROBOT_PROFILES_FILE to
-      # change what is recorded without rebuilding the image.
-      # - ./config/robots.yaml:/app/robots.yaml:ro
     logging:
       driver: "json-file"
       options:
