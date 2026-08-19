@@ -146,6 +146,8 @@ Any of the following override the selected profile / defaults:
 - `DELETE_AFTER_UPLOAD` - Delete a session's local files once it has uploaded successfully (default: `false` — keep everything locally regardless of upload)
 - `UPLOAD_MULTIPART_THRESHOLD_BYTES` - Files at or above this size go through S3 multipart upload instead of a single presigned POST (default: `104857600`, 100 MiB)
 - `UPLOAD_PART_SIZE_BYTES` - Chunk size for multipart uploads (default: `16777216`, 16 MiB)
+- `RETENTION_MAX_BYTES` - Cap on `RECORDINGS_DIR`'s total size; once exceeded, already-uploaded sessions are deleted oldest first until it isn't (default: `107374182400`, 100 GiB; `0` disables cap enforcement — see "Retention & the catch-up/cap sweep" below)
+- `RETENTION_SWEEP_INTERVAL` - How often the retention sweep looks for finished-but-not-yet-uploaded sessions and, if over the cap, deletes uploaded ones (default: `5m`)
 
 CycloneDDS domain IDs (not endpoints/addresses) are how independent DDS
 "networks" on the same host/subnet are separated — leave at the default `0`
@@ -414,6 +416,31 @@ the process dies mid-write, a property a single JSON document doesn't have.
 But openmind-api's S3 bucket policy only allows a fixed extension
 whitelist that doesn't include `.jsonl`, so the now-static log gets
 converted to one real JSON document right before it's uploaded.
+
+### Retention & the catch-up/cap sweep
+
+The rotation and shutdown upload paths above only ever handle the one
+segment that just closed, and never retry it if that upload fails — a robot
+that's offline for an hour, or a run that crashes mid-upload, would
+otherwise leave that data stuck locally forever. `cmd/main/retention.go`
+runs a separate sweep, every `RETENTION_SWEEP_INTERVAL`, that:
+
+1. Walks every closed session directory, oldest first, and uploads any that
+   were never confirmed uploaded — the same idempotent `UploadSession` call
+   rotation uses, so a partially-uploaded segment resumes rather than
+   duplicating. A directory is marked uploaded (a `.uploaded` file inside
+   it, never itself uploaded) only after that call succeeds.
+2. If `RECORDINGS_DIR`'s total size is still over `RETENTION_MAX_BYTES`
+   afterward, deletes already-uploaded directories, oldest first, until it
+   isn't.
+
+It never touches the session currently being recorded to, or whichever
+segment still physically holds the live `clock_timebase.jsonl` journal (see
+"Interaction with clock trust" below) — and it never deletes a directory
+that isn't confirmed uploaded, even if that means staying over the cap:
+losing data no copy exists of yet is treated as worse than a full disk. The
+sweep is a no-op when upload isn't configured (`RETENTION_MAX_BYTES` alone
+can't reclaim space without somewhere to send the data first).
 
 ### Interaction with clock trust
 

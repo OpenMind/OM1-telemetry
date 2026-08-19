@@ -308,6 +308,28 @@ func TestUploadSession_alreadyCompleteShortCircuits(t *testing.T) {
 	require.Empty(t, api.sessions, "should not have created a new session for one already complete")
 }
 
+func TestUploadSession_skipsDotfiles(t *testing.T) {
+	api, apiSrv, _ := newFakeAPI(t)
+
+	dir := t.TempDir()
+	writeFile(t, dir, "meta.json", []byte(`{"ok":true}`))
+	writeFile(t, dir, ".uploaded", []byte("2026-08-19T00:00:00Z\n"))
+
+	c := New(Config{BaseURL: apiSrv.URL, APIKey: "test-key"})
+	err := c.UploadSession(context.Background(), dir, "recordings/dotfiles", time.Now(), Options{})
+	require.NoError(t, err)
+
+	api.mu.Lock()
+	defer api.mu.Unlock()
+	require.Len(t, api.sessions, 1)
+	for _, sess := range api.sessions {
+		_, gotDotfile := sess.uploaded[".uploaded"]
+		require.False(t, gotDotfile, "a retention marker living alongside session files must never be uploaded")
+		_, gotMeta := sess.uploaded["meta.json"]
+		require.True(t, gotMeta)
+	}
+}
+
 func TestUploadSession_emptyDirIsANoop(t *testing.T) {
 	api, apiSrv, _ := newFakeAPI(t)
 	dir := t.TempDir()

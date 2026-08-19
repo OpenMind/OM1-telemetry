@@ -18,6 +18,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"time"
 )
 
@@ -405,7 +406,9 @@ func (c *Client) doJSON(ctx context.Context, method, path string, body, out any)
 
 // regularFiles lists the plain files directly under dir, sorted for
 // deterministic upload order. Sub-directories (none expected in a session
-// dir today) are skipped rather than recursed into.
+// dir today) are skipped rather than recursed into, as are dotfiles -- e.g.
+// cmd/main's retention-sweep upload marker, which lives alongside a
+// session's real files but must never be sent to the API itself.
 func regularFiles(dir string) ([]string, error) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
@@ -413,7 +416,7 @@ func regularFiles(dir string) ([]string, error) {
 	}
 	names := make([]string, 0, len(entries))
 	for _, e := range entries {
-		if e.IsDir() {
+		if e.IsDir() || strings.HasPrefix(e.Name(), ".") {
 			continue
 		}
 		names = append(names, e.Name())

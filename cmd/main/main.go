@@ -104,6 +104,18 @@ func main() {
 		slog.Warn("upload enabled but OPENMIND_API_URL / OPENMIND_API_KEY not both set; recording locally only")
 	}
 
+	// The catch-up-upload / disk-cap sweep is independent of session
+	// rotation: it retries segments the rotation/shutdown upload paths gave
+	// up on, and reclaims space once RecordingsDir grows past
+	// cfg.Retention.MaxBytes. currentDir is read fresh on every tick, since
+	// rotation (below) moves current for as long as the process runs.
+	sweepCtx, sweepCancel := context.WithCancel(context.Background())
+	go runRetentionSweeps(sweepCtx, uploader, recordingsDir, bootTimebasePath, func() string {
+		currentMu.Lock()
+		defer currentMu.Unlock()
+		return current.RealDir()
+	}, cfg.Retention)
+
 	rs := startRecorders(cfg, mon, videoHeartbeatNames)
 
 	videoURLs := make([]string, 0, len(cfg.Video))
@@ -196,6 +208,7 @@ loop:
 	slog.Info("shutting down…")
 
 	hbCancel()
+	sweepCancel()
 	rs.Stop()
 	if err := sess.Close(); err != nil {
 		slog.Warn("could not finalize session metadata", "dir", sess.RealDir(), "err", err)
@@ -237,6 +250,7 @@ func uploadSession(client *upload.Client, dir, sessionDir string, startedAt time
 		return
 	}
 	slog.Info("session uploaded", "dir", dir, "session_dir", sessionDir)
+	markUploaded(dir)
 
 	if deleteAfter && opts.PreserveJSONL == "" {
 		if err := os.RemoveAll(dir); err != nil {

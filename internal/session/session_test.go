@@ -366,3 +366,42 @@ func TestPromote_datesFromThisSessionsOwnStart(t *testing.T) {
 	gotStart := time.Unix(0, m.SessionStartUnixNs)
 	require.WithinDuration(t, time.Now(), gotStart, 2*time.Second)
 }
+
+func TestListClosed_returnsDatedDirsOldestFirst(t *testing.T) {
+	root := t.TempDir()
+	mkSessionDir(t, root, "2026-08-14", "2026-08-14_20-36-00")
+	mkSessionDir(t, root, "2026-08-17", "2026-08-17_09-00-00")
+	mkSessionDir(t, root, "2026-08-17", "2026-08-17_18-36-00")
+
+	got, err := ListClosed(root)
+	require.NoError(t, err)
+	require.Equal(t, []string{
+		filepath.Join(root, "2026-08-14", "2026-08-14_20-36-00"),
+		filepath.Join(root, "2026-08-17", "2026-08-17_09-00-00"),
+		filepath.Join(root, "2026-08-17", "2026-08-17_18-36-00"),
+	}, got)
+}
+
+func TestListClosed_skipsPendingAndCurrentLink(t *testing.T) {
+	root := t.TempDir()
+	mkSessionDir(t, root, "2026-08-17", "2026-08-17_18-36-00")
+	require.NoError(t, os.MkdirAll(filepath.Join(root, PendingDirName, "boot123_000000000042"), 0o755))
+	require.NoError(t, os.Symlink(
+		filepath.Join(root, PendingDirName, "boot123_000000000042"),
+		filepath.Join(root, CurrentLinkName)))
+
+	got, err := ListClosed(root)
+	require.NoError(t, err)
+	require.Equal(t, []string{filepath.Join(root, "2026-08-17", "2026-08-17_18-36-00")}, got)
+}
+
+func TestListClosed_missingRootIsEmptyNotError(t *testing.T) {
+	got, err := ListClosed(filepath.Join(t.TempDir(), "does-not-exist"))
+	require.NoError(t, err)
+	require.Empty(t, got)
+}
+
+func mkSessionDir(t *testing.T, root, date, name string) {
+	t.Helper()
+	require.NoError(t, os.MkdirAll(filepath.Join(root, date, name), 0o755))
+}

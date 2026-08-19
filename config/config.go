@@ -43,6 +43,24 @@ type Config struct {
 	// rotation -- one session for the life of the process, as before.
 	SessionRotateInterval time.Duration
 	Upload                UploadConfig
+	Retention             RetentionConfig
+}
+
+// RetentionConfig bounds how much local disk RecordingsDir may occupy, and
+// how often the catch-up-upload / disk-cap sweep runs (see cmd/main's
+// retentionSweep). It exists alongside per-segment upload because that path
+// only ever handles the segment that just rotated or the process's final
+// segment -- it does not retry a segment whose upload failed, nor reclaim
+// space once a robot has been recording for a long time.
+type RetentionConfig struct {
+	// MaxBytes is the ceiling for RecordingsDir's total size once already-
+	// uploaded sessions become eligible for deletion. Zero disables cap
+	// enforcement (the catch-up upload sweep still runs).
+	MaxBytes int64
+	// SweepInterval is how often the sweep looks for finished-but-not-yet-
+	// uploaded sessions (uploading the oldest first) and, if MaxBytes is
+	// exceeded, deletes already-uploaded sessions, oldest first.
+	SweepInterval time.Duration
 }
 
 // UploadConfig configures uploading finished session directories to the
@@ -234,6 +252,10 @@ func Load(sessionDir string) Config {
 			DeleteAfterUpload:  envBool("DELETE_AFTER_UPLOAD", false),
 			MultipartThreshold: envInt64("UPLOAD_MULTIPART_THRESHOLD_BYTES", upload.DefaultMultipartThreshold),
 			PartSize:           envInt64("UPLOAD_PART_SIZE_BYTES", upload.DefaultPartSize),
+		},
+		Retention: RetentionConfig{
+			MaxBytes:      envInt64("RETENTION_MAX_BYTES", 100*1024*1024*1024),
+			SweepInterval: envDuration("RETENTION_SWEEP_INTERVAL", 5*time.Minute),
 		},
 	}
 }

@@ -1,0 +1,189 @@
+package main
+
+import (
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"sync"
+	"testing"
+
+	"github.com/stretchr/testify/require"
+
+	"om1-telemetry/internal/upload"
+)
+
+func writeFile(t *testing.T, dir, name string, data []byte) {
+	t.Helper()
+	require.NoError(t, os.MkdirAll(dir, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, name), data, 0o644))
+}
+
+func TestMarkUploaded_isUploadedRoundTrip(t *testing.T) {
+	dir := t.TempDir()
+	require.False(t, isUploaded(dir))
+
+	markUploaded(dir)
+	require.True(t, isUploaded(dir))
+}
+
+func TestDirSize_sumsFilesRecursively(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, dir, "a.bin", make([]byte, 10))
+	writeFile(t, filepath.Join(dir, "sub"), "b.bin", make([]byte, 5))
+
+	got, err := dirSize(dir)
+	require.NoError(t, err)
+	require.EqualValues(t, 15, got)
+}
+
+func TestEnforceRetentionCap_deletesOldestUploadedFirstUntilUnderCap(t *testing.T) {
+	root := t.TempDir()
+	oldest := filepath.Join(root, "2026-08-14", "2026-08-14_00-00-00")
+	middle := filepath.Join(root, "2026-08-15", "2026-08-15_00-00-00")
+	newest := filepath.Join(root, "2026-08-16", "2026-08-16_00-00-00")
+
+	writeFile(t, oldest, "a.bin", make([]byte, 100))
+	markUploaded(oldest)
+	writeFile(t, middle, "b.bin", make([]byte, 100))
+	markUploaded(middle)
+	writeFile(t, newest, "c.bin", make([]byte, 100))
+	markUploaded(newest)
+
+	// Exactly enough room for middle+newest, so deleting just oldest must
+	// satisfy the cap -- computed rather than hand-counted so the marker
+	// file's own (small, incidental) size can't throw the arithmetic off.
+	middleSize, err := dirSize(middle)
+	require.NoError(t, err)
+	newestSize, err := dirSize(newest)
+	require.NoError(t, err)
+
+	enforceRetentionCap(root, []string{oldest, middle, newest}, func(string) bool { return false }, middleSize+newestSize)
+
+	require.NoDirExists(t, oldest, "oldest uploaded dir must go first to free space")
+	require.DirExists(t, middle, "stops as soon as the cap is satisfied")
+	require.DirExists(t, newest)
+}
+
+func TestEnforceRetentionCap_neverDeletesUnuploadedOrProtected(t *testing.T) {
+	root := t.TempDir()
+	notUploaded := filepath.Join(root, "2026-08-14", "2026-08-14_00-00-00")
+	protectedDir := filepath.Join(root, "2026-08-15", "2026-08-15_00-00-00")
+
+	writeFile(t, notUploaded, "a.bin", make([]byte, 200))
+	// deliberately not marked uploaded
+	writeFile(t, protectedDir, "b.bin", make([]byte, 200))
+	markUploaded(protectedDir)
+
+	enforceRetentionCap(root, []string{notUploaded, protectedDir},
+		func(dir string) bool { return dir == protectedDir }, 10)
+
+	require.DirExists(t, notUploaded, "must never delete data with no confirmed upload")
+	require.DirExists(t, protectedDir, "must never delete a directory the caller marked protected")
+}
+
+func TestEnforceRetentionCap_zeroMaxBytesDisablesEnforcement(t *testing.T) {
+	root := t.TempDir()
+	dir := filepath.Join(root, "2026-08-14", "2026-08-14_00-00-00")
+	writeFile(t, dir, "a.bin", make([]byte, 1000))
+	markUploaded(dir)
+
+	enforceRetentionCap(root, []string{dir}, func(string) bool { return false }, 0)
+
+	require.DirExists(t, dir)
+}
+
+func TestRetentionSweep_nilUploaderIsANoop(t *testing.T) {
+	root := t.TempDir()
+	dir := filepath.Join(root, "2026-08-14", "2026-08-14_00-00-00")
+	writeFile(t, dir, "a.bin", []byte("data"))
+
+	retentionSweep(nil, root, filepath.Join(root, "boot_timebase.jsonl"), "", 100)
+
+	require.False(t, isUploaded(dir))
+	require.DirExists(t, dir)
+}
+
+// minimalFakeAPI is a smaller stand-in than internal/upload's own test fake:
+// just enough of the openmind-api surface for a small, single-file session
+// upload to succeed, so retentionSweep's catch-up/cap-enforcement behavior
+// can be exercised end to end without duplicating internal/upload's whole
+// suite here.
+type minimalFakeAPI struct {
+	mu          sync.Mutex
+	createCalls map[string]int // session_dir -> number of "create session" calls
+}
+
+func newMinimalFakeAPI(t *testing.T) (*minimalFakeAPI, string) {
+	api := &minimalFakeAPI{createCalls: map[string]int{}}
+	mux := http.NewServeMux()
+
+	var s3URL string
+	mux.HandleFunc("/data/collection/sessions", func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			SessionDir string `json:"session_dir"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&body)
+
+		api.mu.Lock()
+		api.createCalls[body.SessionDir]++
+		api.mu.Unlock()
+
+		w.WriteHeader(http.StatusCreated)
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"session_id": "sess-" + body.SessionDir,
+			"s3_prefix":  "prefix/",
+			"status":     "uploading",
+			"upload": map[string]any{
+				"url":    s3URL + "/",
+				"fields": map[string]string{},
+			},
+		})
+	})
+	mux.HandleFunc("/data/collection/sessions/", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(map[string]string{"message": "ok"})
+	})
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	})
+
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+	s3URL = srv.URL
+	return api, srv.URL
+}
+
+func TestRetentionSweep_uploadsOldestUnmarkedFirstAndSkipsProtectedAndAlreadyUploaded(t *testing.T) {
+	api, apiURL := newMinimalFakeAPI(t)
+	client := upload.New(upload.Config{BaseURL: apiURL, APIKey: "k"})
+
+	root := t.TempDir()
+	oldest := filepath.Join(root, "2026-08-14", "2026-08-14_00-00-00")
+	alreadyDone := filepath.Join(root, "2026-08-15", "2026-08-15_00-00-00")
+	live := filepath.Join(root, "2026-08-16", "2026-08-16_00-00-00")
+
+	writeFile(t, oldest, "meta.json", []byte(`{}`))
+	writeFile(t, alreadyDone, "meta.json", []byte(`{}`))
+	markUploaded(alreadyDone)
+	writeFile(t, live, "meta.json", []byte(`{}`))
+
+	bootTimebasePath := filepath.Join(root, "does-not-exist.jsonl") // no boot session protection in play
+
+	retentionSweep(client, root, bootTimebasePath, live, 0)
+
+	require.True(t, isUploaded(oldest), "the oldest not-yet-uploaded closed dir must get uploaded")
+	require.False(t, isUploaded(live), "the currently-open session must never be swept")
+
+	api.mu.Lock()
+	defer api.mu.Unlock()
+	require.Equal(t, 1, api.createCalls[apiSessionDir(root, oldest)])
+	require.Zero(t, api.createCalls[apiSessionDir(root, alreadyDone)],
+		"a session already marked uploaded must not be re-uploaded")
+	require.Zero(t, api.createCalls[apiSessionDir(root, live)])
+}

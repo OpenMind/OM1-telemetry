@@ -479,3 +479,45 @@ func SortedNames(dirs []string) []string {
 	sort.Strings(out)
 	return out
 }
+
+// ListClosed returns every dated session directory under root
+// (root/YYYY-MM-DD/YYYY-MM-DD_HH-MM-SS[_N]), oldest first -- the set of
+// segments that have a real date and are therefore candidates for upload and
+// retention sweeps. PendingDirName and CurrentLinkName are skipped: a
+// pending session has no true date yet, and only Janitor (or a later
+// successful sync) knows what to do with it.
+//
+// The date and session-timestamp layouts are both fixed-width and
+// zero-padded, so sorting the joined paths lexically also sorts them
+// chronologically -- the same property SortedNames relies on.
+func ListClosed(root string) ([]string, error) {
+	dateEntries, err := os.ReadDir(root)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, err
+	}
+
+	var dirs []string
+	for _, de := range dateEntries {
+		if !de.IsDir() {
+			continue
+		}
+		if _, err := time.Parse(dateLayout, de.Name()); err != nil {
+			continue // e.g. "pending" -- not a date directory
+		}
+		dateDir := filepath.Join(root, de.Name())
+		sessionEntries, err := os.ReadDir(dateDir)
+		if err != nil {
+			continue
+		}
+		for _, se := range sessionEntries {
+			if se.IsDir() {
+				dirs = append(dirs, filepath.Join(dateDir, se.Name()))
+			}
+		}
+	}
+	sort.Strings(dirs)
+	return dirs, nil
+}
