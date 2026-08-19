@@ -86,7 +86,8 @@ type sessionResp struct {
 	Upload    *presignedPOST `json:"upload"`
 }
 
-// UploadSession uploads every regular file directly under localDir to the
+// UploadSession runs the preprocess pipeline over localDir (see
+// preprocess.go), then uploads every regular file directly under it to the
 // openmind-api under sessionDir (grouping key the API records against the
 // session; see CreateDataCollectionSession's session_dir), then marks the
 // session complete. startedAt should be the session's own start time, not
@@ -100,6 +101,10 @@ type sessionResp struct {
 func (c *Client) UploadSession(ctx context.Context, localDir, sessionDir string, startedAt time.Time) error {
 	if !c.cfg.Ready() {
 		return errors.New("upload: not configured (base URL / API key unset)")
+	}
+
+	if err := preprocess(localDir); err != nil {
+		return fmt.Errorf("upload: %w", err)
 	}
 
 	files, err := regularFiles(localDir)

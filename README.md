@@ -393,6 +393,28 @@ happens (segmenting the recording locally) but nothing is uploaded --
 additionally requires both to be set, and the recorder logs a warning once
 at startup if it's on but not fully configured.
 
+### Preprocessing before upload
+
+`internal/upload/preprocess.go` runs a small, fixed pipeline over a
+segment's directory once it's closed and just before its files are
+uploaded — this is the one point where the whole segment is known to be
+final and static, so it's where any transform that needs the finished
+segment (not the live, still-being-written one) belongs. Steps run in a
+list (`preprocessSteps`) and must each be idempotent, since a failed upload
+leaves the segment on disk for a later retry that re-runs the same pipeline.
+Add new steps here as more preprocessing is needed.
+
+The only step today, `convertJSONLToJSON`, rewrites every `*.jsonl` file
+(`clock_timebase.jsonl`, and `video_features.jsonl` if enabled) into a
+same-named `*.json` holding a single JSON array of its records, then
+removes the `.jsonl`. Recording itself keeps writing JSONL — it's an
+append-only log, written incrementally and in the features case while it's
+being tailed live, so it needs every completed line to stay valid even if
+the process dies mid-write, a property a single JSON document doesn't have.
+But openmind-api's S3 bucket policy only allows a fixed extension
+whitelist that doesn't include `.jsonl`, so the now-static log gets
+converted to one real JSON document right before it's uploaded.
+
 ### Interaction with clock trust
 
 Each rotated segment is dated (or left in `pending/`) the same way the very
