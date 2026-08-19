@@ -139,6 +139,13 @@ Any of the following override the selected profile / defaults:
 - `LOWSTATE_DDS_DOMAIN` - CycloneDDS domain ID for lowstate (default: `0`)
 - `LOWSTATE_DDS_TOPIC` - DDS topic for lowstate data (default: `rt/lowstate`)
 - `RECORDINGS_DIR` - Base directory for recordings (default: `recordings`)
+- `SESSION_ROTATE_INTERVAL` - Close the current session and open a fresh one on this cadence, so each segment can be uploaded without waiting for the whole run to end (default: `5m`; `0` disables rotation — one session for the life of the process, as before this feature existed)
+- `UPLOAD_ENABLED` - Upload each rotated-away session to the openmind-api (default: `true`; actual uploading additionally requires `OPENMIND_API_URL` and `OPENMIND_API_KEY` — see "Cloud upload" below)
+- `OPENMIND_API_URL` - Base URL of the openmind-api, e.g. `https://<host>/api/core/v1` (default: empty — upload stays off, recording-only, until this is set)
+- `OPENMIND_API_KEY` - API key sent as `Authorization: Bearer <key>` (default: empty)
+- `DELETE_AFTER_UPLOAD` - Delete a session's local files once it has uploaded successfully (default: `false` — keep everything locally regardless of upload)
+- `UPLOAD_MULTIPART_THRESHOLD_BYTES` - Files at or above this size go through S3 multipart upload instead of a single presigned POST (default: `104857600`, 100 MiB)
+- `UPLOAD_PART_SIZE_BYTES` - Chunk size for multipart uploads (default: `16777216`, 16 MiB)
 
 CycloneDDS domain IDs (not endpoints/addresses) are how independent DDS
 "networks" on the same host/subnet are separated — leave at the default `0`
@@ -192,7 +199,7 @@ Each recording session creates a timestamped directory structure:
 recordings/
 └── 2026-05-15/
     └── 2026-05-15_14-30-00/
-        ├── meta.json                  # Session metadata (start time, boot id, clock state)
+        ├── meta.json                  # Session metadata (start/end time, boot id, clock state)
         ├── clock_timebase.jsonl       # Monotonic<->UTC journal; see "Recording without a clock"
         ├── front_camera_raw.mp4       # G1: front pre-CV camera recording
         ├── rear_camera_raw.mp4        # G1: rear pre-CV camera recording
@@ -354,6 +361,56 @@ a few ms — the camera recorder would need to read per-frame capture time from
 RTP/RTCP sender reports (e.g. via a `gortsplib`-based client) instead of the
 ffmpeg record-start anchor. That is a larger change and is intentionally not
 done here; the feature-log timeline covers the common case.
+
+## Session rotation & cloud upload
+
+By default (`SESSION_ROTATE_INTERVAL=5m`) the recorder does not run one
+session for its whole lifetime: every 5 minutes it stops all streams, closes
+the current session, and opens a fresh one, so each 5-minute segment can be
+uploaded independently instead of waiting for the whole run (which, for a
+long-lived robot process, would mean never). Recording resumes within
+roughly a second — ffmpeg/DDS reconnect as part of opening the next segment's
+streams; there is a small gap in each stream at every rotation boundary, not
+a seamless splice.
+
+Set `OPENMIND_API_URL` and `OPENMIND_API_KEY` to upload each rotated-away
+segment to the [openmind-api](https://github.com/OpenMind/openmind-api)'s
+data-collection endpoints (`internal/handlers/data_collection_upload.go`
+there) once it closes — a presigned S3 POST for ordinary files, true S3
+multipart upload for anything at or above `UPLOAD_MULTIPART_THRESHOLD_BYTES`.
+Uploading is best-effort and runs in the background while the next segment
+records: a failed upload marks the session `failed` server-side and leaves
+the local files untouched, so a later run — the openmind-api resumes an
+upload against the same `session_dir` instead of duplicating it — or a
+manual retry can pick it back up. `DELETE_AFTER_UPLOAD=true` removes a
+segment's local files once (and only once) its upload has actually
+succeeded; it stays off by default; a robot's disk is cheap compared to
+losing data to a bug in a new upload path.
+
+Without both `OPENMIND_API_URL` and `OPENMIND_API_KEY` set, rotation still
+happens (segmenting the recording locally) but nothing is uploaded --
+`UPLOAD_ENABLED` (default `true`) is the operator's intent, actual uploading
+additionally requires both to be set, and the recorder logs a warning once
+at startup if it's on but not fully configured.
+
+### Interaction with clock trust
+
+Each rotated segment is dated (or left in `pending/`) the same way the very
+first session is -- see "Recording without a clock" above -- based on the
+clock's *current* sync state, not the state at process boot: once NTP has
+synchronized, every later segment is dated directly even on a run that
+booted offline. Only the segment that is actually live at the moment the
+clock synchronizes gets promoted out of `pending/`; an earlier segment
+rotated away before that moment stays undated, on purpose, for the same
+reason a `pending/` session from a boot that was never online stays undated
+(see above): its monotonic timeline has nothing to anchor it to UTC.
+
+`clock_timebase.jsonl` is a single, boot-relative journal (one clock, one
+set of step/sync events for the whole process), not a per-segment one -- it
+physically lives in the first session's directory. Every later segment gets
+its own copy of it (a snapshot taken when that segment closes), so each
+segment's directory stays self-contained for `align_recording.py` /
+`fix_session_time.py` without needing the boot session alongside it.
 
 ## Testing
 

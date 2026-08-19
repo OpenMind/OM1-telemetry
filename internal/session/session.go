@@ -39,12 +39,23 @@ type Session struct {
 	root string
 	clk  *clock.Clock
 
+	// startWallNs/startMonoNs are sampled once, when this session is opened --
+	// not the process's clock.Start* (process-wide, boot-relative), so that a
+	// session opened later by OpenNext (session rotation) is dated and
+	// promoted from when *it* began, not from when the process booted.
+	startWallNs int64
+	startMonoNs int64
+	syncAtStart clock.SyncState
+
 	mu        sync.Mutex
 	robotType string
 	realDir   string // where the files actually are
 	dir       string // what recorders were handed; a symlink while pending
 	pending   bool
 	promoted  bool
+	closed    bool
+	endWallNs int64
+	endMonoNs int64
 }
 
 // Meta is the session's meta.json.
@@ -62,16 +73,45 @@ type Meta struct {
 	// meaning SessionStartUnixNs was recomputed from the monotonic timeline.
 	StartTimeCorrected bool   `json:"start_time_corrected,omitempty"`
 	PromotedFrom       string `json:"promoted_from,omitempty"`
+	// SessionEndUnixNs/SessionEndMonoNs are set once Close is called (e.g. on
+	// rotation to the next segment, or on shutdown), so a downstream tool
+	// knows the segment's true duration without needing the next segment's
+	// start.
+	SessionEndUnixNs int64 `json:"session_end_unix_ns,omitempty"`
+	SessionEndMonoNs int64 `json:"session_end_mono_ns,omitempty"`
 }
 
 // Open creates the session directory. When the clock is trusted this is the
 // familiar root/YYYY-MM-DD/YYYY-MM-DD_HH-MM-SS and no symlink is involved --
 // identical to the behaviour before this package existed.
 func Open(root string, clk *clock.Clock) (*Session, error) {
-	s := &Session{root: root, clk: clk}
+	return open(root, clk, clk.StartSync())
+}
 
-	if clk.StartSync().Trusted() {
-		start := time.Unix(0, clk.StartWallNs())
+// OpenNext creates the next session directory when rotating an
+// already-running recorder to a fresh segment. sync should reflect the
+// clock's *current* sync state (clock.Watcher.SyncState), not clk.StartSync
+// -- once the clock has synchronized, every later segment can be dated
+// directly even though the process itself booted untrusted.
+//
+// A segment opened while still untrusted is dated the same way the boot
+// session is: it stays in pending/ until promoted. Only the segment that is
+// "current" at the moment the clock synchronizes gets promoted (see
+// Session.Promote / the clock.Watcher callback in cmd/main) -- an earlier
+// rotated-away segment from the same offline boot is left undated, on
+// purpose: its monotonic timeline has nothing to anchor it to UTC, and this
+// recorder's philosophy throughout is that an honestly-undated segment beats
+// an invented date.
+func OpenNext(root string, clk *clock.Clock, sync clock.SyncState) (*Session, error) {
+	return open(root, clk, sync)
+}
+
+func open(root string, clk *clock.Clock, sync clock.SyncState) (*Session, error) {
+	wallNs, monoNs := clk.Now()
+	s := &Session{root: root, clk: clk, startWallNs: wallNs, startMonoNs: monoNs, syncAtStart: sync}
+
+	if sync.Trusted() {
+		start := time.Unix(0, wallNs)
 		s.realDir = datedDir(root, start)
 		s.dir = s.realDir
 		if err := os.MkdirAll(s.realDir, 0o755); err != nil {
@@ -83,10 +123,14 @@ func Open(root string, clk *clock.Clock) (*Session, error) {
 		return s, nil
 	}
 
-	// Untrusted: name the directory from things that are true anyway.
+	// Untrusted: name the directory from things that are true anyway. monoNs
+	// (not clk.StartMonoNs, which is fixed for the whole process) keeps this
+	// unique across repeated calls in the same run, e.g. when rotation opens
+	// several segments before the clock ever synchronizes -- uniqueDir is the
+	// backstop for two calls landing in the same millisecond.
 	s.pending = true
-	name := fmt.Sprintf("%s_%012d", clk.ShortBootID(), clk.StartMonoNs()/int64(time.Millisecond))
-	s.realDir = filepath.Join(root, PendingDirName, name)
+	name := fmt.Sprintf("%s_%012d", clk.ShortBootID(), monoNs/int64(time.Millisecond))
+	s.realDir = uniqueDir(filepath.Join(root, PendingDirName, name))
 	if err := os.MkdirAll(s.realDir, 0o755); err != nil {
 		return nil, fmt.Errorf("create pending session dir: %w", err)
 	}
@@ -151,9 +195,14 @@ func (s *Session) Promote() error {
 		return nil
 	}
 	from := s.realDir
+	startMonoNs := s.startMonoNs
 	s.mu.Unlock()
 
-	trueStart := time.Unix(0, s.clk.StartWallNsNow())
+	// Carry the now-correct wall clock back along *this session's* monotonic
+	// timeline -- not the process's (clk.StartWallNsNow), which would date a
+	// rotated-in segment as if it began at process boot.
+	wallNow, monoNow := s.clk.Now()
+	trueStart := time.Unix(0, wallNow-(monoNow-startMonoNs))
 	to := datedDir(s.root, trueStart)
 
 	if err := os.MkdirAll(filepath.Dir(to), 0o755); err != nil {
@@ -192,12 +241,16 @@ func (s *Session) Promote() error {
 func (s *Session) writeMeta() error {
 	m := Meta{
 		SessionDir:            s.realDir,
-		SessionStartUnixNs:    s.clk.StartWallNs(),
-		SessionStartMonoNs:    s.clk.StartMonoNs(),
+		SessionStartUnixNs:    s.startWallNs,
+		SessionStartMonoNs:    s.startMonoNs,
 		BootID:                s.clk.BootID(),
-		ClockSyncStateAtStart: s.clk.StartSync().String(),
-		ClockTrustedAtStart:   s.clk.StartSync().Trusted(),
+		ClockSyncStateAtStart: s.syncAtStart.String(),
+		ClockTrustedAtStart:   s.syncAtStart.Trusted(),
 		RobotType:             s.robotType,
+	}
+	if s.closed {
+		m.SessionEndUnixNs = s.endWallNs
+		m.SessionEndMonoNs = s.endMonoNs
 	}
 	return writeMetaTo(s.Dir(), m)
 }
@@ -213,17 +266,42 @@ func (s *Session) SetRobotType(rt string) {
 	}
 }
 
+// StartUnixNs is the wall clock recorded when this session was opened --
+// wrong if the clock was untrusted at the time (see Promote).
+func (s *Session) StartUnixNs() int64 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.startWallNs
+}
+
+// Close marks the session finished -- e.g. when rotating to the next
+// segment, or on final shutdown -- and records the end time in meta.json, so
+// a downstream tool knows the segment's true duration.
+func (s *Session) Close() error {
+	wallNs, monoNs := s.clk.Now()
+	s.mu.Lock()
+	s.closed = true
+	s.endWallNs = wallNs
+	s.endMonoNs = monoNs
+	s.mu.Unlock()
+	return s.writeMeta()
+}
+
 func (s *Session) writeMetaCorrected(trueStart time.Time, from string) error {
 	m := Meta{
 		SessionDir:            s.RealDir(),
 		SessionStartUnixNs:    trueStart.UnixNano(),
-		SessionStartMonoNs:    s.clk.StartMonoNs(),
+		SessionStartMonoNs:    s.startMonoNs,
 		BootID:                s.clk.BootID(),
-		ClockSyncStateAtStart: s.clk.StartSync().String(),
-		ClockTrustedAtStart:   s.clk.StartSync().Trusted(),
+		ClockSyncStateAtStart: s.syncAtStart.String(),
+		ClockTrustedAtStart:   s.syncAtStart.Trusted(),
 		RobotType:             s.robotType,
 		StartTimeCorrected:    true,
 		PromotedFrom:          filepath.Base(from),
+	}
+	if s.closed {
+		m.SessionEndUnixNs = s.endWallNs
+		m.SessionEndMonoNs = s.endMonoNs
 	}
 	return writeMetaTo(s.Dir(), m)
 }

@@ -15,6 +15,7 @@ import (
 	"om1-telemetry/internal/network"
 	"om1-telemetry/internal/odom"
 	"om1-telemetry/internal/pointcloud"
+	"om1-telemetry/internal/upload"
 	"om1-telemetry/internal/video"
 )
 
@@ -36,6 +37,43 @@ type Config struct {
 	Odom             OdomConfig
 	Lowstate         LowstateConfig
 	Network          NetworkConfig
+	// SessionRotateInterval, when positive, closes the current session and
+	// opens a fresh one on this cadence, so each segment can be uploaded
+	// (see Upload) without waiting for the whole run to end. Zero disables
+	// rotation -- one session for the life of the process, as before.
+	SessionRotateInterval time.Duration
+	Upload                UploadConfig
+}
+
+// UploadConfig configures uploading finished session directories to the
+// openmind-api (see internal/upload).
+type UploadConfig struct {
+	// Enabled is the operator's intent; Ready additionally requires BaseURL
+	// and APIKey to actually be set, so a deployment that forgets to
+	// configure the API falls back to recording-only instead of crashing.
+	Enabled bool
+	BaseURL string
+	APIKey  string
+	// DeleteAfterUpload removes a session's local files once it has uploaded
+	// successfully. Off by default: a robot's disk is cheap compared to
+	// losing data to a bug in a brand-new upload path.
+	DeleteAfterUpload  bool
+	MultipartThreshold int64
+	PartSize           int64
+}
+
+// Ready reports whether upload is both requested and fully configured.
+func (c UploadConfig) Ready() bool {
+	return c.Enabled && c.BaseURL != "" && c.APIKey != ""
+}
+
+func (c UploadConfig) ClientConfig() upload.Config {
+	return upload.Config{
+		BaseURL:            c.BaseURL,
+		APIKey:             c.APIKey,
+		MultipartThreshold: c.MultipartThreshold,
+		PartSize:           c.PartSize,
+	}
 }
 
 type VideoConfig struct {
@@ -188,6 +226,15 @@ func Load(sessionDir string) Config {
 			PollInterval: envDuration("NET_POLL_INTERVAL", 5*time.Second),
 			DataFile:     filepath.Join(sessionDir, "network_status.csv"),
 		},
+		SessionRotateInterval: envDuration("SESSION_ROTATE_INTERVAL", 5*time.Minute),
+		Upload: UploadConfig{
+			Enabled:            envBool("UPLOAD_ENABLED", true),
+			BaseURL:            strings.TrimSuffix(envStr("OPENMIND_API_URL", ""), "/"),
+			APIKey:             envStr("OPENMIND_API_KEY", ""),
+			DeleteAfterUpload:  envBool("DELETE_AFTER_UPLOAD", false),
+			MultipartThreshold: envInt64("UPLOAD_MULTIPART_THRESHOLD_BYTES", upload.DefaultMultipartThreshold),
+			PartSize:           envInt64("UPLOAD_PART_SIZE_BYTES", upload.DefaultPartSize),
+		},
 	}
 }
 
@@ -313,6 +360,15 @@ func envUint32(key string, defaultValue uint32) uint32 {
 	if value := os.Getenv(key); value != "" {
 		if v, err := strconv.ParseUint(value, 10, 32); err == nil {
 			return uint32(v)
+		}
+	}
+	return defaultValue
+}
+
+func envInt64(key string, defaultValue int64) int64 {
+	if value := os.Getenv(key); value != "" {
+		if v, err := strconv.ParseInt(value, 10, 64); err == nil {
+			return v
 		}
 	}
 	return defaultValue

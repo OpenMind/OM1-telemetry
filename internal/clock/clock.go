@@ -176,6 +176,26 @@ func NewWatcher(clk *Clock, path string, onTrusted func(Record)) *Watcher {
 	}
 }
 
+// Trusted reports whether the wall clock has synchronized at some point
+// during this run. Once true it never reverts -- see maybeTrust.
+func (w *Watcher) Trusted() bool {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.trusted
+}
+
+// SyncState summarizes the watcher's current best knowledge of whether the
+// wall clock can be trusted, in the same terms Sync() reports at boot. Used
+// to open later session segments (see session.OpenNext) directly on the
+// dated path once the clock has synchronized, even when the process itself
+// booted untrusted.
+func (w *Watcher) SyncState() SyncState {
+	if w.Trusted() {
+		return SyncYes
+	}
+	return SyncNo
+}
+
 func (w *Watcher) Run(ctx context.Context) {
 	f, err := os.OpenFile(w.path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
 	if err != nil {

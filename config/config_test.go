@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 )
@@ -139,4 +140,52 @@ func TestLoad_cameraURLEnvOverride(t *testing.T) {
 	cfg := Load(testSessionDir)
 
 	require.Equal(t, "rtsp://cam.local:8554/rear", cfg.Video[1].RTSPURL)
+}
+
+func TestLoad_sessionRotateIntervalDefault(t *testing.T) {
+	t.Setenv("SESSION_ROTATE_INTERVAL", "")
+
+	cfg := Load(testSessionDir)
+
+	require.Equal(t, 5*time.Minute, cfg.SessionRotateInterval)
+}
+
+func TestLoad_sessionRotateIntervalOverride(t *testing.T) {
+	t.Setenv("SESSION_ROTATE_INTERVAL", "90s")
+
+	cfg := Load(testSessionDir)
+
+	require.Equal(t, 90*time.Second, cfg.SessionRotateInterval)
+}
+
+func TestLoad_uploadDefaultsToUnreadyWithoutCredentials(t *testing.T) {
+	for _, key := range []string{"UPLOAD_ENABLED", "OPENMIND_API_URL", "OPENMIND_API_KEY", "DELETE_AFTER_UPLOAD"} {
+		t.Setenv(key, "")
+	}
+
+	cfg := Load(testSessionDir)
+
+	require.True(t, cfg.Upload.Enabled, "enabled by default -- the safety net is Ready(), not this flag")
+	require.False(t, cfg.Upload.Ready(), "must not be Ready without a URL and key")
+	require.False(t, cfg.Upload.DeleteAfterUpload, "must never delete local recordings by default")
+}
+
+func TestLoad_uploadReadyWithCredentials(t *testing.T) {
+	t.Setenv("OPENMIND_API_URL", "https://api.example.com/api/core/v1/")
+	t.Setenv("OPENMIND_API_KEY", "om1_testtesttesttesttest")
+
+	cfg := Load(testSessionDir)
+
+	require.True(t, cfg.Upload.Ready())
+	require.Equal(t, "https://api.example.com/api/core/v1", cfg.Upload.BaseURL, "trailing slash must be trimmed")
+}
+
+func TestLoad_uploadDisabledOverridesCredentials(t *testing.T) {
+	t.Setenv("OPENMIND_API_URL", "https://api.example.com")
+	t.Setenv("OPENMIND_API_KEY", "key")
+	t.Setenv("UPLOAD_ENABLED", "false")
+
+	cfg := Load(testSessionDir)
+
+	require.False(t, cfg.Upload.Ready(), "UPLOAD_ENABLED=false must win even with credentials set")
 }

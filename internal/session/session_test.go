@@ -251,3 +251,118 @@ func TestRepointSymlink_isAtomicAndRepeatable(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, b, target)
 }
+
+// Rotation opens several trusted segments back to back; each must land in
+// its own dated directory rather than colliding.
+func TestOpenNext_trustedClockOpensDistinctDirectories(t *testing.T) {
+	root := t.TempDir()
+	clk := clock.NewWithSync(clock.SyncYes)
+
+	first, err := Open(root, clk)
+	require.NoError(t, err)
+	time.Sleep(1100 * time.Millisecond) // dated dirs are second-granularity
+
+	second, err := OpenNext(root, clk, clock.SyncYes)
+	require.NoError(t, err)
+
+	require.NotEqual(t, first.RealDir(), second.RealDir())
+	require.True(t, datedPattern.MatchString(filepath.Base(second.RealDir())), second.RealDir())
+}
+
+// OpenNext must not reuse the same pending directory name across repeated
+// calls in one run -- the naming used to be keyed on the process's fixed
+// StartMonoNs, which every rotated segment would have shared.
+func TestOpenNext_untrustedClockOpensDistinctPendingDirectories(t *testing.T) {
+	root := t.TempDir()
+	clk := clock.NewWithSync(clock.SyncNo)
+
+	first, err := Open(root, clk)
+	require.NoError(t, err)
+	require.True(t, first.Pending())
+
+	second, err := OpenNext(root, clk, clock.SyncNo)
+	require.NoError(t, err)
+	require.True(t, second.Pending())
+
+	require.NotEqual(t, first.RealDir(), second.RealDir())
+}
+
+// Once the watcher has seen a sync, OpenNext must date the next segment
+// directly even though the process itself booted untrusted.
+func TestOpenNext_syncedAfterBootUsesDatedDirectory(t *testing.T) {
+	root := t.TempDir()
+	clk := clock.NewWithSync(clock.SyncNo)
+
+	pending, err := Open(root, clk)
+	require.NoError(t, err)
+	require.True(t, pending.Pending())
+
+	next, err := OpenNext(root, clk, clock.SyncYes)
+	require.NoError(t, err)
+	require.False(t, next.Pending())
+	require.True(t, datedPattern.MatchString(filepath.Base(next.RealDir())), next.RealDir())
+}
+
+// Close records an end time distinct from the start, so a segment's true
+// duration can be read back out of meta.json.
+func TestClose_recordsEndTime(t *testing.T) {
+	root := t.TempDir()
+	clk := clock.NewWithSync(clock.SyncYes)
+
+	s, err := Open(root, clk)
+	require.NoError(t, err)
+	time.Sleep(5 * time.Millisecond)
+
+	require.NoError(t, s.Close())
+
+	raw, err := os.ReadFile(filepath.Join(s.RealDir(), metaFileName))
+	require.NoError(t, err)
+	var m Meta
+	require.NoError(t, json.Unmarshal(raw, &m))
+
+	require.NotZero(t, m.SessionEndUnixNs)
+	require.Greater(t, m.SessionEndUnixNs, m.SessionStartUnixNs)
+	require.NotZero(t, m.SessionEndMonoNs)
+}
+
+// A session promoted after being rotated away from (no longer "current")
+// must date itself from when *it* started, not from process boot -- the bug
+// this guards against: reusing clk.StartWallNsNow, which always answers for
+// process boot, would misdate every segment after the first.
+func TestPromote_datesFromThisSessionsOwnStart(t *testing.T) {
+	root := t.TempDir()
+	clk := clock.NewWithSync(clock.SyncNo)
+
+	first, err := Open(root, clk)
+	require.NoError(t, err)
+	require.True(t, first.Pending())
+
+	time.Sleep(50 * time.Millisecond)
+
+	second, err := OpenNext(root, clk, clock.SyncNo)
+	require.NoError(t, err)
+	require.True(t, second.Pending())
+	secondPending := second.RealDir()
+
+	// first stays pending forever (nothing promotes it -- see OpenNext's doc
+	// comment); only second, the "current" segment, is promoted here.
+	require.NoError(t, second.Promote())
+	require.False(t, second.Pending())
+	require.NotEqual(t, secondPending, second.RealDir())
+
+	raw, err := os.ReadFile(filepath.Join(second.RealDir(), metaFileName))
+	require.NoError(t, err)
+	var m Meta
+	require.NoError(t, json.Unmarshal(raw, &m))
+	require.True(t, m.StartTimeCorrected)
+
+	// The written mono anchor must be *second's own* startMonoNs, not
+	// first's/the process's -- this is the precise, deterministic form of the
+	// bug this test guards against (the wall-clock value alone is too close
+	// to "now" either way, over a 50ms gap, to tell the two formulas apart).
+	require.Equal(t, second.startMonoNs, m.SessionStartMonoNs)
+	require.NotEqual(t, first.startMonoNs, second.startMonoNs)
+
+	gotStart := time.Unix(0, m.SessionStartUnixNs)
+	require.WithinDuration(t, time.Now(), gotStart, 2*time.Second)
+}

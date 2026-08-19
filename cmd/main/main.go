@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"sync"
 	"syscall"
 	"time"
 
@@ -21,8 +22,16 @@ import (
 	"om1-telemetry/internal/odom"
 	"om1-telemetry/internal/pointcloud"
 	"om1-telemetry/internal/session"
+	"om1-telemetry/internal/upload"
 	"om1-telemetry/internal/video"
 )
+
+// uploadTimeout bounds one session's upload -- both a background upload
+// kicked off by rotation and the final upload on shutdown. It also bounds
+// how long shutdown waits for in-flight uploads to finish (see uploadWG.Wait
+// in main): long enough for a slow robot link to push a segment's files,
+// short enough that a dead network doesn't hang the process indefinitely.
+const uploadTimeout = 10 * time.Minute
 
 func main() {
 	// Sampled before anything else, so the session's monotonic anchor covers
@@ -38,7 +47,8 @@ func main() {
 	}
 
 	// Sweep sessions an earlier run left undated. After Open, so this run's own
-	// pending directory is excluded.
+	// pending directory is excluded. Only done once, at process start --
+	// rotation (below) does not re-sweep on every segment.
 	session.Janitor(recordingsDir, sess.RealDir())
 
 	cfg := config.Load(sess.Dir())
@@ -49,15 +59,222 @@ func main() {
 		return
 	}
 
-	enableLidar := cfg.EnableLidar
-	enablePointcloud := cfg.EnablePointCloud
+	videoHeartbeatNames := make([]string, len(cfg.Video))
+	for i, vc := range cfg.Video {
+		videoHeartbeatNames[i] = "video_" + vc.Name
+	}
 
 	mon := heartbeat.NewMonitor(30 * time.Second)
+	registerHeartbeats(mon, cfg, videoHeartbeatNames)
 
-	if enableLidar {
+	hbCtx, hbCancel := context.WithCancel(context.Background())
+	go mon.Run(hbCtx)
+
+	// current is the session the clock watcher promotes the first time NTP
+	// synchronizes. Rotation (below) repoints it under currentMu; only
+	// whichever session is "current" at that moment gets promoted -- see
+	// session.OpenNext's doc comment for why an earlier rotated-away segment
+	// from the same offline boot is deliberately left undated.
+	var currentMu sync.Mutex
+	current := sess
+
+	// bootTimebasePath is where the *one* clock watcher journals for the
+	// whole process lifetime -- a boot-relative fact, not a per-segment one.
+	// Each rotated-away segment gets a snapshot copied into its own
+	// directory (snapshotTimebase) so it stays self-contained for
+	// align_recording.py / fix_session_time.py without needing the boot
+	// session alongside it.
+	bootTimebasePath := sess.TimebasePath()
+
+	clkCtx, clkCancel := context.WithCancel(context.Background())
+	watcher := clock.NewWatcher(clk, bootTimebasePath, func(clock.Record) {
+		currentMu.Lock()
+		s := current
+		currentMu.Unlock()
+		if err := s.Promote(); err != nil {
+			slog.Error("could not date the session", "err", err)
+		}
+	})
+	go watcher.Run(clkCtx)
+
+	var uploader *upload.Client
+	if cfg.Upload.Ready() {
+		uploader = upload.New(cfg.Upload.ClientConfig())
+	} else if cfg.Upload.Enabled {
+		slog.Warn("upload enabled but OPENMIND_API_URL / OPENMIND_API_KEY not both set; recording locally only")
+	}
+
+	rs := startRecorders(cfg, mon, videoHeartbeatNames)
+
+	videoURLs := make([]string, 0, len(cfg.Video))
+	for _, vc := range cfg.Video {
+		videoURLs = append(videoURLs, vc.Name+"="+vc.RTSPURL)
+	}
+
+	slog.Info("recording started",
+		"session", sess.RealDir(),
+		"session-pending", sess.Pending(),
+		"clock-sync", clk.StartSync().String(),
+		"robot-type", cfg.RobotType,
+		"video-cameras", videoURLs,
+		"audio-url", cfg.Audio.RTSPURL,
+		"features-enabled", cfg.Features.Enabled(),
+		"features-source", cfg.Features.SourcePath,
+		"lidar-enabled", cfg.EnableLidar,
+		"depth-enabled", cfg.EnableDepth,
+		"odom-enabled", cfg.EnableOdom,
+		"lowstate-enabled", cfg.EnableLowstate,
+		"lidar-topic", cfg.Lidar.DDSTopic,
+		"pointcloud-enabled", cfg.EnablePointCloud,
+		"pointcloud-topic", cfg.PointCloud.DDSTopic,
+		"depth-topic", cfg.Depth.DDSTopic,
+		"odom-topic", cfg.Odom.DDSTopic,
+		"lowstate-topic", cfg.Lowstate.DDSTopic,
+		"net-ping-host", cfg.Network.PingHost,
+		"heartbeat", "30s interval; logs only when broken/recovered",
+		"session-rotate-interval", cfg.SessionRotateInterval,
+		"upload-ready", uploader != nil,
+	)
+	slog.Info("press Ctrl-C to stop")
+
+	shutdownSignal := make(chan os.Signal, 1)
+	signal.Notify(shutdownSignal, syscall.SIGINT, syscall.SIGTERM)
+
+	var rotateC <-chan time.Time
+	if cfg.SessionRotateInterval > 0 {
+		ticker := time.NewTicker(cfg.SessionRotateInterval)
+		defer ticker.Stop()
+		rotateC = ticker.C
+	}
+
+	var uploadWG sync.WaitGroup
+	uploadDelete := cfg.Upload.DeleteAfterUpload
+
+loop:
+	for {
+		select {
+		case <-shutdownSignal:
+			break loop
+
+		case <-rotateC:
+			rs.Stop()
+			finished := sess
+			if err := finished.Close(); err != nil {
+				slog.Warn("could not finalize session metadata", "dir", finished.RealDir(), "err", err)
+			}
+			snapshotTimebase(bootTimebasePath, finished.RealDir())
+
+			next, err := session.OpenNext(recordingsDir, clk, watcher.SyncState())
+			if err != nil {
+				slog.Error("cannot open next session; stopping", "err", err)
+				break loop
+			}
+			nextCfg := config.Load(next.Dir())
+			next.SetRobotType(string(nextCfg.RobotType))
+
+			currentMu.Lock()
+			current = next
+			currentMu.Unlock()
+
+			sess, cfg = next, nextCfg
+			registerHeartbeats(mon, cfg, videoHeartbeatNames) // resets the grace period for the fresh streams below
+			rs = startRecorders(cfg, mon, videoHeartbeatNames)
+
+			slog.Info("session rotated", "session", sess.RealDir())
+
+			if uploader != nil {
+				uploadWG.Add(1)
+				go func(dir, apiDir string, startedAt time.Time) {
+					defer uploadWG.Done()
+					uploadSession(uploader, dir, apiDir, startedAt, uploadDelete)
+				}(finished.RealDir(), apiSessionDir(recordingsDir, finished.RealDir()), time.Unix(0, finished.StartUnixNs()))
+			}
+		}
+	}
+
+	slog.Info("shutting down…")
+
+	hbCancel()
+	rs.Stop()
+	if err := sess.Close(); err != nil {
+		slog.Warn("could not finalize session metadata", "dir", sess.RealDir(), "err", err)
+	}
+	snapshotTimebase(bootTimebasePath, sess.RealDir())
+
+	if uploader != nil {
+		uploadSession(uploader, sess.RealDir(), apiSessionDir(recordingsDir, sess.RealDir()), time.Unix(0, sess.StartUnixNs()), uploadDelete)
+	}
+	uploadWG.Wait()
+
+	clkCancel()
+
+	if sess.Pending() {
+		slog.Warn("session is still undated: the clock never synchronized while recording",
+			"dir", sess.RealDir(),
+			"note", "it will be dated on a later start if it ever syncs")
+	}
+}
+
+// uploadSession uploads one finished session directory, best-effort: on
+// failure the files are kept locally (regardless of DeleteAfterUpload) so a
+// later run -- or a manual re-run of this recorder -- can retry; the
+// openmind-api recognizes a retry against the same session_dir as a resume,
+// not a duplicate.
+func uploadSession(client *upload.Client, dir, sessionDir string, startedAt time.Time, deleteAfter bool) {
+	ctx, cancel := context.WithTimeout(context.Background(), uploadTimeout)
+	defer cancel()
+
+	if err := client.UploadSession(ctx, dir, sessionDir, startedAt); err != nil {
+		slog.Error("session upload failed; files kept locally for retry", "dir", dir, "err", err)
+		return
+	}
+	slog.Info("session uploaded", "dir", dir, "session_dir", sessionDir)
+
+	if deleteAfter {
+		if err := os.RemoveAll(dir); err != nil {
+			slog.Warn("could not delete uploaded session directory", "dir", dir, "err", err)
+		}
+	}
+}
+
+// apiSessionDir builds the openmind-api's session_dir grouping key from a
+// session's real directory, e.g. "recordings/2026-08-18/2026-08-18_20-10-00"
+// -- RECORDINGS_DIR's own base name plus the session's path under it, so the
+// value is stable whether RECORDINGS_DIR was given as an absolute or a
+// relative path.
+func apiSessionDir(recordingsDir, realDir string) string {
+	rel, err := filepath.Rel(recordingsDir, realDir)
+	if err != nil {
+		rel = filepath.Base(realDir)
+	}
+	return filepath.ToSlash(filepath.Join(filepath.Base(recordingsDir), rel))
+}
+
+// snapshotTimebase copies the process-wide clock journal into a rotated-away
+// session's own directory, so downstream tools that expect a
+// clock_timebase.jsonl alongside each session's files find one without
+// needing the boot session too. Best-effort: the boot session already has
+// the real file (via clock.Watcher), so this is a no-op for it.
+func snapshotTimebase(bootPath, sessionDir string) {
+	dst := filepath.Join(sessionDir, clock.TimebaseName)
+	if dst == bootPath {
+		return
+	}
+	raw, err := os.ReadFile(bootPath)
+	if err != nil {
+		slog.Warn("could not snapshot clock timebase for rotated session", "err", err)
+		return
+	}
+	if err := os.WriteFile(dst, raw, 0o644); err != nil {
+		slog.Warn("could not write clock timebase snapshot", "dst", dst, "err", err)
+	}
+}
+
+func registerHeartbeats(mon *heartbeat.Monitor, cfg config.Config, videoHeartbeatNames []string) {
+	if cfg.EnableLidar {
 		mon.Register(lidar.HeartbeatName, 10) // ~10 Hz nominal
 	}
-	if enablePointcloud {
+	if cfg.EnablePointCloud {
 		mon.Register(pointcloud.HeartbeatName, 10) // ~10 Hz nominal
 	}
 	if cfg.EnableDepth {
@@ -74,28 +291,32 @@ func main() {
 	if cfg.Features.Enabled() {
 		mon.Register(features.HeartbeatName, 0) // 0 = liveness check only
 	}
-
-	videoHeartbeatNames := make([]string, len(cfg.Video))
-	for i, vc := range cfg.Video {
-		videoHeartbeatNames[i] = "video_" + vc.Name
-		mon.Register(videoHeartbeatNames[i], 0)
+	for _, name := range videoHeartbeatNames {
+		mon.Register(name, 0)
 	}
+}
 
-	hbCtx, hbCancel := context.WithCancel(context.Background())
-	go mon.Run(hbCtx)
+// recorderSet is every stream started for one session. Streams that are
+// disabled for the current profile/config are left nil.
+type recorderSet struct {
+	videoStreams     []*video.VideoRTSPStream
+	audioStream      *audio.AudioRTSPStream
+	featureStream    *features.FeatureStream
+	lidarStream      *lidar.LidarStream
+	pointCloudStream *pointcloud.PointCloudStream
+	depthStream      *depth.DepthStream
+	odomStream       *odom.OdomStream
+	lowstateStream   *lowstate.LowstateStream
+	networkStream    *network.NetworkStream
+}
 
-	// Journals the monotonic-to-UTC mapping and, the first time NTP confirms
-	// the wall clock, moves a pending session to its true date. Recorders write
-	// through a symlink, so the rename does not disturb them.
-	clkCtx, clkCancel := context.WithCancel(context.Background())
-	watcher := clock.NewWatcher(clk, sess.TimebasePath(), func(clock.Record) {
-		if err := sess.Promote(); err != nil {
-			slog.Error("could not date the session", "err", err)
-		}
-	})
-	go watcher.Run(clkCtx)
+// startRecorders builds and starts every stream for cfg's session directory.
+// Called once at startup and again after every rotation, so a fresh set of
+// output files opens under the new session each time.
+func startRecorders(cfg config.Config, mon *heartbeat.Monitor, videoHeartbeatNames []string) *recorderSet {
+	rs := &recorderSet{}
 
-	videoStreams := make([]*video.VideoRTSPStream, 0, len(cfg.Video))
+	rs.videoStreams = make([]*video.VideoRTSPStream, 0, len(cfg.Video))
 	for i, vc := range cfg.Video {
 		vcfg := vc.VideoStreamConfig()
 		vcfg.Monitor = mon
@@ -105,7 +326,7 @@ func main() {
 			stem := vcfg.OutputFile[:len(vcfg.OutputFile)-len(ext)]
 			vcfg.FramesFile = stem + "_frames.csv"
 		}
-		videoStreams = append(videoStreams, video.New(vcfg))
+		rs.videoStreams = append(rs.videoStreams, video.New(vcfg))
 	}
 
 	audioCfg := cfg.Audio.AudioStreamConfig()
@@ -115,144 +336,99 @@ func main() {
 		stem := audioCfg.OutputFile[:len(audioCfg.OutputFile)-len(ext)]
 		audioCfg.FramesFile = stem + "_packets.csv"
 	}
-	audioStream := audio.New(audioCfg)
+	rs.audioStream = audio.New(audioCfg)
 
-	var featureStream *features.FeatureStream
 	if cfg.Features.Enabled() {
 		featureCfg := cfg.Features.FeatureStreamConfig()
 		featureCfg.Monitor = mon
-		featureStream = features.New(featureCfg)
+		rs.featureStream = features.New(featureCfg)
 	}
 
-	var lidarStream *lidar.LidarStream
-	if enableLidar {
+	if cfg.EnableLidar {
 		lidarCfg := cfg.Lidar.LidarStreamConfig()
 		lidarCfg.Monitor = mon
-		lidarStream = lidar.New(lidarCfg)
+		rs.lidarStream = lidar.New(lidarCfg)
 	}
 
-	var pointCloudStream *pointcloud.PointCloudStream
-	if enablePointcloud {
+	if cfg.EnablePointCloud {
 		pointCloudCfg := cfg.PointCloud.PointCloudStreamConfig()
 		pointCloudCfg.Monitor = mon
-		pointCloudStream = pointcloud.New(pointCloudCfg)
+		rs.pointCloudStream = pointcloud.New(pointCloudCfg)
 	}
 
-	var depthStream *depth.DepthStream
 	if cfg.EnableDepth {
 		depthCfg := cfg.Depth.DepthStreamConfig()
 		depthCfg.Monitor = mon
-		depthStream = depth.New(depthCfg)
+		rs.depthStream = depth.New(depthCfg)
 	}
 
-	var odomStream *odom.OdomStream
 	if cfg.EnableOdom {
 		odomCfg := cfg.Odom.OdomStreamConfig()
 		odomCfg.Monitor = mon
-		odomStream = odom.New(odomCfg)
+		rs.odomStream = odom.New(odomCfg)
 	}
 
-	var lowstateStream *lowstate.LowstateStream
 	if cfg.EnableLowstate {
 		lowstateCfg := cfg.Lowstate.LowstateStreamConfig()
 		lowstateCfg.Monitor = mon
-		lowstateStream = lowstate.New(lowstateCfg)
+		rs.lowstateStream = lowstate.New(lowstateCfg)
 	}
 
 	networkCfg := cfg.Network.NetworkStreamConfig()
 	networkCfg.Monitor = mon
-	networkStream := network.New(networkCfg)
+	rs.networkStream = network.New(networkCfg)
 
-	for _, vs := range videoStreams {
+	for _, vs := range rs.videoStreams {
 		vs.Start()
 	}
-	audioStream.Start()
-	if featureStream != nil {
-		featureStream.Start()
+	rs.audioStream.Start()
+	if rs.featureStream != nil {
+		rs.featureStream.Start()
 	}
-	if lidarStream != nil {
-		lidarStream.Start()
+	if rs.lidarStream != nil {
+		rs.lidarStream.Start()
 	}
-	if pointCloudStream != nil {
-		pointCloudStream.Start()
+	if rs.pointCloudStream != nil {
+		rs.pointCloudStream.Start()
 	}
-	if depthStream != nil {
-		depthStream.Start()
+	if rs.depthStream != nil {
+		rs.depthStream.Start()
 	}
-	if odomStream != nil {
-		odomStream.Start()
+	if rs.odomStream != nil {
+		rs.odomStream.Start()
 	}
-	if lowstateStream != nil {
-		lowstateStream.Start()
+	if rs.lowstateStream != nil {
+		rs.lowstateStream.Start()
 	}
-	networkStream.Start()
+	rs.networkStream.Start()
 
-	videoURLs := make([]string, 0, len(cfg.Video))
-	for _, vc := range cfg.Video {
-		videoURLs = append(videoURLs, vc.Name+"="+vc.RTSPURL)
-	}
+	return rs
+}
 
-	slog.Info("recording started",
-		"session", sess.RealDir(),
-		"session-pending", sess.Pending(),
-		"clock-sync", clk.StartSync().String(),
-		"robot-type", cfg.RobotType,
-		"video-cameras", videoURLs,
-		"audio-url", cfg.Audio.RTSPURL,
-		"features-enabled", cfg.Features.Enabled(),
-		"features-source", cfg.Features.SourcePath,
-		"lidar-enabled", enableLidar,
-		"depth-enabled", cfg.EnableDepth,
-		"odom-enabled", cfg.EnableOdom,
-		"lowstate-enabled", cfg.EnableLowstate,
-		"lidar-topic", cfg.Lidar.DDSTopic,
-		"pointcloud-enabled", enablePointcloud,
-		"pointcloud-topic", cfg.PointCloud.DDSTopic,
-		"depth-topic", cfg.Depth.DDSTopic,
-		"odom-topic", cfg.Odom.DDSTopic,
-		"lowstate-topic", cfg.Lowstate.DDSTopic,
-		"net-ping-host", cfg.Network.PingHost,
-		"heartbeat", "30s interval; logs only when broken/recovered",
-	)
-	slog.Info("press Ctrl-C to stop")
-
-	shutdownSignal := make(chan os.Signal, 1)
-	signal.Notify(shutdownSignal, syscall.SIGINT, syscall.SIGTERM)
-	<-shutdownSignal
-
-	slog.Info("shutting down…")
-
-	hbCancel()
-
-	for _, vs := range videoStreams {
+// Stop stops every stream in the set, blocking until each has flushed its
+// files to disk -- safe to read the session directory immediately after.
+func (rs *recorderSet) Stop() {
+	for _, vs := range rs.videoStreams {
 		vs.Stop()
 	}
-	audioStream.Stop()
-	if featureStream != nil {
-		featureStream.Stop()
+	rs.audioStream.Stop()
+	if rs.featureStream != nil {
+		rs.featureStream.Stop()
 	}
-	if lidarStream != nil {
-		lidarStream.Stop()
+	if rs.lidarStream != nil {
+		rs.lidarStream.Stop()
 	}
-	if pointCloudStream != nil {
-		pointCloudStream.Stop()
+	if rs.pointCloudStream != nil {
+		rs.pointCloudStream.Stop()
 	}
-	if depthStream != nil {
-		depthStream.Stop()
+	if rs.depthStream != nil {
+		rs.depthStream.Stop()
 	}
-	if odomStream != nil {
-		odomStream.Stop()
+	if rs.odomStream != nil {
+		rs.odomStream.Stop()
 	}
-	if lowstateStream != nil {
-		lowstateStream.Stop()
+	if rs.lowstateStream != nil {
+		rs.lowstateStream.Stop()
 	}
-	networkStream.Stop()
-
-	clkCancel()
-
-	if sess.Pending() {
-		slog.Warn("session is still undated: the clock never synchronized while recording",
-			"dir", sess.RealDir(),
-			"note", "it will be dated on a later start if it ever syncs")
-	}
+	rs.networkStream.Stop()
 }
