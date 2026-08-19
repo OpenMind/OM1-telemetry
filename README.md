@@ -146,7 +146,7 @@ Any of the following override the selected profile / defaults:
 - `DELETE_AFTER_UPLOAD` - Delete a session's local files once it has uploaded successfully (default: `false` — keep everything locally regardless of upload)
 - `UPLOAD_MULTIPART_THRESHOLD_BYTES` - Files at or above this size go through S3 multipart upload instead of a single presigned POST (default: `104857600`, 100 MiB)
 - `UPLOAD_PART_SIZE_BYTES` - Chunk size for multipart uploads (default: `16777216`, 16 MiB)
-- `RETENTION_MAX_BYTES` - Cap on `RECORDINGS_DIR`'s total size; once exceeded, already-uploaded sessions are deleted oldest first until it isn't (default: `107374182400`, 100 GiB; `0` disables cap enforcement — see "Retention & the catch-up/cap sweep" below)
+- `RETENTION_MAX_BYTES` - Hard cap on `RECORDINGS_DIR`'s total size; once exceeded, sessions are deleted oldest first (preferring already-uploaded ones, but not-yet-uploaded ones too if that's what it takes) until it isn't (default: `107374182400`, 100 GiB; `0` disables cap enforcement — see "Retention & the catch-up/cap sweep" below)
 - `RETENTION_SWEEP_INTERVAL` - How often the retention sweep looks for finished-but-not-yet-uploaded sessions and, if over the cap, deletes uploaded ones (default: `5m`)
 
 CycloneDDS domain IDs (not endpoints/addresses) are how independent DDS
@@ -425,22 +425,25 @@ that's offline for an hour, or a run that crashes mid-upload, would
 otherwise leave that data stuck locally forever. `cmd/main/retention.go`
 runs a separate sweep, every `RETENTION_SWEEP_INTERVAL`, that:
 
-1. Walks every closed session directory, oldest first, and uploads any that
-   were never confirmed uploaded — the same idempotent `UploadSession` call
-   rotation uses, so a partially-uploaded segment resumes rather than
-   duplicating. A directory is marked uploaded (a `.uploaded` file inside
-   it, never itself uploaded) only after that call succeeds.
+1. If upload is configured, walks every closed session directory, oldest
+   first, and uploads any that were never confirmed uploaded — the same
+   idempotent `UploadSession` call rotation uses, so a partially-uploaded
+   segment resumes rather than duplicating. A directory is marked uploaded
+   (a `.uploaded` file inside it, never itself uploaded) only after that
+   call succeeds.
 2. If `RECORDINGS_DIR`'s total size is still over `RETENTION_MAX_BYTES`
-   afterward, deletes already-uploaded directories, oldest first, until it
-   isn't.
+   afterward, deletes directories oldest first until it isn't — preferring
+   already-uploaded ones, but falling through to not-yet-uploaded ones if
+   deleting only uploaded directories isn't enough (or none exist, e.g.
+   upload isn't configured at all).
 
 It never touches the session currently being recorded to, or whichever
 segment still physically holds the live `clock_timebase.jsonl` journal (see
-"Interaction with clock trust" below) — and it never deletes a directory
-that isn't confirmed uploaded, even if that means staying over the cap:
-losing data no copy exists of yet is treated as worse than a full disk. The
-sweep is a no-op when upload isn't configured (`RETENTION_MAX_BYTES` alone
-can't reclaim space without somewhere to send the data first).
+"Interaction with clock trust" below). Otherwise, `RETENTION_MAX_BYTES` is a
+hard cap: a robot that's been offline, or has upload turned off entirely,
+still gets its oldest data deleted rather than filling its disk and
+silently stopping recording — losing the oldest, least-recoverable segment
+is treated as better than that.
 
 ### Interaction with clock trust
 

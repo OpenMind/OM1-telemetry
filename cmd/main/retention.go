@@ -26,27 +26,20 @@ const uploadMarkerName = ".uploaded"
 // event loop (rotation and shutdown), which only ever handle the segment
 // that just closed and never retry a failed one. Each tick it:
 //
-//  1. Walks every dated session directory, oldest first, and uploads any
-//     that were never marked uploaded -- catching up anything a prior
-//     failed/partial upload, a crash, or a manual copy left behind.
-//  2. If recordingsDir is still over maxBytes afterward, deletes already-
-//     uploaded directories, oldest first, until it isn't.
+//  1. If uploader is configured, walks every dated session directory,
+//     oldest first, and uploads any that were never marked uploaded --
+//     catching up anything a prior failed/partial upload, a crash, or a
+//     manual copy left behind.
+//  2. If recordingsDir is still over maxBytes afterward, deletes
+//     directories oldest first -- uploaded ones first if that alone is
+//     enough, but falling through to not-yet-uploaded ones if it isn't --
+//     until it's back under the cap. See enforceRetentionCap.
 //
 // It never touches currentDir (the segment recorders are writing to right
 // now) or the directory still holding the live boot-relative clock journal
 // (see bootSessionDir) -- both are still changing, so neither "uploaded" nor
 // "safe to delete" can be true of them yet.
-//
-// Marking a directory uploaded and deleting it are deliberately separate
-// steps gated on the marker, not on one another: a directory can be
-// uploaded and kept (DELETE_AFTER_UPLOAD=false, comfortably under the cap)
-// for as long as there's room, and is only ever removed once its data is
-// confirmed to have a copy in S3.
 func retentionSweep(uploader *upload.Client, recordingsDir, bootTimebasePath, currentDir string, maxBytes int64) {
-	if uploader == nil {
-		return // nothing can be safely deleted without a place to send it first
-	}
-
 	dirs, err := session.ListClosed(recordingsDir)
 	if err != nil {
 		slog.Warn("retention: cannot list session directories", "dir", recordingsDir, "err", err)
@@ -57,22 +50,33 @@ func retentionSweep(uploader *upload.Client, recordingsDir, bootTimebasePath, cu
 		return dir == currentDir || bootSessionDir(bootTimebasePath, dir)
 	}
 
-	for _, dir := range dirs {
-		if protected(dir) || isUploaded(dir) {
-			continue
+	if uploader != nil {
+		for _, dir := range dirs {
+			if protected(dir) || isUploaded(dir) {
+				continue
+			}
+			opts := uploadOptions(bootTimebasePath, dir)
+			uploadSession(uploader, dir, apiSessionDir(recordingsDir, dir), readStartedAt(dir), false, opts)
 		}
-		opts := uploadOptions(bootTimebasePath, dir)
-		uploadSession(uploader, dir, apiSessionDir(recordingsDir, dir), readStartedAt(dir), false, opts)
 	}
 
 	enforceRetentionCap(recordingsDir, dirs, protected, maxBytes)
 }
 
-// enforceRetentionCap deletes already-uploaded directories from dirs, oldest
-// first, until recordingsDir's total size is at or under maxBytes.
-// Directories that aren't marked uploaded, or that protected reports true
-// for, are left alone even if that means staying over the cap -- losing
-// data no copy exists of yet is worse than a full disk.
+// enforceRetentionCap deletes directories from dirs, oldest first, until
+// recordingsDir's total size is at or under maxBytes. protected directories
+// are never deleted (the live session, or the segment still holding the
+// live clock journal).
+//
+// It runs in two passes: first only already-uploaded directories, so a
+// robot that's keeping up with its upload quota never loses data it hasn't
+// already backed up. If that alone isn't enough to get under the cap --
+// uploading is behind, failing, or not configured at all -- it falls
+// through to a second pass over whatever's left, deleting the oldest
+// remaining directories regardless of upload status. Keeping local disk
+// usage bounded takes priority over keeping unuploaded data: a recorder
+// that silently stops recording because its disk filled up is worse than
+// one that loses its oldest, least-recoverable segment to stay running.
 func enforceRetentionCap(recordingsDir string, dirs []string, protected func(string) bool, maxBytes int64) {
 	if maxBytes <= 0 {
 		return
@@ -83,31 +87,57 @@ func enforceRetentionCap(recordingsDir string, dirs []string, protected func(str
 		return
 	}
 
-	for _, dir := range dirs {
+	// deleteDir removes dir and returns whether it was handled (deleted, or
+	// failed in a way not worth retrying against in the second pass below).
+	// Called only once total is already confirmed over maxBytes.
+	deleteDir := func(dir string) bool {
+		freed, err := dirSize(dir)
+		if err != nil {
+			slog.Warn("retention: cannot measure session directory size", "dir", dir, "err", err)
+			return true
+		}
+		if err := os.RemoveAll(dir); err != nil {
+			slog.Warn("retention: could not delete session directory", "dir", dir, "err", err)
+			return true
+		}
+		total -= freed
+		if isUploaded(dir) {
+			slog.Info("retention: deleted uploaded session directory to stay under the recordings cap",
+				"dir", dir, "freed_bytes", freed, "recordings_bytes", total, "max_bytes", maxBytes)
+		} else {
+			slog.Warn("retention: deleted a session directory that was never confirmed uploaded, to stay under the recordings cap",
+				"dir", dir, "freed_bytes", freed, "recordings_bytes", total, "max_bytes", maxBytes,
+				"note", "data loss: RETENTION_MAX_BYTES takes priority over keeping data with no confirmed copy in S3")
+		}
+		return true
+	}
+
+	deleted := make(map[string]bool, len(dirs))
+	for _, dir := range dirs { // pass 1: already-uploaded directories only
 		if total <= maxBytes {
-			return
+			break
 		}
 		if protected(dir) || !isUploaded(dir) {
 			continue
 		}
-		freed, err := dirSize(dir)
-		if err != nil {
-			slog.Warn("retention: cannot measure session directory size", "dir", dir, "err", err)
+		if deleteDir(dir) {
+			deleted[dir] = true
+		}
+	}
+	for _, dir := range dirs { // pass 2: fall through to unuploaded directories
+		if total <= maxBytes {
+			break
+		}
+		if protected(dir) || deleted[dir] {
 			continue
 		}
-		if err := os.RemoveAll(dir); err != nil {
-			slog.Warn("retention: could not delete uploaded session directory", "dir", dir, "err", err)
-			continue
-		}
-		total -= freed
-		slog.Info("retention: deleted uploaded session directory to stay under the recordings cap",
-			"dir", dir, "freed_bytes", freed, "recordings_bytes", total, "max_bytes", maxBytes)
+		deleteDir(dir)
 	}
 
 	if total > maxBytes {
 		slog.Warn("retention: recordings directory still exceeds its cap",
 			"recordings_bytes", total, "max_bytes", maxBytes,
-			"note", "every deletable (uploaded, not currently open) session directory has already been removed")
+			"note", "every deletable (not currently open, not the live boot session) directory has already been removed")
 	}
 }
 
@@ -177,8 +207,12 @@ func readStartedAt(dir string) time.Time {
 // canceled. currentDir returns the directory currently being recorded to at
 // the moment each tick fires -- read fresh each time, since rotation moves
 // it over the sweeper's lifetime.
+//
+// Runs regardless of whether uploader is configured: cap enforcement
+// (deleting the oldest directories, uploaded or not) must hold even when
+// there's nowhere to upload to -- see enforceRetentionCap.
 func runRetentionSweeps(ctx context.Context, uploader *upload.Client, recordingsDir, bootTimebasePath string, currentDir func() string, cfg config.RetentionConfig) {
-	if uploader == nil || cfg.MaxBytes <= 0 {
+	if cfg.MaxBytes <= 0 {
 		return
 	}
 	interval := cfg.SweepInterval

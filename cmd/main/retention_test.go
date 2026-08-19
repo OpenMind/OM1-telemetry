@@ -66,21 +66,71 @@ func TestEnforceRetentionCap_deletesOldestUploadedFirstUntilUnderCap(t *testing.
 	require.DirExists(t, newest)
 }
 
-func TestEnforceRetentionCap_neverDeletesUnuploadedOrProtected(t *testing.T) {
+// The 100GB cap is a hard requirement: if there's nothing already-uploaded
+// left to delete, the oldest directory must still go, even unuploaded, so
+// the recorder never fills the disk and stops recording entirely.
+func TestEnforceRetentionCap_fallsThroughToUnuploadedWhenNothingElseCanFreeEnough(t *testing.T) {
 	root := t.TempDir()
 	notUploaded := filepath.Join(root, "2026-08-14", "2026-08-14_00-00-00")
-	protectedDir := filepath.Join(root, "2026-08-15", "2026-08-15_00-00-00")
 
 	writeFile(t, notUploaded, "a.bin", make([]byte, 200))
-	// deliberately not marked uploaded
+	// deliberately not marked uploaded -- and nothing else exists to delete instead
+
+	enforceRetentionCap(root, []string{notUploaded}, func(string) bool { return false }, 10)
+
+	require.NoDirExists(t, notUploaded, "the cap must be honored even with no uploaded data to fall back on")
+}
+
+func TestEnforceRetentionCap_neverDeletesProtected(t *testing.T) {
+	root := t.TempDir()
+	protectedDir := filepath.Join(root, "2026-08-15", "2026-08-15_00-00-00")
+
 	writeFile(t, protectedDir, "b.bin", make([]byte, 200))
 	markUploaded(protectedDir)
 
-	enforceRetentionCap(root, []string{notUploaded, protectedDir},
-		func(dir string) bool { return dir == protectedDir }, 10)
+	enforceRetentionCap(root, []string{protectedDir}, func(dir string) bool { return true }, 10)
 
-	require.DirExists(t, notUploaded, "must never delete data with no confirmed upload")
-	require.DirExists(t, protectedDir, "must never delete a directory the caller marked protected")
+	require.DirExists(t, protectedDir, "must never delete a directory the caller marked protected, cap or no cap")
+}
+
+// When an uploaded directory alone is enough to satisfy the cap, it is
+// deleted in preference to an older not-yet-uploaded one -- upload status
+// beats raw age as long as it's sufficient to stay under the cap.
+func TestEnforceRetentionCap_prefersUploadedOverOlderUnuploadedWhenSufficient(t *testing.T) {
+	root := t.TempDir()
+	olderUnuploaded := filepath.Join(root, "2026-08-14", "2026-08-14_00-00-00")
+	newerUploaded := filepath.Join(root, "2026-08-15", "2026-08-15_00-00-00")
+
+	writeFile(t, olderUnuploaded, "a.bin", make([]byte, 200))
+	writeFile(t, newerUploaded, "b.bin", make([]byte, 200))
+	markUploaded(newerUploaded)
+
+	newerSize, err := dirSize(newerUploaded)
+	require.NoError(t, err)
+
+	enforceRetentionCap(root, []string{olderUnuploaded, newerUploaded},
+		func(string) bool { return false }, newerSize) // deleting only the uploaded one is enough
+
+	require.NoDirExists(t, newerUploaded, "the uploaded directory should be freed first")
+	require.DirExists(t, olderUnuploaded, "the older but unconfirmed directory is spared once the cap is satisfied")
+}
+
+// Uploaded directories are preferred, but only when they're enough on their
+// own to satisfy the cap -- age still wins once upload status can't decide.
+func TestEnforceRetentionCap_prefersUploadedButDeletesOldestOverallIfNeeded(t *testing.T) {
+	root := t.TempDir()
+	oldestUnuploaded := filepath.Join(root, "2026-08-14", "2026-08-14_00-00-00")
+	newerUploaded := filepath.Join(root, "2026-08-15", "2026-08-15_00-00-00")
+
+	writeFile(t, oldestUnuploaded, "a.bin", make([]byte, 200))
+	writeFile(t, newerUploaded, "b.bin", make([]byte, 200))
+	markUploaded(newerUploaded)
+
+	// Cap tight enough that deleting either alone isn't enough -- both must go.
+	enforceRetentionCap(root, []string{oldestUnuploaded, newerUploaded}, func(string) bool { return false }, 10)
+
+	require.NoDirExists(t, oldestUnuploaded)
+	require.NoDirExists(t, newerUploaded)
 }
 
 func TestEnforceRetentionCap_zeroMaxBytesDisablesEnforcement(t *testing.T) {
@@ -94,15 +144,23 @@ func TestEnforceRetentionCap_zeroMaxBytesDisablesEnforcement(t *testing.T) {
 	require.DirExists(t, dir)
 }
 
-func TestRetentionSweep_nilUploaderIsANoop(t *testing.T) {
+func TestRetentionSweep_nilUploaderSkipsCatchUpButStillEnforcesCap(t *testing.T) {
 	root := t.TempDir()
-	dir := filepath.Join(root, "2026-08-14", "2026-08-14_00-00-00")
-	writeFile(t, dir, "a.bin", []byte("data"))
+	underCap := filepath.Join(root, "2026-08-14", "2026-08-14_00-00-00")
+	writeFile(t, underCap, "a.bin", []byte("data"))
 
 	retentionSweep(nil, root, filepath.Join(root, "boot_timebase.jsonl"), "", 100)
 
-	require.False(t, isUploaded(dir))
-	require.DirExists(t, dir)
+	require.False(t, isUploaded(underCap), "without an uploader nothing can be marked uploaded")
+	require.DirExists(t, underCap, "comfortably under the cap, so nothing needs to be deleted")
+
+	overCap := filepath.Join(root, "2026-08-15", "2026-08-15_00-00-00")
+	writeFile(t, overCap, "b.bin", make([]byte, 200))
+
+	retentionSweep(nil, root, filepath.Join(root, "boot_timebase.jsonl"), "", 100)
+
+	require.NoDirExists(t, underCap,
+		"with no uploader configured, cap enforcement must still delete the oldest directory rather than let the disk fill up")
 }
 
 // minimalFakeAPI is a smaller stand-in than internal/upload's own test fake:
