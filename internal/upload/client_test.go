@@ -278,7 +278,7 @@ func TestUploadSession_smallFilesUseDirectPost(t *testing.T) {
 	writeFile(t, dir, "lidar_scans.bin", []byte("scandata"))
 
 	c := New(Config{BaseURL: apiSrv.URL, APIKey: "test-key"})
-	err := c.UploadSession(context.Background(), dir, "recordings/2026-08-18/2026-08-18_20-00-00", time.Now())
+	err := c.UploadSession(context.Background(), dir, "recordings/2026-08-18/2026-08-18_20-00-00", time.Now(), Options{})
 	require.NoError(t, err)
 
 	api.mu.Lock()
@@ -300,7 +300,7 @@ func TestUploadSession_alreadyCompleteShortCircuits(t *testing.T) {
 	writeFile(t, dir, "meta.json", []byte(`{}`))
 
 	c := New(Config{BaseURL: apiSrv.URL, APIKey: "test-key"})
-	err := c.UploadSession(context.Background(), dir, "recordings/done", time.Now())
+	err := c.UploadSession(context.Background(), dir, "recordings/done", time.Now(), Options{})
 	require.NoError(t, err)
 
 	api.mu.Lock()
@@ -313,7 +313,7 @@ func TestUploadSession_emptyDirIsANoop(t *testing.T) {
 	dir := t.TempDir()
 
 	c := New(Config{BaseURL: apiSrv.URL, APIKey: "test-key"})
-	err := c.UploadSession(context.Background(), dir, "recordings/empty", time.Now())
+	err := c.UploadSession(context.Background(), dir, "recordings/empty", time.Now(), Options{})
 	require.NoError(t, err)
 
 	api.mu.Lock()
@@ -332,7 +332,7 @@ func TestUploadSession_largeFileUsesMultipart(t *testing.T) {
 	writeFile(t, dir, "video.mp4", big)
 
 	c := New(Config{BaseURL: apiSrv.URL, APIKey: "test-key", MultipartThreshold: 10, PartSize: 10})
-	err := c.UploadSession(context.Background(), dir, "recordings/big", time.Now())
+	err := c.UploadSession(context.Background(), dir, "recordings/big", time.Now(), Options{})
 	require.NoError(t, err)
 
 	api.mu.Lock()
@@ -353,7 +353,7 @@ func TestUploadSession_failureMarksSessionFailed(t *testing.T) {
 	writeFile(t, dir, "meta.json", []byte(`{}`))
 
 	c := New(Config{BaseURL: apiSrv.URL, APIKey: "test-key"})
-	err := c.UploadSession(context.Background(), dir, "recordings/fails", time.Now())
+	err := c.UploadSession(context.Background(), dir, "recordings/fails", time.Now(), Options{})
 	require.Error(t, err)
 
 	api.mu.Lock()
@@ -371,7 +371,7 @@ func TestUploadSession_wrongAPIKeyFails(t *testing.T) {
 	writeFile(t, dir, "meta.json", []byte(`{}`))
 
 	c := New(Config{BaseURL: apiSrv.URL, APIKey: "wrong"})
-	err := c.UploadSession(context.Background(), dir, "recordings/x", time.Now())
+	err := c.UploadSession(context.Background(), dir, "recordings/x", time.Now(), Options{})
 	require.Error(t, err)
 }
 

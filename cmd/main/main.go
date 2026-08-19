@@ -183,11 +183,12 @@ loop:
 			slog.Info("session rotated", "session", sess.RealDir())
 
 			if uploader != nil {
+				opts := uploadOptions(bootTimebasePath, finished.RealDir())
 				uploadWG.Add(1)
-				go func(dir, apiDir string, startedAt time.Time) {
+				go func(dir, apiDir string, startedAt time.Time, opts upload.Options) {
 					defer uploadWG.Done()
-					uploadSession(uploader, dir, apiDir, startedAt, uploadDelete)
-				}(finished.RealDir(), apiSessionDir(recordingsDir, finished.RealDir()), time.Unix(0, finished.StartUnixNs()))
+					uploadSession(uploader, dir, apiDir, startedAt, uploadDelete, opts)
+				}(finished.RealDir(), apiSessionDir(recordingsDir, finished.RealDir()), time.Unix(0, finished.StartUnixNs()), opts)
 			}
 		}
 	}
@@ -202,7 +203,8 @@ loop:
 	snapshotTimebase(bootTimebasePath, sess.RealDir())
 
 	if uploader != nil {
-		uploadSession(uploader, sess.RealDir(), apiSessionDir(recordingsDir, sess.RealDir()), time.Unix(0, sess.StartUnixNs()), uploadDelete)
+		opts := uploadOptions(bootTimebasePath, sess.RealDir())
+		uploadSession(uploader, sess.RealDir(), apiSessionDir(recordingsDir, sess.RealDir()), time.Unix(0, sess.StartUnixNs()), uploadDelete, opts)
 	}
 	uploadWG.Wait()
 
@@ -220,21 +222,59 @@ loop:
 // later run -- or a manual re-run of this recorder -- can retry; the
 // openmind-api recognizes a retry against the same session_dir as a resume,
 // not a duplicate.
-func uploadSession(client *upload.Client, dir, sessionDir string, startedAt time.Time, deleteAfter bool) {
+//
+// deleteAfter is ignored when opts.PreserveJSONL is set: that means dir is
+// the boot session's own directory, which still physically holds the live
+// clock journal (see uploadOptions) -- removing dir would delete that out
+// from under the running clock.Watcher, the same failure this preserves
+// against inside the upload itself.
+func uploadSession(client *upload.Client, dir, sessionDir string, startedAt time.Time, deleteAfter bool, opts upload.Options) {
 	ctx, cancel := context.WithTimeout(context.Background(), uploadTimeout)
 	defer cancel()
 
-	if err := client.UploadSession(ctx, dir, sessionDir, startedAt); err != nil {
+	if err := client.UploadSession(ctx, dir, sessionDir, startedAt, opts); err != nil {
 		slog.Error("session upload failed; files kept locally for retry", "dir", dir, "err", err)
 		return
 	}
 	slog.Info("session uploaded", "dir", dir, "session_dir", sessionDir)
 
-	if deleteAfter {
+	if deleteAfter && opts.PreserveJSONL == "" {
 		if err := os.RemoveAll(dir); err != nil {
 			slog.Warn("could not delete uploaded session directory", "dir", dir, "err", err)
 		}
 	}
+}
+
+// uploadOptions builds the upload.Options for uploading dir: PreserveJSONL is
+// set to protect the live clock journal when dir is currently the boot
+// session's own directory (see bootSessionDir), and left empty for every
+// other, fully-closed segment.
+func uploadOptions(bootTimebasePath, dir string) upload.Options {
+	if bootSessionDir(bootTimebasePath, dir) {
+		return upload.Options{PreserveJSONL: clock.TimebaseName}
+	}
+	return upload.Options{}
+}
+
+// bootSessionDir reports whether dir is currently the directory holding the
+// live boot-relative clock journal at bootTimebasePath -- the one
+// clock.Watcher opened once at process start and keeps appending to for the
+// whole process's life, regardless of rotation.
+//
+// Compared by file identity (device + inode) rather than string equality:
+// bootTimebasePath can be a symlink (an unsynced-at-boot session's Dir()),
+// whose target directory differs textually from a later realDir that still
+// resolves to the very same file once Promote() repoints the symlink.
+func bootSessionDir(bootTimebasePath, dir string) bool {
+	want, err := os.Stat(bootTimebasePath)
+	if err != nil {
+		return false
+	}
+	got, err := os.Stat(filepath.Join(dir, clock.TimebaseName))
+	if err != nil {
+		return false
+	}
+	return os.SameFile(want, got)
 }
 
 // apiSessionDir builds the openmind-api's session_dir grouping key from a
@@ -254,10 +294,10 @@ func apiSessionDir(recordingsDir, realDir string) string {
 // session's own directory, so downstream tools that expect a
 // clock_timebase.jsonl alongside each session's files find one without
 // needing the boot session too. Best-effort: the boot session already has
-// the real file (via clock.Watcher), so this is a no-op for it.
+// the real file (via clock.Watcher), so this is a no-op for it (see
+// bootSessionDir).
 func snapshotTimebase(bootPath, sessionDir string) {
-	dst := filepath.Join(sessionDir, clock.TimebaseName)
-	if dst == bootPath {
+	if bootSessionDir(bootPath, sessionDir) {
 		return
 	}
 	raw, err := os.ReadFile(bootPath)
@@ -265,6 +305,7 @@ func snapshotTimebase(bootPath, sessionDir string) {
 		slog.Warn("could not snapshot clock timebase for rotated session", "err", err)
 		return
 	}
+	dst := filepath.Join(sessionDir, clock.TimebaseName)
 	if err := os.WriteFile(dst, raw, 0o644); err != nil {
 		slog.Warn("could not write clock timebase snapshot", "dst", dst, "err", err)
 	}

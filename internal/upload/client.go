@@ -87,29 +87,37 @@ type sessionResp struct {
 }
 
 // UploadSession runs the preprocess pipeline over localDir (see
-// preprocess.go), then uploads every regular file directly under it to the
-// openmind-api under sessionDir (grouping key the API records against the
-// session; see CreateDataCollectionSession's session_dir), then marks the
-// session complete. startedAt should be the session's own start time, not
-// the upload time.
+// preprocess.go; opts configures it -- the zero value is right for an
+// ordinary, fully-closed segment), then uploads every regular file directly
+// under it to the openmind-api under sessionDir (grouping key the API
+// records against the session; see CreateDataCollectionSession's
+// session_dir), then marks the session complete. startedAt should be the
+// session's own start time, not the upload time.
 //
 // Best-effort: on any error after the session is created, the session is
 // marked "failed" server-side (so a retry with the same sessionDir is
 // recognized as a resume, not a duplicate) and the error is returned. Local
 // files are never touched here -- callers decide whether/when to delete
 // them, and only after a nil error.
-func (c *Client) UploadSession(ctx context.Context, localDir, sessionDir string, startedAt time.Time) error {
+func (c *Client) UploadSession(ctx context.Context, localDir, sessionDir string, startedAt time.Time, opts Options) error {
 	if !c.cfg.Ready() {
 		return errors.New("upload: not configured (base URL / API key unset)")
 	}
 
-	if err := preprocess(localDir); err != nil {
+	if err := preprocess(localDir, opts); err != nil {
 		return fmt.Errorf("upload: %w", err)
 	}
 
 	files, err := regularFiles(localDir)
 	if err != nil {
 		return fmt.Errorf("upload: list %s: %w", localDir, err)
+	}
+	// opts.PreserveJSONL, if set, is still sitting in localDir (preprocess
+	// converted it but deliberately didn't remove it) -- it must not be
+	// uploaded itself; its converted .json counterpart, already in files, is
+	// what stands in for it.
+	if opts.PreserveJSONL != "" {
+		files = removeName(files, opts.PreserveJSONL)
 	}
 	if len(files) == 0 {
 		return nil
@@ -412,4 +420,14 @@ func regularFiles(dir string) ([]string, error) {
 	}
 	sort.Strings(names)
 	return names, nil
+}
+
+// removeName returns names with the first occurrence of target removed.
+func removeName(names []string, target string) []string {
+	for i, n := range names {
+		if n == target {
+			return append(names[:i:i], names[i+1:]...)
+		}
+	}
+	return names
 }

@@ -10,11 +10,27 @@ import (
 	"strings"
 )
 
+// Options carries per-call context the preprocess pipeline needs, as opposed
+// to Config, which is fixed for a Client's whole lifetime.
+type Options struct {
+	// PreserveJSONL, if set, is the bare filename (e.g.
+	// "clock_timebase.jsonl") of a *.jsonl file that convertJSONLToJSON must
+	// still convert to .json for upload, but must never remove the source
+	// of. Needed for internal/clock's boot-relative journal: a
+	// clock.Watcher opens it once and keeps appending to it for the whole
+	// process's life regardless of which segment is "current", so unlike
+	// every other segment's JSONL output it is never actually finished when
+	// its containing segment closes. Every other segment's copy of it (see
+	// cmd/main's snapshotTimebase) is an independent, already-closed
+	// snapshot and is safe to remove once converted.
+	PreserveJSONL string
+}
+
 // preprocessStep transforms localDir in place before its files are uploaded.
 // A session can be retried after a partial upload (see UploadSession), so
 // every step must be idempotent: safe to run again on a directory it already
 // processed.
-type preprocessStep func(localDir string) error
+type preprocessStep func(localDir string, opts Options) error
 
 // preprocessSteps is the fixed pipeline UploadSession runs, once per session,
 // after the session is closed but before any file is uploaded -- this is the
@@ -25,9 +41,9 @@ var preprocessSteps = []preprocessStep{
 	convertJSONLToJSON,
 }
 
-func preprocess(localDir string) error {
+func preprocess(localDir string, opts Options) error {
 	for _, step := range preprocessSteps {
-		if err := step(localDir); err != nil {
+		if err := step(localDir, opts); err != nil {
 			return err
 		}
 	}
@@ -36,7 +52,8 @@ func preprocess(localDir string) error {
 
 // convertJSONLToJSON rewrites every *.jsonl file directly under localDir as a
 // same-named *.json file holding a single JSON array of its records, then
-// removes the .jsonl.
+// removes the .jsonl -- unless it's named by opts.PreserveJSONL, in which
+// case the source is left in place.
 //
 // Recording itself must keep writing JSONL (see internal/clock and
 // internal/features): it's an append-only log written incrementally, in one
@@ -50,7 +67,7 @@ func preprocess(localDir string) error {
 //
 // Idempotent: a file with no .jsonl counterpart (already converted by an
 // earlier, later-failed attempt) is left untouched.
-func convertJSONLToJSON(localDir string) error {
+func convertJSONLToJSON(localDir string, opts Options) error {
 	entries, err := os.ReadDir(localDir)
 	if err != nil {
 		return fmt.Errorf("preprocess: list %s: %w", localDir, err)
@@ -63,6 +80,9 @@ func convertJSONLToJSON(localDir string) error {
 		dst := strings.TrimSuffix(src, "l") // "foo.jsonl" -> "foo.json"
 		if err := jsonlToJSONArray(src, dst); err != nil {
 			return fmt.Errorf("preprocess: convert %s: %w", e.Name(), err)
+		}
+		if e.Name() == opts.PreserveJSONL {
+			continue
 		}
 		if err := os.Remove(src); err != nil {
 			return fmt.Errorf("preprocess: remove %s: %w", e.Name(), err)
