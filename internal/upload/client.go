@@ -204,8 +204,12 @@ func (c *Client) fail(ctx context.Context, sessionID string, cause error) {
 }
 
 // uploadDirect POSTs one file straight to S3 using a presigned POST policy.
-// The multipart body is streamed rather than buffered, since files up to
-// MultipartThreshold (large by default) go through this path.
+// The multipart body is buffered rather than streamed: S3's presigned-POST
+// endpoint rejects a chunked request with 411 Length Required, so the
+// request needs a Content-Length known up front. Only files under
+// MultipartThreshold take this path -- the default (100 MiB) bounds how
+// much this ever holds in memory at once; anything larger goes through
+// uploadMultipart's part-by-part PUT instead, which streams from disk.
 func (c *Client) uploadDirect(ctx context.Context, post *presignedPOST, key, path string) error {
 	f, err := os.Open(path)
 	if err != nil {
@@ -213,45 +217,44 @@ func (c *Client) uploadDirect(ctx context.Context, post *presignedPOST, key, pat
 	}
 	defer f.Close()
 
-	pr, pw := io.Pipe()
-	mw := multipart.NewWriter(pw)
+	var body bytes.Buffer
+	mw := multipart.NewWriter(&body)
 
-	go func() {
-		pw.CloseWithError(func() error {
-			keys := make([]string, 0, len(post.Fields))
-			for k := range post.Fields {
-				keys = append(keys, k)
-			}
-			sort.Strings(keys)
-			for _, k := range keys {
-				if err := mw.WriteField(k, post.Fields[k]); err != nil {
-					return err
-				}
-			}
-			if err := mw.WriteField("key", key); err != nil {
-				return err
-			}
-			if err := mw.WriteField("Content-Type", "application/octet-stream"); err != nil {
-				return err
-			}
-			// "file" must be the last field: S3 stops reading the policy
-			// against fields that follow it.
-			fw, err := mw.CreateFormFile("file", filepath.Base(path))
-			if err != nil {
-				return err
-			}
-			if _, err := io.Copy(fw, f); err != nil {
-				return err
-			}
-			return mw.Close()
-		}())
-	}()
+	keys := make([]string, 0, len(post.Fields))
+	for k := range post.Fields {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	for _, k := range keys {
+		if err := mw.WriteField(k, post.Fields[k]); err != nil {
+			return err
+		}
+	}
+	if err := mw.WriteField("key", key); err != nil {
+		return err
+	}
+	if err := mw.WriteField("Content-Type", "application/octet-stream"); err != nil {
+		return err
+	}
+	// "file" must be the last field: S3 stops reading the policy against
+	// fields that follow it.
+	fw, err := mw.CreateFormFile("file", filepath.Base(path))
+	if err != nil {
+		return err
+	}
+	if _, err := io.Copy(fw, f); err != nil {
+		return err
+	}
+	if err := mw.Close(); err != nil {
+		return err
+	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, post.URL, pr)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, post.URL, bytes.NewReader(body.Bytes()))
 	if err != nil {
 		return err
 	}
 	req.Header.Set("Content-Type", mw.FormDataContentType())
+	req.ContentLength = int64(body.Len())
 
 	resp, err := c.hc.Do(req)
 	if err != nil {
