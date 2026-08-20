@@ -147,6 +147,7 @@ Any of the following override the selected profile / defaults:
 - `DELETE_AFTER_UPLOAD` - Delete a session's local files once it has uploaded successfully (default: `false` — keep everything locally regardless of upload)
 - `UPLOAD_MULTIPART_THRESHOLD_BYTES` - Files at or above this size go through S3 multipart upload instead of a single presigned POST (default: `104857600`, 100 MiB)
 - `UPLOAD_PART_SIZE_BYTES` - Chunk size for multipart uploads (default: `16777216`, 16 MiB)
+- `UPLOAD_CONCURRENCY` - How many of a session's files upload at the same time, instead of one at a time sharing the session's whole upload deadline (default: `4`)
 - `RETENTION_MAX_BYTES` - Hard cap on `RECORDINGS_DIR`'s total size; once exceeded, sessions are deleted oldest first (preferring already-uploaded ones, but not-yet-uploaded ones too if that's what it takes) until it isn't (default: `107374182400`, 100 GiB; `0` disables cap enforcement — see "Retention & the catch-up/cap sweep" below)
 - `RETENTION_SWEEP_INTERVAL` - How often the retention sweep looks for finished-but-not-yet-uploaded sessions and, if over the cap, deletes uploaded ones (default: `5m`)
 
@@ -385,7 +386,14 @@ Uploading is best-effort and runs in the background while the next segment
 records: a failed upload marks the session `failed` server-side and leaves
 the local files untouched, so a later run — the openmind-api resumes an
 upload against the same `session_dir` instead of duplicating it — or a
-manual retry can pick it back up. `DELETE_AFTER_UPLOAD=true` removes a
+manual retry can pick it back up. Within one segment, up to
+`UPLOAD_CONCURRENCY` files upload at the same time rather than one after
+another — otherwise a big file early in the (alphabetical) upload order can
+burn most of the segment's upload deadline on a slow link, leaving small
+files later in the order to fail with a timeout despite being individually
+quick. The first file to fail cancels the rest of that segment's in-flight
+and pending uploads rather than letting them keep spending the deadline on a
+segment that's already going to be retried as a whole. `DELETE_AFTER_UPLOAD=true` removes a
 segment's local files once (and only once) its upload has actually
 succeeded; it stays off by default; a robot's disk is cheap compared to
 losing data to a bug in a new upload path.

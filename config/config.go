@@ -78,6 +78,8 @@ type UploadConfig struct {
 	DeleteAfterUpload  bool
 	MultipartThreshold int64
 	PartSize           int64
+	// Concurrency caps how many of a session's files upload at once.
+	Concurrency int
 }
 
 // Ready reports whether upload is both requested and fully configured.
@@ -91,6 +93,7 @@ func (c UploadConfig) ClientConfig() upload.Config {
 		APIKey:             c.APIKey,
 		MultipartThreshold: c.MultipartThreshold,
 		PartSize:           c.PartSize,
+		Concurrency:        c.Concurrency,
 	}
 }
 
@@ -252,6 +255,7 @@ func Load(sessionDir string) Config {
 			DeleteAfterUpload:  envBool("DELETE_AFTER_UPLOAD", false),
 			MultipartThreshold: envInt64("UPLOAD_MULTIPART_THRESHOLD_BYTES", upload.DefaultMultipartThreshold),
 			PartSize:           envInt64("UPLOAD_PART_SIZE_BYTES", upload.DefaultPartSize),
+			Concurrency:        int(envInt64("UPLOAD_CONCURRENCY", upload.DefaultConcurrency)),
 		},
 		Retention: RetentionConfig{
 			MaxBytes:      envInt64("RETENTION_MAX_BYTES", 100*1024*1024*1024),

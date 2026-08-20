@@ -7,6 +7,8 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/require"
+
+	"om1-telemetry/internal/upload"
 )
 
 const testSessionDir = "/tmp/session"
@@ -178,6 +180,16 @@ func TestLoad_uploadReadyWithCredentials(t *testing.T) {
 
 	require.True(t, cfg.Upload.Ready())
 	require.Equal(t, "https://api.example.com/api/core/v1", cfg.Upload.BaseURL, "trailing slash must be trimmed")
+}
+
+func TestLoad_uploadConcurrencyDefaultsAndOverrides(t *testing.T) {
+	t.Setenv("UPLOAD_CONCURRENCY", "")
+	cfg := Load(testSessionDir)
+	require.Equal(t, upload.DefaultConcurrency, cfg.Upload.Concurrency)
+
+	t.Setenv("UPLOAD_CONCURRENCY", "8")
+	cfg = Load(testSessionDir)
+	require.Equal(t, 8, cfg.Upload.Concurrency)
 }
 
 func TestLoad_uploadDisabledOverridesCredentials(t *testing.T) {

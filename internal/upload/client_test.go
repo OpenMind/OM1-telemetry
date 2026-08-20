@@ -29,6 +29,14 @@ type fakeAPI struct {
 	preComplete   string // session_dir that should short-circuit as already complete
 	failRequests  map[string]int
 	multipartData map[string][]byte // uploadID -> reassembled bytes
+
+	// postDelay, when set, makes every direct-POST S3 upload take that long,
+	// so a test can tell concurrent uploads from serial ones by wall-clock
+	// time. running/maxRunning track how many such uploads actually
+	// overlapped.
+	postDelay  time.Duration
+	running    int
+	maxRunning int
 }
 
 type fakeSession struct {
@@ -226,6 +234,22 @@ func (a *fakeAPI) completeMultipart(w http.ResponseWriter, r *http.Request) {
 func (a *fakeAPI) handleS3(w http.ResponseWriter, r *http.Request) {
 	switch {
 	case r.Method == http.MethodPost && r.URL.Path == "/":
+		a.mu.Lock()
+		delay := a.postDelay
+		if delay > 0 {
+			a.running++
+			if a.running > a.maxRunning {
+				a.maxRunning = a.running
+			}
+		}
+		a.mu.Unlock()
+		if delay > 0 {
+			time.Sleep(delay)
+			a.mu.Lock()
+			a.running--
+			a.mu.Unlock()
+		}
+
 		if err := r.ParseMultipartForm(64 << 20); err != nil {
 			w.WriteHeader(http.StatusBadRequest)
 			return
@@ -295,6 +319,32 @@ func TestUploadSession_smallFilesUseDirectPost(t *testing.T) {
 		require.Equal(t, []byte(`{"ok":true}`), sess.uploaded["meta.json"])
 		require.Equal(t, []byte("scandata"), sess.uploaded["network_status.csv"])
 	}
+}
+
+func TestUploadSession_uploadsFilesConcurrently(t *testing.T) {
+	api, apiSrv, _ := newFakeAPI(t)
+	api.postDelay = 50 * time.Millisecond
+
+	dir := t.TempDir()
+	const n = 8
+	for i := 0; i < n; i++ {
+		writeFile(t, dir, fmt.Sprintf("file%02d.csv", i), []byte("data"))
+	}
+
+	c := New(Config{BaseURL: apiSrv.URL, APIKey: "test-key", Concurrency: 4})
+
+	start := time.Now()
+	err := c.UploadSession(context.Background(), dir, "recordings/concurrent", time.Now(), Options{})
+	elapsed := time.Since(start)
+	require.NoError(t, err)
+
+	require.Less(t, elapsed, time.Duration(n)*api.postDelay,
+		"n uploads each taking postDelay finished faster than serial would allow, so they must have overlapped")
+
+	api.mu.Lock()
+	defer api.mu.Unlock()
+	require.Greater(t, api.maxRunning, 1, "expected more than one file in flight at once")
+	require.LessOrEqual(t, api.maxRunning, 4, "concurrency should be bounded by Config.Concurrency")
 }
 
 func TestUploadSession_alreadyCompleteShortCircuits(t *testing.T) {
@@ -407,4 +457,12 @@ func TestConfig_readyRequiresBothFields(t *testing.T) {
 	require.False(t, Config{BaseURL: "https://x"}.Ready())
 	require.False(t, Config{APIKey: "k"}.Ready())
 	require.True(t, Config{BaseURL: "https://x", APIKey: "k"}.Ready())
+}
+
+func TestNew_concurrencyDefaultsWhenUnset(t *testing.T) {
+	c := New(Config{BaseURL: "https://x", APIKey: "k"})
+	require.Equal(t, DefaultConcurrency, c.cfg.Concurrency)
+
+	c = New(Config{BaseURL: "https://x", APIKey: "k", Concurrency: 2})
+	require.Equal(t, 2, c.cfg.Concurrency)
 }

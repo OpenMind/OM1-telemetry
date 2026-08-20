@@ -19,6 +19,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -31,6 +32,15 @@ const (
 	DefaultMultipartThreshold = 100 * 1024 * 1024
 	// DefaultPartSize is the chunk size used for multipart uploads.
 	DefaultPartSize = 16 * 1024 * 1024
+	// DefaultConcurrency is how many of a session's files are uploaded at
+	// once. Files used to go one at a time, sharing a single deadline
+	// (cmd/main's uploadTimeout) across the whole session -- on a slow link,
+	// a big file early in the (alphabetical) upload order could burn most of
+	// that budget, starving small files later in the order even though they
+	// individually would've been quick. Uploading several files at once lets
+	// the small ones finish independently of the big ones instead of queuing
+	// behind them.
+	DefaultConcurrency = 4
 
 	// requestTimeout bounds any single HTTP request the client makes. It is
 	// a backstop, not the real limiter: every request already carries the
@@ -56,10 +66,14 @@ type Config struct {
 	BaseURL string
 	// APIKey is sent as "Authorization: Bearer <APIKey>".
 	APIKey string
-	// MultipartThreshold and PartSize default to the Default* constants above
-	// when zero.
+	// MultipartThreshold, PartSize, and Concurrency default to the Default*
+	// constants above when zero.
 	MultipartThreshold int64
 	PartSize           int64
+	// Concurrency caps how many of a session's files upload at the same
+	// time. Independent of MultipartThreshold/PartSize, which apply within
+	// one file.
+	Concurrency int
 	// HTTPClient overrides the default client; used by tests.
 	HTTPClient *http.Client
 }
@@ -81,6 +95,9 @@ func New(cfg Config) *Client {
 	}
 	if cfg.PartSize <= 0 {
 		cfg.PartSize = DefaultPartSize
+	}
+	if cfg.Concurrency <= 0 {
+		cfg.Concurrency = DefaultConcurrency
 	}
 	hc := cfg.HTTPClient
 	if hc == nil {
@@ -146,48 +163,136 @@ func (c *Client) UploadSession(ctx context.Context, localDir, sessionDir string,
 		return nil // an earlier run already finished this session's upload
 	}
 
-	post := sess.Upload
-	for _, name := range files {
-		path := filepath.Join(localDir, name)
-		info, err := os.Stat(path)
-		if err != nil {
-			c.fail(ctx, sess.SessionID, err)
-			return fmt.Errorf("upload: stat %s: %w", path, err)
-		}
-
-		if info.Size() >= c.cfg.MultipartThreshold {
-			if err := c.uploadMultipart(ctx, sess.SessionID, path, name); err != nil {
-				c.fail(ctx, sess.SessionID, err)
-				return fmt.Errorf("upload: %s: %w", name, err)
-			}
-			continue
-		}
-
-		if post == nil {
-			renewed, err := c.renew(ctx, sess.SessionID)
-			if err != nil {
-				c.fail(ctx, sess.SessionID, err)
-				return fmt.Errorf("upload: renew policy: %w", err)
-			}
-			post = renewed
-		}
-		if err := c.uploadDirect(ctx, post, sess.S3Prefix+name, path); err != nil {
-			// One retry against a freshly-presigned policy covers the
-			// 45-minute-window edge case on a session that took a while.
-			renewed, rerr := c.renew(ctx, sess.SessionID)
-			if rerr != nil {
-				c.fail(ctx, sess.SessionID, err)
-				return fmt.Errorf("upload: %s: %w", name, err)
-			}
-			post = renewed
-			if err := c.uploadDirect(ctx, post, sess.S3Prefix+name, path); err != nil {
-				c.fail(ctx, sess.SessionID, err)
-				return fmt.Errorf("upload: %s: %w", name, err)
-			}
-		}
+	if err := c.uploadFiles(ctx, sess, localDir, files); err != nil {
+		c.fail(ctx, sess.SessionID, err)
+		return fmt.Errorf("upload: %w", err)
 	}
 
 	return c.complete(ctx, sess.SessionID)
+}
+
+// uploadFiles uploads every file in files, up to Concurrency at a time.
+// Files are independent of each other server-side (distinct S3 keys, or for
+// multipart, distinct upload IDs), so nothing about running several at once
+// changes what gets uploaded -- only how long it takes to get through a
+// session's worth of files on a slow link before the caller's context (in
+// production, cmd/main's uploadTimeout, shared across the whole session)
+// runs out. On the first failure, the shared context is cancelled so
+// in-flight and not-yet-started uploads stop promptly instead of continuing
+// to spend the session's remaining time budget on a session that's already
+// going to be reported as failed.
+func (c *Client) uploadFiles(ctx context.Context, sess *sessionResp, localDir string, files []string) error {
+	uploadCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	post := &postBox{sessionID: sess.SessionID, post: sess.Upload}
+
+	sem := make(chan struct{}, c.cfg.Concurrency)
+	var wg sync.WaitGroup
+	var once sync.Once
+	var firstErr error
+
+	fail := func(name string, err error) {
+		once.Do(func() {
+			firstErr = fmt.Errorf("%s: %w", name, err)
+			cancel()
+		})
+	}
+
+	for _, name := range files {
+		sem <- struct{}{}
+		wg.Add(1)
+		go func(name string) {
+			defer wg.Done()
+			defer func() { <-sem }()
+			c.uploadOne(uploadCtx, sess, localDir, name, post, fail)
+		}(name)
+	}
+	wg.Wait()
+
+	return firstErr
+}
+
+// uploadOne uploads a single file, choosing multipart vs. direct-POST by
+// size, and reports any failure through fail rather than returning an error
+// -- callers run this concurrently across files and only the first failure
+// matters (fail keeps it and cancels the shared context; later ones are
+// discarded once ctx is already cancelled).
+func (c *Client) uploadOne(ctx context.Context, sess *sessionResp, localDir, name string, post *postBox, fail func(name string, err error)) {
+	path := filepath.Join(localDir, name)
+	info, err := os.Stat(path)
+	if err != nil {
+		fail(name, fmt.Errorf("stat %s: %w", path, err))
+		return
+	}
+
+	if info.Size() >= c.cfg.MultipartThreshold {
+		if err := c.uploadMultipart(ctx, sess.SessionID, path, name); err != nil {
+			fail(name, err)
+		}
+		return
+	}
+
+	p, err := post.get(ctx, c)
+	if err != nil {
+		fail(name, fmt.Errorf("renew policy: %w", err))
+		return
+	}
+	if err := c.uploadDirect(ctx, p, sess.S3Prefix+name, path); err != nil {
+		// One retry against a freshly-presigned policy covers the
+		// 45-minute-window edge case on a session that took a while.
+		p, rerr := post.forceRenew(ctx, c)
+		if rerr != nil {
+			fail(name, err)
+			return
+		}
+		if err := c.uploadDirect(ctx, p, sess.S3Prefix+name, path); err != nil {
+			fail(name, err)
+		}
+	}
+}
+
+// postBox holds the presigned-POST policy files share for direct (non-
+// multipart) uploads within one session. With uploads now running
+// concurrently, several files can need it at once, so access is
+// mutex-guarded; get in particular holds the lock across the network call on
+// a cold box so a burst of files all finding no policy yet only triggers one
+// renew, not one per file.
+type postBox struct {
+	sessionID string
+
+	mu   sync.Mutex
+	post *presignedPOST
+}
+
+// get returns the current policy, renewing once if none has been fetched
+// yet.
+func (b *postBox) get(ctx context.Context, c *Client) (*presignedPOST, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.post != nil {
+		return b.post, nil
+	}
+	renewed, err := c.renew(ctx, b.sessionID)
+	if err != nil {
+		return nil, err
+	}
+	b.post = renewed
+	return b.post, nil
+}
+
+// forceRenew fetches a fresh policy regardless of what's cached and stores
+// it for subsequent get/forceRenew calls, for when the cached one was just
+// tried and rejected.
+func (b *postBox) forceRenew(ctx context.Context, c *Client) (*presignedPOST, error) {
+	renewed, err := c.renew(ctx, b.sessionID)
+	if err != nil {
+		return nil, err
+	}
+	b.mu.Lock()
+	b.post = renewed
+	b.mu.Unlock()
+	return renewed, nil
 }
 
 func (c *Client) createSession(ctx context.Context, sessionDir string, startedAt time.Time) (*sessionResp, error) {
