@@ -32,7 +32,21 @@ const (
 	// DefaultPartSize is the chunk size used for multipart uploads.
 	DefaultPartSize = 16 * 1024 * 1024
 
-	requestTimeout = 2 * time.Minute
+	// requestTimeout bounds any single HTTP request the client makes. It is
+	// a backstop, not the real limiter: every request already carries the
+	// caller's context (see UploadSession's ctx, threaded through via
+	// http.NewRequestWithContext), and in production that context's own
+	// deadline -- cmd/main's uploadTimeout, 10 minutes for the whole
+	// session -- is what actually bounds how long a slow request gets,
+	// shared across however many requests the session ends up making. This
+	// only exists to cap a request whose caller passed a context with no
+	// deadline of its own (e.g. some tests). It used to be 2 minutes, which
+	// in practice *was* the real limit on a slow link -- short enough that
+	// even a single 16 MiB multipart part could time out on a robot's
+	// wobbly uplink despite the session as a whole having minutes of budget
+	// left, forcing an otherwise-fine slow upload to fail and restart the
+	// whole file from part 1 (multipart has no partial resume).
+	requestTimeout = 10 * time.Minute
 )
 
 // Config configures the openmind-api uploader.
