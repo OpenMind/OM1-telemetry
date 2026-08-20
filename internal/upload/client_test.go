@@ -275,7 +275,12 @@ func TestUploadSession_smallFilesUseDirectPost(t *testing.T) {
 
 	dir := t.TempDir()
 	writeFile(t, dir, "meta.json", []byte(`{"ok":true}`))
-	writeFile(t, dir, "lidar_scans.bin", []byte("scandata"))
+	// network_status.csv isn't one of the preprocessing pipeline's
+	// compression targets, so it's a stand-in for "some small file" here --
+	// deliberately not lidar_scans.bin/odom_frames.bin/lowstate_frames.bin,
+	// which compressWholeFiles now intercepts (see TestUploadSession_
+	// compressesLargeBinaryFilesBeforeUpload in preprocess_test.go).
+	writeFile(t, dir, "network_status.csv", []byte("scandata"))
 
 	c := New(Config{BaseURL: apiSrv.URL, APIKey: "test-key"})
 	err := c.UploadSession(context.Background(), dir, "recordings/2026-08-18/2026-08-18_20-00-00", time.Now(), Options{})
@@ -288,7 +293,7 @@ func TestUploadSession_smallFilesUseDirectPost(t *testing.T) {
 		require.Equal(t, "recordings/2026-08-18/2026-08-18_20-00-00", sess.sessionDir)
 		require.Equal(t, "complete", sess.status)
 		require.Equal(t, []byte(`{"ok":true}`), sess.uploaded["meta.json"])
-		require.Equal(t, []byte("scandata"), sess.uploaded["lidar_scans.bin"])
+		require.Equal(t, []byte("scandata"), sess.uploaded["network_status.csv"])
 	}
 }
 

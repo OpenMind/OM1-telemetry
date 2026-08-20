@@ -163,3 +163,36 @@ func TestUploadSession_preserveOptionKeepsLocalSourceAfterUpload(t *testing.T) {
 		require.True(t, gotJSON)
 	}
 }
+
+func TestUploadSession_compressesLargeBinaryFilesBeforeUpload(t *testing.T) {
+	api, apiSrv, _ := newFakeAPI(t)
+
+	dir := t.TempDir()
+	writeFile(t, dir, "meta.json", []byte(`{"ok":true}`))
+	writeFile(t, dir, "lowstate_frames.bin", []byte("lowstate payload lowstate payload lowstate payload"))
+
+	c := New(Config{BaseURL: apiSrv.URL, APIKey: "test-key"})
+	err := c.UploadSession(t.Context(), dir, "recordings/2026-08-20/2026-08-20_00-00-00", time.Now(), Options{})
+	require.NoError(t, err)
+
+	require.FileExists(t, filepath.Join(dir, "raw", "lowstate_frames.bin"),
+		"the original must be kept locally, just not uploaded")
+
+	api.mu.Lock()
+	defer api.mu.Unlock()
+	require.Len(t, api.sessions, 1)
+	for _, sess := range api.sessions {
+		require.Equal(t, "complete", sess.status)
+		_, gotOriginal := sess.uploaded["lowstate_frames.bin"]
+		require.False(t, gotOriginal, "the raw .bin must never reach S3 -- only the compressed form does")
+
+		compressed, ok := sess.uploaded["lowstate_frames.zstd.bin"]
+		require.True(t, ok, "the zstd-compressed form must be uploaded instead")
+		decompressed, err := zstdDecompress(compressed)
+		require.NoError(t, err)
+		require.Equal(t, []byte("lowstate payload lowstate payload lowstate payload"), decompressed)
+
+		_, gotMeta := sess.uploaded["meta.json"]
+		require.True(t, gotMeta)
+	}
+}

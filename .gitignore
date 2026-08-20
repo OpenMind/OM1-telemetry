@@ -1,6 +1,7 @@
 .DS_Store
 .claude/
 .cyclonedds/
+.draco/
 .zenoh-c/
 __pycache__/
 bin/

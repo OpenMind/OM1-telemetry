@@ -18,6 +18,7 @@ All streams are timestamped and organized into session directories for easy alig
 - **Go 1.25** or later
 - **ffmpeg** installed and available in PATH
 - **CMake + a C compiler** (to build CycloneDDS — see "Build prerequisites" below)
+- **`draco_encoder` on PATH** (optional — only needed for point cloud compression before upload; run `make install-draco` to build it. See "Compressing the large binary streams" below.)
 
 ### Build prerequisites (CycloneDDS)
 
@@ -406,16 +407,59 @@ list (`preprocessSteps`) and must each be idempotent, since a failed upload
 leaves the segment on disk for a later retry that re-runs the same pipeline.
 Add new steps here as more preprocessing is needed.
 
-The only step today, `convertJSONLToJSON`, rewrites every `*.jsonl` file
-(`clock_timebase.jsonl`, and `video_features.jsonl` if enabled) into a
-same-named `*.json` holding a single JSON array of its records, then
-removes the `.jsonl`. Recording itself keeps writing JSONL — it's an
-append-only log, written incrementally and in the features case while it's
-being tailed live, so it needs every completed line to stay valid even if
-the process dies mid-write, a property a single JSON document doesn't have.
-But openmind-api's S3 bucket policy only allows a fixed extension
-whitelist that doesn't include `.jsonl`, so the now-static log gets
-converted to one real JSON document right before it's uploaded.
+`convertJSONLToJSON` rewrites every `*.jsonl` file (`clock_timebase.jsonl`,
+and `video_features.jsonl` if enabled) into a same-named `*.json` holding a
+single JSON array of its records, then removes the `.jsonl`. Recording
+itself keeps writing JSONL — it's an append-only log, written incrementally
+and in the features case while it's being tailed live, so it needs every
+completed line to stay valid even if the process dies mid-write, a property
+a single JSON document doesn't have. But openmind-api's S3 bucket policy
+only allows a fixed extension whitelist that doesn't include `.jsonl`, so
+the now-static log gets converted to one real JSON document right before
+it's uploaded.
+
+#### Compressing the large binary streams
+
+`compressWholeFiles`, `compressDepth`, and `compressPointcloud`
+(`internal/upload/compress_*.go`) losslessly compress the session's larger
+binary files before upload, keeping the *original* alongside the
+compressed one in a local `raw/` subdirectory (`regularFiles` never
+recurses into subdirectories, so `raw/` is automatically excluded from
+upload) — only the compressed form ever leaves the robot, but nothing is
+lost locally.
+
+- `lowstate_frames.bin`, `odom_frames.bin`, `lidar_scans.bin` are each
+  compressed whole, as one opaque zstd blob (e.g. `lowstate_frames.bin` →
+  `lowstate_frames.zstd.bin`) — fixed-schema binary streams where the
+  existing timestamps CSV's `byte_offset` column is still correct once the
+  file is decompressed, so nothing about per-record framing needs to
+  change.
+- `depth_frames.bin` stores each frame RVL-encoded (see `internal/depth`,
+  `internal/rvl`) — a lightweight, real-time-safe codec, not a strong
+  entropy coder, so re-zstd'ing it as-is barely helps. `compressDepth`
+  instead decodes every frame back to raw pixels first, concatenates them,
+  and zstd-compresses *that* (measured ~2.5x smaller than the RVL stream,
+  losslessly) as `depth_frames.zstd.bin`. `depth_timestamps.csv` gets
+  rewritten in place to match — once decoded, every frame is a fixed
+  `width*height*2` bytes rather than RVL's variable length, and `method`
+  becomes `raw_u16le`. If depth ever contains a frame using
+  `internal/depth`'s "raw" fallback encoding (an unparseable or oddly-shaped
+  source image), the whole file falls back to whole-file zstd instead,
+  unmodified — safer than guessing at what that fallback actually stored.
+- `pointcloud_frames.bin` stores each frame as a zstd-compressed,
+  CDR-encoded ROS `PointCloud2` message (see `internal/pointcloud`).
+  `compressPointcloud` decodes each frame's CDR payload, extracts its
+  float32 x/y/z points, and re-encodes them with
+  [Draco](https://github.com/google/draco) (`draco_encoder -qp 11`) —
+  concatenated into `pointcloud_frames.drc.bin`, with
+  `pointcloud_timestamps.csv` rewritten to match (Draco's per-frame output
+  size varies, unlike the whole-file cases above). This step needs
+  `draco_encoder` on `PATH`; see `make install-draco` below and the
+  Dockerfile. It's a soft dependency — if `draco_encoder` isn't found, or a
+  frame doesn't parse as a standard float32-XYZ `PointCloud2`, this step is
+  a no-op and `pointcloud_frames.bin` uploads exactly as it does today
+  (still zstd-compressed per frame), rather than failing the upload over a
+  missing build tool or an unexpected point-cloud layout.
 
 ### Retention & the catch-up/cap sweep
 

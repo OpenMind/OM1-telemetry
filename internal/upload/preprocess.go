@@ -39,6 +39,9 @@ type preprocessStep func(localDir string, opts Options) error
 // and independently idempotent.
 var preprocessSteps = []preprocessStep{
 	convertJSONLToJSON,
+	compressWholeFiles,
+	compressDepth,
+	compressPointcloud,
 }
 
 func preprocess(localDir string, opts Options) error {
