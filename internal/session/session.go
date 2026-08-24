@@ -39,10 +39,7 @@ type Session struct {
 	root string
 	clk  *clock.Clock
 
-	// startWallNs/startMonoNs are sampled once, when this session is opened --
-	// not the process's clock.Start* (process-wide, boot-relative), so that a
-	// session opened later by OpenNext (session rotation) is dated and
-	// promoted from when *it* began, not from when the process booted.
+	// startWallNs/startMonoNs are sampled when this session is opened, not at process start.
 	startWallNs int64
 	startMonoNs int64
 	syncAtStart clock.SyncState
@@ -73,10 +70,7 @@ type Meta struct {
 	// meaning SessionStartUnixNs was recomputed from the monotonic timeline.
 	StartTimeCorrected bool   `json:"start_time_corrected,omitempty"`
 	PromotedFrom       string `json:"promoted_from,omitempty"`
-	// SessionEndUnixNs/SessionEndMonoNs are set once Close is called (e.g. on
-	// rotation to the next segment, or on shutdown), so a downstream tool
-	// knows the segment's true duration without needing the next segment's
-	// start.
+	// SessionEndUnixNs/SessionEndMonoNs are set once Close is called.
 	SessionEndUnixNs int64 `json:"session_end_unix_ns,omitempty"`
 	SessionEndMonoNs int64 `json:"session_end_mono_ns,omitempty"`
 }
@@ -88,20 +82,7 @@ func Open(root string, clk *clock.Clock) (*Session, error) {
 	return open(root, clk, clk.StartSync())
 }
 
-// OpenNext creates the next session directory when rotating an
-// already-running recorder to a fresh segment. sync should reflect the
-// clock's *current* sync state (clock.Watcher.SyncState), not clk.StartSync
-// -- once the clock has synchronized, every later segment can be dated
-// directly even though the process itself booted untrusted.
-//
-// A segment opened while still untrusted is dated the same way the boot
-// session is: it stays in pending/ until promoted. Only the segment that is
-// "current" at the moment the clock synchronizes gets promoted (see
-// Session.Promote / the clock.Watcher callback in cmd/main) -- an earlier
-// rotated-away segment from the same offline boot is left undated, on
-// purpose: its monotonic timeline has nothing to anchor it to UTC, and this
-// recorder's philosophy throughout is that an honestly-undated segment beats
-// an invented date.
+// OpenNext creates the next session directory when rotating to a fresh segment; sync is the clock's current state.
 func OpenNext(root string, clk *clock.Clock, sync clock.SyncState) (*Session, error) {
 	return open(root, clk, sync)
 }
@@ -123,11 +104,7 @@ func open(root string, clk *clock.Clock, sync clock.SyncState) (*Session, error)
 		return s, nil
 	}
 
-	// Untrusted: name the directory from things that are true anyway. monoNs
-	// (not clk.StartMonoNs, which is fixed for the whole process) keeps this
-	// unique across repeated calls in the same run, e.g. when rotation opens
-	// several segments before the clock ever synchronizes -- uniqueDir is the
-	// backstop for two calls landing in the same millisecond.
+	// Untrusted: name the directory from things that are true anyway.
 	s.pending = true
 	name := fmt.Sprintf("%s_%012d", clk.ShortBootID(), monoNs/int64(time.Millisecond))
 	s.realDir = uniqueDir(filepath.Join(root, PendingDirName, name))
@@ -198,9 +175,7 @@ func (s *Session) Promote() error {
 	startMonoNs := s.startMonoNs
 	s.mu.Unlock()
 
-	// Carry the now-correct wall clock back along *this session's* monotonic
-	// timeline -- not the process's (clk.StartWallNsNow), which would date a
-	// rotated-in segment as if it began at process boot.
+	// Carry the now-correct wall clock back along this session's own monotonic timeline.
 	wallNow, monoNow := s.clk.Now()
 	trueStart := time.Unix(0, wallNow-(monoNow-startMonoNs))
 	to := datedDir(s.root, trueStart)
@@ -266,17 +241,14 @@ func (s *Session) SetRobotType(rt string) {
 	}
 }
 
-// StartUnixNs is the wall clock recorded when this session was opened --
-// wrong if the clock was untrusted at the time (see Promote).
+// StartUnixNs is the wall clock recorded when this session was opened.
 func (s *Session) StartUnixNs() int64 {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.startWallNs
 }
 
-// Close marks the session finished -- e.g. when rotating to the next
-// segment, or on final shutdown -- and records the end time in meta.json, so
-// a downstream tool knows the segment's true duration.
+// Close marks the session finished and records the end time in meta.json.
 func (s *Session) Close() error {
 	wallNs, monoNs := s.clk.Now()
 	s.mu.Lock()
@@ -480,16 +452,7 @@ func SortedNames(dirs []string) []string {
 	return out
 }
 
-// ListClosed returns every dated session directory under root
-// (root/YYYY-MM-DD/YYYY-MM-DD_HH-MM-SS[_N]), oldest first -- the set of
-// segments that have a real date and are therefore candidates for upload and
-// retention sweeps. PendingDirName and CurrentLinkName are skipped: a
-// pending session has no true date yet, and only Janitor (or a later
-// successful sync) knows what to do with it.
-//
-// The date and session-timestamp layouts are both fixed-width and
-// zero-padded, so sorting the joined paths lexically also sorts them
-// chronologically -- the same property SortedNames relies on.
+// ListClosed returns every dated session directory under root, oldest first.
 func ListClosed(root string) ([]string, error) {
 	dateEntries, err := os.ReadDir(root)
 	if err != nil {

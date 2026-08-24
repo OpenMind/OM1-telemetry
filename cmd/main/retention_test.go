@@ -56,9 +56,6 @@ func TestEnforceRetentionCap_deletesOldestUploadedFirstUntilUnderCap(t *testing.
 	writeFile(t, newest, "c.bin", make([]byte, 100))
 	markUploaded(newest)
 
-	// Exactly enough room for middle+newest, so deleting just oldest must
-	// satisfy the cap -- computed rather than hand-counted so the marker
-	// file's own (small, incidental) size can't throw the arithmetic off.
 	middleSize, err := dirSize(middle)
 	require.NoError(t, err)
 	newestSize, err := dirSize(newest)
@@ -71,15 +68,11 @@ func TestEnforceRetentionCap_deletesOldestUploadedFirstUntilUnderCap(t *testing.
 	require.DirExists(t, newest)
 }
 
-// The 100GB cap is a hard requirement: if there's nothing already-uploaded
-// left to delete, the oldest directory must still go, even unuploaded, so
-// the recorder never fills the disk and stops recording entirely.
 func TestEnforceRetentionCap_fallsThroughToUnuploadedWhenNothingElseCanFreeEnough(t *testing.T) {
 	root := t.TempDir()
 	notUploaded := filepath.Join(root, "2026-08-14", "2026-08-14_00-00-00")
 
 	writeFile(t, notUploaded, "a.bin", make([]byte, 200))
-	// deliberately not marked uploaded -- and nothing else exists to delete instead
 
 	enforceRetentionCap(root, []string{notUploaded}, func(string) bool { return false }, 10)
 
@@ -98,9 +91,6 @@ func TestEnforceRetentionCap_neverDeletesProtected(t *testing.T) {
 	require.DirExists(t, protectedDir, "must never delete a directory the caller marked protected, cap or no cap")
 }
 
-// When an uploaded directory alone is enough to satisfy the cap, it is
-// deleted in preference to an older not-yet-uploaded one -- upload status
-// beats raw age as long as it's sufficient to stay under the cap.
 func TestEnforceRetentionCap_prefersUploadedOverOlderUnuploadedWhenSufficient(t *testing.T) {
 	root := t.TempDir()
 	olderUnuploaded := filepath.Join(root, "2026-08-14", "2026-08-14_00-00-00")
@@ -114,14 +104,12 @@ func TestEnforceRetentionCap_prefersUploadedOverOlderUnuploadedWhenSufficient(t 
 	require.NoError(t, err)
 
 	enforceRetentionCap(root, []string{olderUnuploaded, newerUploaded},
-		func(string) bool { return false }, newerSize) // deleting only the uploaded one is enough
+		func(string) bool { return false }, newerSize)
 
 	require.NoDirExists(t, newerUploaded, "the uploaded directory should be freed first")
 	require.DirExists(t, olderUnuploaded, "the older but unconfirmed directory is spared once the cap is satisfied")
 }
 
-// Uploaded directories are preferred, but only when they're enough on their
-// own to satisfy the cap -- age still wins once upload status can't decide.
 func TestEnforceRetentionCap_prefersUploadedButDeletesOldestOverallIfNeeded(t *testing.T) {
 	root := t.TempDir()
 	oldestUnuploaded := filepath.Join(root, "2026-08-14", "2026-08-14_00-00-00")
@@ -131,7 +119,6 @@ func TestEnforceRetentionCap_prefersUploadedButDeletesOldestOverallIfNeeded(t *t
 	writeFile(t, newerUploaded, "b.bin", make([]byte, 200))
 	markUploaded(newerUploaded)
 
-	// Cap tight enough that deleting either alone isn't enough -- both must go.
 	enforceRetentionCap(root, []string{oldestUnuploaded, newerUploaded}, func(string) bool { return false }, 10)
 
 	require.NoDirExists(t, oldestUnuploaded)
@@ -168,11 +155,7 @@ func TestRetentionSweep_nilUploaderSkipsCatchUpButStillEnforcesCap(t *testing.T)
 		"with no uploader configured, cap enforcement must still delete the oldest directory rather than let the disk fill up")
 }
 
-// minimalFakeAPI is a smaller stand-in than internal/upload's own test fake:
-// just enough of the openmind-api surface for a small, single-file session
-// upload to succeed, so retentionSweep's catch-up/cap-enforcement behavior
-// can be exercised end to end without duplicating internal/upload's whole
-// suite here.
+// minimalFakeAPI is a minimal openmind-api stand-in for exercising catch-up/cap-enforcement end to end.
 type minimalFakeAPI struct {
 	mu          sync.Mutex
 	createCalls map[string]int // session_dir -> number of "create session" calls
@@ -251,22 +234,7 @@ func TestRetentionSweep_uploadsOldestUnmarkedFirstAndSkipsProtectedAndAlreadyUpl
 	require.Zero(t, api.createCalls[apiSessionDir(root, live)])
 }
 
-// TestRunRetentionSweeps_capEnforcementNotBlockedByStuckCatchUpUpload
-// reproduces the scenario that let the recordings cap go unenforced for
-// hours in production: a large catch-up backlog plus a bad network, where
-// retentionSweep's single combined call could spend its whole time stuck in
-// the upload loop and never reach enforceRetentionCap. runRetentionSweeps
-// now ticks the two on separate goroutines specifically so this can't
-// happen -- this test makes the create-session call for the oldest
-// directory slow (longer than several sweep intervals, so catch-up can't
-// even finish its first attempt in time) and asserts a different, over-cap
-// directory still gets deleted promptly regardless.
-//
-// The delay is real wall-clock time, not context cancellation: uploadSession
-// runs each attempt on its own independent timeout unrelated to
-// runRetentionSweeps' ctx (see uploadSession in main.go), so this test can't
-// rely on canceling ctx to unblock a hung HTTP call -- it has to actually
-// let the slow response land.
+// Cap enforcement must not block on a stuck catch-up upload.
 func TestRunRetentionSweeps_capEnforcementNotBlockedByStuckCatchUpUpload(t *testing.T) {
 	const sweepInterval = 20 * time.Millisecond
 	const slowUpload = 300 * time.Millisecond // several sweep intervals
@@ -285,11 +253,6 @@ func TestRunRetentionSweeps_capEnforcementNotBlockedByStuckCatchUpUpload(t *test
 	writeFile(t, slow, "meta.json", []byte(`{}`))
 	overCap := filepath.Join(root, "2026-08-15", "2026-08-15_00-00-00")
 	writeFile(t, overCap, "b.bin", make([]byte, 200))
-	// Neither directory is marked uploaded or protected: catch-up will pick
-	// up "slow" first (oldest first) and be stuck on its slow response for
-	// several sweep intervals, never reaching "overCap" in that time -- so
-	// if cap enforcement deletes "overCap" before "slow"'s attempt even
-	// returns, it can only be the independent enforcement ticker doing it.
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cfg := config.RetentionConfig{MaxBytes: 10, SweepInterval: sweepInterval}

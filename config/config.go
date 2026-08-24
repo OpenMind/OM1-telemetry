@@ -37,49 +37,30 @@ type Config struct {
 	Odom             OdomConfig
 	Lowstate         LowstateConfig
 	Network          NetworkConfig
-	// SessionRotateInterval, when positive, closes the current session and
-	// opens a fresh one on this cadence, so each segment can be uploaded
-	// (see Upload) without waiting for the whole run to end. Zero disables
-	// rotation -- one session for the life of the process, as before.
+	// SessionRotateInterval, when positive, closes and reopens the session on this cadence.
 	SessionRotateInterval time.Duration
 	Upload                UploadConfig
 	Retention             RetentionConfig
 }
 
-// RetentionConfig bounds how much local disk RecordingsDir may occupy, and
-// how often the catch-up-upload / disk-cap sweep runs (see cmd/main's
-// retentionSweep). It exists alongside per-segment upload because that path
-// only ever handles the segment that just rotated or the process's final
-// segment -- it does not retry a segment whose upload failed, nor reclaim
-// space once a robot has been recording for a long time.
+// RetentionConfig bounds local disk usage and the catch-up-upload/disk-cap sweep interval.
 type RetentionConfig struct {
-	// MaxBytes is the ceiling for RecordingsDir's total size once already-
-	// uploaded sessions become eligible for deletion. Zero disables cap
-	// enforcement (the catch-up upload sweep still runs).
+	// MaxBytes is the cap on RecordingsDir's total size. Zero disables cap enforcement.
 	MaxBytes int64
-	// SweepInterval is how often the sweep looks for finished-but-not-yet-
-	// uploaded sessions (uploading the oldest first) and, if MaxBytes is
-	// exceeded, deletes already-uploaded sessions, oldest first.
+	// SweepInterval is how often the catch-up/cap sweep runs.
 	SweepInterval time.Duration
 }
 
-// UploadConfig configures uploading finished session directories to the
-// openmind-api (see internal/upload).
+// UploadConfig configures uploading finished session directories to the openmind-api.
 type UploadConfig struct {
-	// Enabled is the operator's intent; Ready additionally requires BaseURL
-	// and APIKey to actually be set, so a deployment that forgets to
-	// configure the API falls back to recording-only instead of crashing.
 	Enabled bool
 	BaseURL string
 	APIKey  string
-	// DeleteAfterUpload removes a session's local files once it has uploaded
-	// successfully. Off by default: a robot's disk is cheap compared to
-	// losing data to a bug in a brand-new upload path.
+	// DeleteAfterUpload removes local files once a session has uploaded successfully.
 	DeleteAfterUpload  bool
 	MultipartThreshold int64
 	PartSize           int64
-	// Concurrency caps how many of a session's files upload at once.
-	Concurrency int
+	Concurrency        int
 }
 
 // Ready reports whether upload is both requested and fully configured.
@@ -110,9 +91,7 @@ type AudioConfig struct {
 	TimestampsFile string
 }
 
-// FeaturesConfig configures ingestion of the video-processor's feature-event
-// log (capture-time-stamped, video-derived events). Disabled when SourcePath
-// is empty.
+// FeaturesConfig configures ingestion of the video-processor's feature-event log; disabled when SourcePath is empty.
 type FeaturesConfig struct {
 	SourcePath     string
 	OutputFile     string
@@ -149,8 +128,7 @@ type OdomConfig struct {
 }
 
 type LowstateConfig struct {
-	// RobotType selects the LowState DDS schema: "go2" (unitree_go/msg/
-	// LowState) or "g1" (unitree_hg/msg/LowState).
+	// RobotType selects the LowState DDS schema ("go2" or "g1").
 	RobotType      string
 	DDSDomainID    uint32
 	DDSTopic       string
@@ -165,9 +143,7 @@ type NetworkConfig struct {
 	DataFile     string
 }
 
-// RecordingsDir is the root under which sessions are created. The session
-// package needs it before Load runs, because it decides the session directory
-// name -- which depends on whether the clock can be trusted yet.
+// RecordingsDir is the root under which sessions are created.
 func RecordingsDir() string {
 	return envStr("RECORDINGS_DIR", "recordings")
 }
@@ -182,13 +158,7 @@ func ScheduleFile() string {
 	return envStr("SCHEDULE_FILE", "")
 }
 
-// Load builds the recorder configuration for a session directory the caller
-// has already created.
-//
-// The directory is passed in rather than derived from time.Now(): a robot that
-// booted without a network can have a wall clock days off, and a directory
-// named from it would be wrong and frozen for the whole session. See
-// internal/session.
+// Load builds the recorder configuration for a session directory the caller has already created.
 func Load(sessionDir string) Config {
 	robotType, profile := ResolveProfile()
 
@@ -203,18 +173,11 @@ func Load(sessionDir string) Config {
 		SessionDir:       sessionDir,
 		Video:            videoConfigs(profile, sessionDir),
 		Audio: AudioConfig{
-			// Audio is the audio track of the video-processor's muxed session
-			// stream (single capture clock). ffmpeg selects it with -vn. Served
-			// gst-direct on :8555 for the lowest-latency, capture-stamped source;
-			// override to mediamtx (rtsp://localhost:8554/live) for an off-host
-			// recorder.
 			RTSPURL:        envStr("AUDIO_RTSP_URL", "rtsp://localhost:8555/live"),
 			OutputFile:     filepath.Join(sessionDir, "audio.ogg"),
 			TimestampsFile: filepath.Join(sessionDir, "audio_timestamps.csv"),
 		},
 		Features: FeaturesConfig{
-			// Path to the video-processor's feature-log JSONL on a shared
-			// volume. Empty (default) disables ingestion.
 			SourcePath:     envStr("VIDEO_FEATURES_LOG", ""),
 			OutputFile:     filepath.Join(sessionDir, "video_features.jsonl"),
 			TimestampsFile: filepath.Join(sessionDir, "video_features_timestamps.csv"),
