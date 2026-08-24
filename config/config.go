@@ -182,6 +182,16 @@ func ControlAddr() string {
 	return envStr("CONTROL_ADDR", "127.0.0.1:9191")
 }
 
+// ScheduleFile is the path to an optional daily recording/uploading
+// schedule (see internal/schedule and cmd/main's setupSchedule). Empty by
+// default: no schedule is loaded, and recording/uploading stay on
+// continuously exactly as they did before this feature existed --
+// scheduling is opt-in only, never a behavior change for a deployment that
+// doesn't set this.
+func ScheduleFile() string {
+	return envStr("SCHEDULE_FILE", "")
+}
+
 // Load builds the recorder configuration for a session directory the caller
 // has already created.
 //

@@ -119,6 +119,18 @@ func main() {
 		return current.RealDir()
 	})
 
+	// scheduleFile is empty by default: setupSchedule is then a no-op and
+	// this run behaves exactly as it did before the schedule feature
+	// existed. If set, note that the schedule's very first reconcile races
+	// benignly with the recording-loop startup below -- if the schedule
+	// says recording should be off right now, the session opened a few
+	// lines down gets closed again within moments of starting, rather than
+	// never opening at all. Harmless (it closes and uploads/retains
+	// normally), and keeps the scheduler decoupled from main's startup
+	// sequence -- see runSchedule.
+	scheduleFile := config.ScheduleFile()
+	scheduleCancel := setupSchedule(context.Background(), scheduleFile, ctl)
+
 	// The catch-up-upload / disk-cap sweep is independent of session
 	// rotation: it retries segments the rotation/shutdown upload paths gave
 	// up on, and reclaims space once RecordingsDir grows past
@@ -158,6 +170,7 @@ func main() {
 		"session-rotate-interval", cfg.SessionRotateInterval,
 		"upload-ready", uploader != nil,
 		"control-addr", controlAddr,
+		"schedule-file", scheduleFile,
 	)
 	slog.Info("press Ctrl-C to stop")
 
@@ -267,6 +280,7 @@ loop:
 
 	hbCancel()
 	sweepCancel()
+	scheduleCancel()
 	controlCancel()
 	if ctl.Recording() {
 		rs.Stop()

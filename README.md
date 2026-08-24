@@ -151,6 +151,7 @@ Any of the following override the selected profile / defaults:
 - `RETENTION_MAX_BYTES` - Hard cap on `RECORDINGS_DIR`'s total size; once exceeded, sessions are deleted oldest first (preferring already-uploaded ones, but not-yet-uploaded ones too if that's what it takes) until it isn't (default: `107374182400`, 100 GiB; `0` disables cap enforcement — see "Retention & the catch-up/cap sweep" below)
 - `RETENTION_SWEEP_INTERVAL` - How often the retention sweep looks for finished-but-not-yet-uploaded sessions and, if over the cap, deletes uploaded ones (default: `5m`)
 - `CONTROL_ADDR` - Bind address for the control-plane HTTP server (default: `127.0.0.1:9191`; loopback-only, no authentication — see "Control API" below)
+- `SCHEDULE_FILE` - Path to a daily recording/uploading schedule (default: empty — no schedule; recording and uploading stay on continuously, exactly as if this feature didn't exist — see "Scheduling" below)
 
 CycloneDDS domain IDs (not endpoints/addresses) are how independent DDS
 "networks" on the same host/subnet are separated — leave at the default `0`
@@ -552,6 +553,43 @@ The server has no authentication and is loopback-only by design: the
 container runs with host networking, so it's reachable from the Thor host
 itself (including other local processes, like the OTA agent) but not from
 the network at large.
+
+## Scheduling
+
+`SCHEDULE_FILE` points at an optional YAML file describing a daily
+recording/uploading schedule -- see `config/schedule.example.yaml` for the
+format. It's unset by default, which means no schedule: recording and
+uploading both stay on continuously, exactly as if this feature didn't
+exist. Scheduling is opt-in and additive, never a behavior change on its
+own.
+
+The schedule doesn't hook into the recorder specially -- it's built
+entirely on top of the Control API above: a background reconciler checks
+every 30s whether recording/uploading should be on right now and, if not,
+calls the same `SendRecordingCmd` / `SetUploading` the HTTP handlers use.
+Anything else that wanted a different scheme (weekday-only recording, a
+webhook-driven pause, whatever) could be built the same way, either as
+another file loaded by `internal/schedule` or as an external process
+calling the HTTP endpoints directly -- the control plane doesn't care who
+the caller is.
+
+To run it:
+
+```bash
+docker run -d \
+  -v /path/to/my-schedule.yaml:/app/config/schedule.yaml:ro \
+  -e SCHEDULE_FILE=/app/config/schedule.yaml \
+  ... \
+  om1-telemetry
+```
+
+A schedule file that fails to load or parse logs an error and is treated
+the same as SCHEDULE_FILE being unset -- recording and uploading stay on
+continuously rather than the process crashing or refusing to start over a
+typo. A manual `curl` against the Control API between scheduled
+transitions is not overridden until the schedule's next tick; there's no
+special precedence between the two, since the schedule is just another
+caller of the same API.
 
 ## Testing
 
