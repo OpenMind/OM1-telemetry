@@ -11,10 +11,6 @@ RUN go mod download
 COPY . .
 
 RUN CGO_ENABLED=1 GOOS=linux make build
-# draco_encoder is a runtime dependency of the upload preprocessing
-# pipeline (internal/upload/compress_pointcloud.go shells out to it), not
-# something the Go build links against -- built here anyway so the final
-# image doesn't need the C++/cmake toolchain at all.
 RUN make install-draco
 
 FROM alpine:latest

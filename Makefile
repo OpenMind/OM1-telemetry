@@ -44,21 +44,8 @@ check-cyclonedds: install-cyclonedds
 
 export CGO_LDFLAGS := -Wl,-rpath,$(CYCLONEDDS_INSTALL)/lib
 
-# draco_encoder is a *runtime* dependency (internal/upload's pointcloud
-# compression step shells out to it -- see compress_pointcloud.go), not a
-# build/cgo one like CycloneDDS: nothing here links against it, the
-# recorder just needs to find it on PATH when it runs. So, unlike
-# CycloneDDS, no build/run/test target depends on this one -- run it
-# yourself if you want to exercise pointcloud compression locally; the
-# Dockerfile always builds it into the image.
 DRACO_VERSION := 1.5.7
 DRACO_DIR     := .draco
-# Absolute, unlike CYCLONEDDS_SRC: install-draco's recipe cd's into
-# $(DRACO_SRC)/build to run cmake (Draco's build has no "install" target
-# that places draco_encoder into a prefix the way CycloneDDS's does, so the
-# recipe cp's it out manually afterward) -- a relative path here would
-# resolve against that new cwd instead of the original one for anything
-# referencing it after the cd.
 DRACO_SRC     := $(shell pwd)/$(DRACO_DIR)/src
 DRACO_INSTALL := $(shell pwd)/$(DRACO_DIR)/install
 

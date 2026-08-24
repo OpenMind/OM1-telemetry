@@ -27,16 +27,10 @@ import (
 	"om1-telemetry/internal/video"
 )
 
-// uploadTimeout bounds one session's upload -- both a background upload
-// kicked off by rotation and the final upload on shutdown. It also bounds
-// how long shutdown waits for in-flight uploads to finish (see uploadWG.Wait
-// in main): long enough for a slow robot link to push a segment's files,
-// short enough that a dead network doesn't hang the process indefinitely.
+// uploadTimeout bounds one session's upload, whether kicked off by rotation or shutdown.
 const uploadTimeout = 10 * time.Minute
 
 func main() {
-	// Sampled before anything else, so the session's monotonic anchor covers
-	// the whole run.
 	clk := clock.New()
 
 	recordingsDir := config.RecordingsDir()
@@ -47,9 +41,6 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Sweep sessions an earlier run left undated. After Open, so this run's own
-	// pending directory is excluded. Only done once, at process start --
-	// rotation (below) does not re-sweep on every segment.
 	session.Janitor(recordingsDir, sess.RealDir())
 
 	cfg := config.Load(sess.Dir())
@@ -75,20 +66,9 @@ func main() {
 	hbCtx, hbCancel := context.WithCancel(context.Background())
 	go mon.Run(hbCtx)
 
-	// current is the session the clock watcher promotes the first time NTP
-	// synchronizes. Rotation (below) repoints it under currentMu; only
-	// whichever session is "current" at that moment gets promoted -- see
-	// session.OpenNext's doc comment for why an earlier rotated-away segment
-	// from the same offline boot is deliberately left undated.
 	var currentMu sync.Mutex
 	current := sess
 
-	// bootTimebasePath is where the *one* clock watcher journals for the
-	// whole process lifetime -- a boot-relative fact, not a per-segment one.
-	// Each rotated-away segment gets a snapshot copied into its own
-	// directory (snapshotTimebase) so it stays self-contained for
-	// align_recording.py / fix_session_time.py without needing the boot
-	// session alongside it.
 	bootTimebasePath := sess.TimebasePath()
 
 	clkCtx, clkCancel := context.WithCancel(context.Background())
@@ -329,17 +309,7 @@ func uploadFinishedSessionAsync(wg *sync.WaitGroup, uploader *upload.Client, ctl
 	}(finished.RealDir(), apiSessionDir(recordingsDir, finished.RealDir()), time.Unix(0, finished.StartUnixNs()), opts)
 }
 
-// uploadSession uploads one finished session directory, best-effort: on
-// failure the files are kept locally (regardless of DeleteAfterUpload) so a
-// later run -- or a manual re-run of this recorder -- can retry; the
-// openmind-api recognizes a retry against the same session_dir as a resume,
-// not a duplicate.
-//
-// deleteAfter is ignored when opts.PreserveJSONL is set: that means dir is
-// the boot session's own directory, which still physically holds the live
-// clock journal (see uploadOptions) -- removing dir would delete that out
-// from under the running clock.Watcher, the same failure this preserves
-// against inside the upload itself.
+// uploadSession uploads one finished session directory; on failure the files are kept locally for a later retry.
 func uploadSession(client *upload.Client, dir, sessionDir string, startedAt time.Time, deleteAfter bool, opts upload.Options) {
 	ctx, cancel := context.WithTimeout(context.Background(), uploadTimeout)
 	defer cancel()
@@ -358,10 +328,7 @@ func uploadSession(client *upload.Client, dir, sessionDir string, startedAt time
 	}
 }
 
-// uploadOptions builds the upload.Options for uploading dir: PreserveJSONL is
-// set to protect the live clock journal when dir is currently the boot
-// session's own directory (see bootSessionDir), and left empty for every
-// other, fully-closed segment.
+// uploadOptions protects the live clock journal when dir is the boot session's own directory.
 func uploadOptions(bootTimebasePath, dir string) upload.Options {
 	if bootSessionDir(bootTimebasePath, dir) {
 		return upload.Options{PreserveJSONL: clock.TimebaseName}
@@ -369,15 +336,7 @@ func uploadOptions(bootTimebasePath, dir string) upload.Options {
 	return upload.Options{}
 }
 
-// bootSessionDir reports whether dir is currently the directory holding the
-// live boot-relative clock journal at bootTimebasePath -- the one
-// clock.Watcher opened once at process start and keeps appending to for the
-// whole process's life, regardless of rotation.
-//
-// Compared by file identity (device + inode) rather than string equality:
-// bootTimebasePath can be a symlink (an unsynced-at-boot session's Dir()),
-// whose target directory differs textually from a later realDir that still
-// resolves to the very same file once Promote() repoints the symlink.
+// bootSessionDir reports whether dir holds the live boot-relative clock journal.
 func bootSessionDir(bootTimebasePath, dir string) bool {
 	want, err := os.Stat(bootTimebasePath)
 	if err != nil {
@@ -390,11 +349,7 @@ func bootSessionDir(bootTimebasePath, dir string) bool {
 	return os.SameFile(want, got)
 }
 
-// apiSessionDir builds the openmind-api's session_dir grouping key from a
-// session's real directory, e.g. "recordings/2026-08-18/2026-08-18_20-10-00"
-// -- RECORDINGS_DIR's own base name plus the session's path under it, so the
-// value is stable whether RECORDINGS_DIR was given as an absolute or a
-// relative path.
+// apiSessionDir builds the openmind-api's session_dir grouping key from a session's real directory.
 func apiSessionDir(recordingsDir, realDir string) string {
 	rel, err := filepath.Rel(recordingsDir, realDir)
 	if err != nil {
@@ -403,12 +358,7 @@ func apiSessionDir(recordingsDir, realDir string) string {
 	return filepath.ToSlash(filepath.Join(filepath.Base(recordingsDir), rel))
 }
 
-// snapshotTimebase copies the process-wide clock journal into a rotated-away
-// session's own directory, so downstream tools that expect a
-// clock_timebase.jsonl alongside each session's files find one without
-// needing the boot session too. Best-effort: the boot session already has
-// the real file (via clock.Watcher), so this is a no-op for it (see
-// bootSessionDir).
+// snapshotTimebase copies the process-wide clock journal into a rotated-away session's own directory.
 func snapshotTimebase(bootPath, sessionDir string) {
 	if bootSessionDir(bootPath, sessionDir) {
 		return
@@ -477,8 +427,7 @@ func unregisterHeartbeats(mon *heartbeat.Monitor, cfg config.Config, videoHeartb
 	}
 }
 
-// recorderSet is every stream started for one session. Streams that are
-// disabled for the current profile/config are left nil.
+// recorderSet is every stream started for one session; disabled streams are left nil.
 type recorderSet struct {
 	videoStreams     []*video.VideoRTSPStream
 	audioStream      *audio.AudioRTSPStream
@@ -492,8 +441,6 @@ type recorderSet struct {
 }
 
 // startRecorders builds and starts every stream for cfg's session directory.
-// Called once at startup and again after every rotation, so a fresh set of
-// output files opens under the new session each time.
 func startRecorders(cfg config.Config, mon *heartbeat.Monitor, videoHeartbeatNames []string) *recorderSet {
 	rs := &recorderSet{}
 
@@ -586,8 +533,7 @@ func startRecorders(cfg config.Config, mon *heartbeat.Monitor, videoHeartbeatNam
 	return rs
 }
 
-// Stop stops every stream in the set, blocking until each has flushed its
-// files to disk -- safe to read the session directory immediately after.
+// Stop stops every stream in the set, blocking until each has flushed to disk.
 func (rs *recorderSet) Stop() {
 	for _, vs := range rs.videoStreams {
 		vs.Stop()
