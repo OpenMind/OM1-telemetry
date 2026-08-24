@@ -10,33 +10,16 @@ import (
 	"strings"
 )
 
-// Options carries per-call context the preprocess pipeline needs, as opposed
-// to Config, which is fixed for a Client's whole lifetime.
+// Options carries per-call context the preprocess pipeline needs.
 type Options struct {
-	// PreserveJSONL, if set, is the bare filename (e.g.
-	// "clock_timebase.jsonl") of a *.jsonl file that convertJSONLToJSON must
-	// still convert to .json for upload, but must never remove the source
-	// of. Needed for internal/clock's boot-relative journal: a
-	// clock.Watcher opens it once and keeps appending to it for the whole
-	// process's life regardless of which segment is "current", so unlike
-	// every other segment's JSONL output it is never actually finished when
-	// its containing segment closes. Every other segment's copy of it (see
-	// cmd/main's snapshotTimebase) is an independent, already-closed
-	// snapshot and is safe to remove once converted.
+	// PreserveJSONL, if set, names a .jsonl file that must be converted but never removed.
 	PreserveJSONL string
 }
 
-// preprocessStep transforms localDir in place before its files are uploaded.
-// A session can be retried after a partial upload (see UploadSession), so
-// every step must be idempotent: safe to run again on a directory it already
-// processed.
+// preprocessStep transforms localDir in place before upload; must be idempotent.
 type preprocessStep func(localDir string, opts Options) error
 
-// preprocessSteps is the fixed pipeline UploadSession runs, once per session,
-// after the session is closed but before any file is uploaded -- this is the
-// one point where the whole session is known to be final and static. Add new
-// steps here as more preprocessing is needed; each should be small, focused,
-// and independently idempotent.
+// preprocessSteps is the fixed pipeline UploadSession runs once a session is closed.
 var preprocessSteps = []preprocessStep{
 	convertJSONLToJSON,
 	compressWholeFiles,
@@ -53,23 +36,8 @@ func preprocess(localDir string, opts Options) error {
 	return nil
 }
 
-// convertJSONLToJSON rewrites every *.jsonl file directly under localDir as a
-// same-named *.json file holding a single JSON array of its records, then
-// removes the .jsonl -- unless it's named by opts.PreserveJSONL, in which
-// case the source is left in place.
-//
-// Recording itself must keep writing JSONL (see internal/clock and
-// internal/features): it's an append-only log written incrementally, in one
-// case while a stream is tailed live, so it needs the property that every
-// completed line is independently valid even if the process dies mid-write.
-// A single JSON document doesn't have that property. But once a session is
-// closed, the log is done growing, and openmind-api's S3 bucket policy only
-// allows a fixed extension whitelist that doesn't include .jsonl -- so this
-// step converts the now-static log into one real JSON document right before
-// upload, without changing how it was recorded.
-//
-// Idempotent: a file with no .jsonl counterpart (already converted by an
-// earlier, later-failed attempt) is left untouched.
+// convertJSONLToJSON rewrites every *.jsonl file under localDir into a same-named *.json array, then
+// removes the .jsonl (unless named by opts.PreserveJSONL). Idempotent: already-converted files are left alone.
 func convertJSONLToJSON(localDir string, opts Options) error {
 	entries, err := os.ReadDir(localDir)
 	if err != nil {
@@ -94,10 +62,7 @@ func convertJSONLToJSON(localDir string, opts Options) error {
 	return nil
 }
 
-// jsonlToJSONArray writes dst as a JSON array of src's lines. Each line is
-// carried as a raw JSON value rather than decoded into a Go struct, so this
-// has no dependency on -- and never lossily reformats -- whatever schema the
-// clock or features packages happen to write.
+// jsonlToJSONArray writes dst as a JSON array of src's lines, carried as raw JSON values.
 func jsonlToJSONArray(src, dst string) (err error) {
 	in, err := os.Open(src)
 	if err != nil {

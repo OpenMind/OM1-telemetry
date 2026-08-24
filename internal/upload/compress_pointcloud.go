@@ -22,17 +22,13 @@ const (
 	pointcloudTimestampsName = "pointcloud_timestamps.csv"
 	pointcloudDracoName      = "pointcloud_frames.drc"
 
-	// dracoQuantizationBits sets draco_encoder's position quantization
-	// (-qp). 11 bits per axis: enough precision for lidar-scale point
-	// clouds while keeping the entropy coder's job small.
+	// dracoQuantizationBits sets draco_encoder's position quantization (-qp).
 	dracoQuantizationBits = 11
 
-	pointFieldFloat32 = 7 // sensor_msgs/PointField.FLOAT32, the only encoding this step understands
+	pointFieldFloat32 = 7 // sensor_msgs/PointField.FLOAT32
 )
 
-// pointcloudRecord mirrors one row of pointcloud_timestamps.csv (see the
-// header internal/pointcloud/stream.go writes): unix_ns,seq,byte_offset,
-// byte_length,method,mono_ns.
+// pointcloudRecord mirrors one row of pointcloud_timestamps.csv.
 type pointcloudRecord struct {
 	unixNs, seq, byteOffset, byteLength int64
 	method                              string
@@ -44,26 +40,8 @@ var dracoEncoderPath = sync.OnceValues(func() (string, error) {
 	return exec.LookPath("draco_encoder")
 })
 
-// compressPointcloud replaces pointcloud_frames.bin -- which stores each
-// frame as a zstd-compressed, CDR-encoded ROS PointCloud2 message (see
-// internal/pointcloud) -- with pointcloud_frames.drc: each frame's XYZ
-// geometry re-encoded with Google's Draco, concatenated frame by frame.
-//
-// A no-op, leaving pointcloud_frames.bin exactly as recorded, if:
-//   - draco_encoder isn't on PATH (this step needs the CLI tool; see the
-//     Makefile's install-draco target and the Dockerfile build stage) --
-//     compression is a nice-to-have, not something a missing build tool
-//     should be allowed to fail an upload over, or
-//   - any frame can't be parsed as a PointCloud2 with float32 x/y/z fields
-//     -- rather than guess at a non-standard layout, this leaves the whole
-//     file untouched (it's already zstd-compressed per-frame today, so
-//     nothing is lost by skipping the extra pass).
-//
-// pointcloud_timestamps.csv is rewritten in place (atomically) with new
-// byte_offset/byte_length/method columns, the same pattern compress_depth.go
-// uses and for the same reason: Draco's output size varies frame to frame,
-// so the offsets genuinely change. Its original content is copied into raw/
-// first.
+// compressPointcloud re-encodes each frame's XYZ geometry with Draco into pointcloud_frames.drc,
+// rewriting pointcloud_timestamps.csv to match. No-op if draco_encoder is missing or a frame doesn't parse.
 func compressPointcloud(localDir string, opts Options) error {
 	if _, err := dracoEncoderPath(); err != nil {
 		return nil
@@ -156,8 +134,7 @@ func compressPointcloud(localDir string, opts Options) error {
 	return writeAtomic(localDir, pointcloudDracoName, out.Bytes())
 }
 
-// pointField mirrors one entry of PointCloud2.fields (see
-// internal/pointcloud/dds_reader.go's encodePointCloud2).
+// pointField mirrors one entry of PointCloud2.fields.
 type pointField struct {
 	name     string
 	offset   uint32
@@ -171,8 +148,7 @@ type pointCloud2 struct {
 	data          []byte
 }
 
-// decodePointCloud2 inverts encodePointCloud2 (internal/pointcloud/
-// dds_reader.go) field for field, in the exact order it was written.
+// decodePointCloud2 inverts encodePointCloud2, field for field, in the order it was written.
 func decodePointCloud2(payload []byte) (*pointCloud2, error) {
 	r, err := cdr.NewReader(payload)
 	if err != nil {
@@ -244,9 +220,7 @@ func decodePointCloud2(payload []byte) (*pointCloud2, error) {
 	return &pointCloud2{width: width, height: height, fields: fields, pointStep: pointStep, data: data}, nil
 }
 
-// extractXYZ reads every point's x/y/z as float32, the standard PointCloud2
-// layout. Any other layout (missing fields, non-float32 datatype) is
-// reported as an error rather than guessed at.
+// extractXYZ reads every point's x/y/z as float32; errors on any other layout.
 func extractXYZ(pc *pointCloud2) ([][3]float32, error) {
 	xOff, yOff, zOff := -1, -1, -1
 	for _, f := range pc.fields {
@@ -286,9 +260,7 @@ func readFloat32LE(b []byte) float32 {
 	return math.Float32frombits(binary.LittleEndian.Uint32(b))
 }
 
-// encodeDraco shells out to draco_encoder: write pts as a temporary ASCII
-// PLY point cloud, run the encoder against it, and return the resulting
-// .drc bytes.
+// encodeDraco shells out to draco_encoder via a temporary PLY file and returns the resulting .drc bytes.
 func encodeDraco(pts [][3]float32) ([]byte, error) {
 	binPath, err := dracoEncoderPath()
 	if err != nil {

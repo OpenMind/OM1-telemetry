@@ -16,9 +16,7 @@ const (
 	depthTimestampsName = "depth_timestamps.csv"
 )
 
-// depthRecord mirrors one row of depth_timestamps.csv (see the header
-// internal/depth/stream.go writes): unix_ns,seq,byte_offset,byte_length,
-// method,width,height,encoding,mono_ns.
+// depthRecord mirrors one row of depth_timestamps.csv.
 type depthRecord struct {
 	unixNs, seq, byteOffset, byteLength int64
 	method                              string
@@ -27,34 +25,10 @@ type depthRecord struct {
 	monoNs                              int64
 }
 
-// compressDepth replaces depth_frames.bin -- which stores each frame RVL-
-// encoded (see internal/depth, internal/rvl) -- with depth_frames.zstd: the
-// *decoded* raw little-endian uint16 depth frames, concatenated frame by
-// frame and zstd-compressed as one blob, losslessly.
-//
-// Decoding first is deliberate: RVL is a lightweight, real-time-safe codec
-// (why the live recorder uses it), not a strong entropy coder -- zstd'ing
-// its own output barely helps, but zstd on the underlying raw pixels does
-// much better (measured ~2.5x smaller than the already-RVL-encoded file,
-// losslessly, on real recordings).
-//
-// Only attempted when every recorded frame used RVL at a consistent
-// width/height -- the overwhelmingly common case. Any frame using
-// internal/depth's "raw" fallback encoding (an unparseable or oddly-shaped
-// source image) makes the whole step fall back to compressWholeFile
-// instead, leaving depth_frames.bin's original per-frame bytes intact
-// inside one zstd wrapper: decoding would mean guessing at ad hoc bytes
-// that fallback stored, which isn't safe to assume anything about.
-//
-// depth_timestamps.csv is rewritten in place (atomically) to describe the
-// new file: once decoded, every frame is exactly width*height*2 bytes, so
-// byte_offset/byte_length become a fixed stride rather than RVL's variable
-// lengths, and method becomes "raw_u16le". Its original content is copied
-// (not moved -- it keeps living at the same path, just rewritten) into
-// raw/ first, so the pre-compression bin+csv pair stays usable together
-// there.
+// compressDepth decodes RVL-encoded depth frames back to raw pixels and re-compresses them as one zstd blob,
+// rewriting depth_timestamps.csv to match. Falls back to compressWholeFile if any frame isn't standard RVL.
 func compressDepth(localDir string, opts Options) error {
-	dstName := zstdName(depthFramesName) // depth_frames.zstd
+	dstName := zstdName(depthFramesName)
 	if _, err := os.Stat(filepath.Join(localDir, dstName)); err == nil {
 		if err := archiveOriginal(localDir, depthFramesName); err != nil {
 			return err
@@ -69,7 +43,7 @@ func compressDepth(localDir string, opts Options) error {
 		return err
 	}
 	if binSrc == "" {
-		return nil // depth disabled for this session
+		return nil
 	}
 
 	csvRaw, err := originalCSVBytes(localDir, depthTimestampsName)
@@ -111,12 +85,7 @@ func compressDepth(localDir string, opts Options) error {
 	return writeAtomic(localDir, dstName, compressed)
 }
 
-// decodeDepthFrames decodes every RVL-encoded frame in bin (per records'
-// byte_offset/byte_length) back to raw little-endian uint16 pixels and
-// concatenates them in order. Returns ok=false, touching nothing, if any
-// record uses a method other than "rvl" or a width/height inconsistent
-// with the first frame -- the two things that make "every frame is exactly
-// width*height*2 bytes" a safe assumption for the caller.
+// decodeDepthFrames decodes every RVL frame in bin to raw pixels; ok=false if any frame isn't standard RVL.
 func decodeDepthFrames(bin []byte, records []depthRecord) (raw []byte, newRecords []depthRecord, ok bool) {
 	if len(records) == 0 {
 		return nil, nil, false
