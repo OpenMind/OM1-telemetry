@@ -314,12 +314,7 @@ func TestRunRetentionSweeps_capEnforcementNotBlockedByStuckCatchUpUpload(t *test
 	}
 }
 
-// TestRunRetentionSweeps_uploadDisabled_skipsCatchUpButStillEnforcesCap
-// covers the control-API pause: disabling uploading must stop the catch-up
-// ticker from ever calling out, while RETENTION_MAX_BYTES enforcement (the
-// hard disk-safety guarantee) keeps running regardless -- see
-// enforceRetentionCap's doc comment on why cap enforcement never yields to
-// upload state.
+// Disabling uploading must not stop RETENTION_MAX_BYTES enforcement.
 func TestRunRetentionSweeps_uploadDisabled_skipsCatchUpButStillEnforcesCap(t *testing.T) {
 	const sweepInterval = 20 * time.Millisecond
 
@@ -368,10 +363,7 @@ func TestRunRetentionSweeps_uploadDisabled_skipsCatchUpButStillEnforcesCap(t *te
 	}
 }
 
-// TestRunRetentionSweeps_uploadTrigger_runsImmediateSweep covers
-// POST /upload/start's promise: an operator re-enabling uploading gets the
-// backlog cleared right away, not on whatever's left of the current sweep
-// interval.
+// POST /upload/start must trigger an immediate sweep, not wait for the next tick.
 func TestRunRetentionSweeps_uploadTrigger_runsImmediateSweep(t *testing.T) {
 	const longSweepInterval = 2 * time.Second // must not fire on its own during this test
 

@@ -55,11 +55,8 @@ func main() {
 	cfg := config.Load(sess.Dir())
 	sess.SetRobotType(string(cfg.RobotType))
 
-	// maxBytes is captured once: it comes from RETENTION_MAX_BYTES, which
-	// cannot change at runtime, but cfg itself is reassigned on every
-	// rotation/resume by the event loop below -- reading cfg.Retention
-	// directly from ctl.Extra's callback (a different goroutine) would race
-	// with that.
+	// Captured once: cfg itself is reassigned by the event loop below, and
+	// reading cfg.Retention from another goroutine later would race.
 	maxBytes := cfg.Retention.MaxBytes
 
 	if !cfg.Collect {
@@ -119,23 +116,11 @@ func main() {
 		return current.RealDir()
 	})
 
-	// scheduleFile is empty by default: setupSchedule is then a no-op and
-	// this run behaves exactly as it did before the schedule feature
-	// existed. If set, note that the schedule's very first reconcile races
-	// benignly with the recording-loop startup below -- if the schedule
-	// says recording should be off right now, the session opened a few
-	// lines down gets closed again within moments of starting, rather than
-	// never opening at all. Harmless (it closes and uploads/retains
-	// normally), and keeps the scheduler decoupled from main's startup
-	// sequence -- see runSchedule.
+	// Empty by default: a no-op, so this run behaves exactly as before this feature existed.
 	scheduleFile := config.ScheduleFile()
 	scheduleCancel := setupSchedule(context.Background(), scheduleFile, ctl)
 
-	// The catch-up-upload / disk-cap sweep is independent of session
-	// rotation: it retries segments the rotation/shutdown upload paths gave
-	// up on, and reclaims space once RecordingsDir grows past
-	// cfg.Retention.MaxBytes. Uploading (but never cap enforcement) is
-	// gated on ctl.Uploading -- see runRetentionSweeps.
+	// Uploading (never cap enforcement) is gated on ctl.Uploading -- see runRetentionSweeps.
 	sweepCtx, sweepCancel := context.WithCancel(context.Background())
 	go runRetentionSweeps(sweepCtx, uploader, recordingsDir, bootTimebasePath, currentDirFn, cfg.Retention, ctl)
 
@@ -202,12 +187,7 @@ loop:
 			}
 
 			if !cmd.Start {
-				// Pause: same as a rotation's close-half, but no next
-				// session is opened -- recording stays off until a
-				// start command arrives. current is left pointing at the
-				// now-closed session; currentDirFn reports "" while
-				// !ctl.Recording() so retention no longer treats it as
-				// the live, protected segment.
+				// Same as a rotation's close-half, but no next session is opened.
 				rs.Stop()
 				unregisterHeartbeats(mon, cfg, videoHeartbeatNames)
 				finished := sess
@@ -305,14 +285,7 @@ loop:
 	}
 }
 
-// setupControl builds the control-plane state (see internal/control) and
-// starts its HTTP server on addr in the background. rawCurrentDir reports
-// the live session's directory with no awareness of pause state -- the
-// returned currentDirFn wraps it to report "" while recording is paused,
-// so retention no longer treats a closed-but-not-reopened session as the
-// live, protected-from-deletion segment. The returned cancel func stops
-// the HTTP server; the caller (main) still owns driving ctl.RecordingCmds
-// and calling ctl.SetRecording as recording starts/stops.
+// setupControl builds the control-plane state and starts its HTTP server on addr.
 func setupControl(addr, recordingsDir string, maxBytes int64, rawCurrentDir func() string) (ctl *control.State, currentDirFn func() string, cancel context.CancelFunc) {
 	ctl = control.New()
 
@@ -343,12 +316,7 @@ func setupControl(addr, recordingsDir string, maxBytes int64, rawCurrentDir func
 	return ctl, currentDirFn, cancel
 }
 
-// uploadFinishedSessionAsync kicks off finished's upload in the background,
-// tracked by wg, if uploader is configured and uploading is currently
-// enabled -- shared by session rotation and a control-API pause, neither of
-// which should block on a slow upload. If uploading is disabled right now,
-// finished is simply left on disk: the retention sweep's catch-up pass
-// (see cmd/main/retention.go) will pick it up once uploading resumes.
+// uploadFinishedSessionAsync kicks off finished's upload in the background if uploading is enabled.
 func uploadFinishedSessionAsync(wg *sync.WaitGroup, uploader *upload.Client, ctl *control.State, recordingsDir, bootTimebasePath string, finished *session.Session, uploadDelete bool) {
 	if uploader == nil || !ctl.Uploading() {
 		return
@@ -482,9 +450,7 @@ func registerHeartbeats(mon *heartbeat.Monitor, cfg config.Config, videoHeartbea
 	}
 }
 
-// unregisterHeartbeats undoes registerHeartbeats for cfg's streams, so a
-// recording pause via the control API does not leave the monitor expecting
-// ticks from recorders that have deliberately been stopped.
+// unregisterHeartbeats undoes registerHeartbeats for cfg's streams.
 func unregisterHeartbeats(mon *heartbeat.Monitor, cfg config.Config, videoHeartbeatNames []string) {
 	if cfg.EnableLidar {
 		mon.Unregister(lidar.HeartbeatName)

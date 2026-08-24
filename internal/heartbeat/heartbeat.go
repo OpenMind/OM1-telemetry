@@ -37,10 +37,7 @@ func (m *Monitor) Register(name string, expectedHz float64) {
 	})
 }
 
-// Unregister stops tracking name, so a stream that was deliberately stopped
-// (e.g. recording paused via the control API) does not get flagged
-// NOT WORKING for going silent. A later Register call re-arms it with a
-// fresh grace period.
+// Unregister stops tracking name, so a deliberately stopped stream isn't flagged NOT WORKING.
 func (m *Monitor) Unregister(name string) {
 	m.streams.Delete(name)
 }

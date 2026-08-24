@@ -52,9 +52,7 @@ func TestSetupSchedule_missingFile_logsAndIsNoOp(t *testing.T) {
 }
 
 func TestRunSchedule_asksToStopRecordingOutsideItsWindow(t *testing.T) {
-	// A window a couple of hours from now, guaranteed not to contain "now"
-	// regardless of when this test runs (Window.Active handles the
-	// midnight-wraparound case either way).
+	// A window guaranteed not to contain "now", regardless of when this test runs.
 	start := time.Now().Add(2 * time.Hour).Format("15:04")
 	end := time.Now().Add(3 * time.Hour).Format("15:04")
 	path := writeScheduleFile(t, "recording:\n  start: \""+start+"\"\n  end: \""+end+"\"\n")
@@ -105,9 +103,7 @@ func TestRunSchedule_turnsUploadingOffOutsideItsWindow(t *testing.T) {
 }
 
 func TestRunSchedule_noOpWhenAlreadyMatchingState(t *testing.T) {
-	// A zero-length window is the degenerate "always on" case (see
-	// schedule.Window.Active) -- deterministically matches ctl's default
-	// Recording()==true with no dependency on wall-clock time.
+	// A zero-length window is always-on, matching ctl's default Recording()==true.
 	path := writeScheduleFile(t, "recording:\n  start: \"00:00\"\n  end: \"00:00\"\n")
 
 	ctl := control.New()

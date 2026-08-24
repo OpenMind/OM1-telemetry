@@ -172,22 +172,12 @@ func RecordingsDir() string {
 	return envStr("RECORDINGS_DIR", "recordings")
 }
 
-// ControlAddr is the bind address for the control-plane HTTP server (see
-// internal/control), which lets an operator start/stop recording and
-// pause/resume uploading without restarting the process. Loopback-only by
-// default: the container already runs with host networking, so this is
-// reachable from the host but not the network at large, and the control
-// API has no authentication of its own.
+// ControlAddr is the bind address for the control-plane HTTP server (see internal/control).
 func ControlAddr() string {
 	return envStr("CONTROL_ADDR", "127.0.0.1:9191")
 }
 
-// ScheduleFile is the path to an optional daily recording/uploading
-// schedule (see internal/schedule and cmd/main's setupSchedule). Empty by
-// default: no schedule is loaded, and recording/uploading stay on
-// continuously exactly as they did before this feature existed --
-// scheduling is opt-in only, never a behavior change for a deployment that
-// doesn't set this.
+// ScheduleFile is the path to an optional daily recording/uploading schedule (see internal/schedule).
 func ScheduleFile() string {
 	return envStr("SCHEDULE_FILE", "")
 }

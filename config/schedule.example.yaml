@@ -1,14 +1,5 @@
-# Sample daily recording/uploading schedule for SCHEDULE_FILE (see
-# README.md's "Scheduling" section). Not loaded automatically -- copy or
-# mount this somewhere and point SCHEDULE_FILE at it to opt in.
-#
-# Record during the day, upload overnight once the robot is likely idle
-# and off battery. Times are HH:MM, 24h, in the process's local time.
-# An `end` earlier than `start` means the window spans midnight.
-#
-# Either section may be omitted entirely to leave that axis always on --
-# e.g. delete `upload:` below to upload continuously while still only
-# recording 9-5.
+# Sample schedule for SCHEDULE_FILE. Times are HH:MM, 24h; omit a section
+# to leave that axis always on.
 recording:
   start: "09:00"
   end: "17:00"

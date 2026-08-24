@@ -167,10 +167,7 @@ func isUploaded(dir string) bool {
 	return err == nil
 }
 
-// pendingUploadCount reports how many closed sessions have not yet been
-// confirmed uploaded -- the backlog a catch-up sweep still has to clear.
-// Best-effort, for status reporting (see internal/control.Extra): an error
-// listing sessions yields 0 rather than failing the caller.
+// pendingUploadCount reports how many closed sessions are not yet confirmed uploaded.
 func pendingUploadCount(recordingsDir string) int {
 	dirs, err := session.ListClosed(recordingsDir)
 	if err != nil {
@@ -318,9 +315,6 @@ func runRetentionSweeps(ctx context.Context, uploader *upload.Client, recordings
 				case <-ticker.C:
 					sweep()
 				case <-ctl.UploadTrigger:
-					// An operator just re-enabled uploading via the
-					// control API (or asked for a sweep directly) and
-					// wants the backlog cleared now, not on the next tick.
 					sweep()
 				}
 			}

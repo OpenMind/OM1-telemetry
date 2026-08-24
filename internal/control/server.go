@@ -10,14 +10,10 @@ import (
 	"time"
 )
 
-// commandTimeout bounds how long an HTTP handler waits for main's event
-// loop to act on a recording start/stop request, so a wedged recording
-// loop fails the HTTP call instead of hanging it forever.
+// commandTimeout bounds how long a recording start/stop request can block.
 const commandTimeout = 30 * time.Second
 
-// Status is the JSON body for GET /status and for every mutating endpoint's
-// response, so a caller always sees the resulting state without a
-// follow-up request.
+// Status is the JSON body for GET /status and every mutating endpoint's response.
 type Status struct {
 	Recording       bool   `json:"recording"`
 	Uploading       bool   `json:"uploading"`
@@ -42,8 +38,7 @@ func (s *State) status() Status {
 	return st
 }
 
-// Handler builds the control-plane HTTP handler. Split from Serve so tests
-// can exercise it with httptest.NewServer without binding a real port.
+// Handler builds the control-plane HTTP handler.
 func (s *State) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /status", s.handleStatus)
@@ -54,11 +49,8 @@ func (s *State) Handler() http.Handler {
 	return mux
 }
 
-// Serve starts the control HTTP server on addr and blocks until ctx is
-// canceled, then shuts it down gracefully. addr is expected to be
-// loopback-only (e.g. 127.0.0.1:9191) -- the container already runs with
-// host networking, so this is reachable from the Thor host and nowhere
-// else; there is no authentication.
+// Serve starts the control HTTP server on addr (no authentication) and
+// blocks until ctx is canceled.
 func Serve(ctx context.Context, addr string, state *State) error {
 	srv := &http.Server{Addr: addr, Handler: state.Handler()}
 

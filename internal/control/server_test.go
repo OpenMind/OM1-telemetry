@@ -69,10 +69,6 @@ func TestHandleRecordingStop_sendsCmdAndReflectsResult(t *testing.T) {
 
 func TestHandleRecordingStart_timesOutAsGatewayTimeout(t *testing.T) {
 	s := New()
-	// Nothing ever consumes s.RecordingCmds, so the handler's internal
-	// commandTimeout would normally fire -- too slow for a unit test, so
-	// this just checks the request round-trips; the timeout path itself is
-	// covered by TestSendRecordingCmd_timesOutIfNothingConsumes.
 	go func() {
 		cmd := <-s.RecordingCmds
 		cmd.Result <- nil
