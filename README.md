@@ -370,41 +370,18 @@ done here; the feature-log timeline covers the common case.
 
 ## Session rotation & cloud upload
 
-By default (`SESSION_ROTATE_INTERVAL=5m`) the recorder does not run one
-session for its whole lifetime: every 5 minutes it stops all streams, closes
-the current session, and opens a fresh one, so each 5-minute segment can be
-uploaded independently instead of waiting for the whole run (which, for a
-long-lived robot process, would mean never). Recording resumes within
-roughly a second — ffmpeg/DDS reconnect as part of opening the next segment's
-streams; there is a small gap in each stream at every rotation boundary, not
-a seamless splice.
+`SESSION_ROTATE_INTERVAL` (default `5m`) closes the current session and
+opens a new one on that cadence, so each segment can be uploaded as it
+finishes rather than waiting for the whole run.
 
-Set `OPENMIND_API_URL` and `OPENMIND_API_KEY` to upload each rotated-away
-segment to the [openmind-api](https://github.com/OpenMind/openmind-api)'s
-data-collection endpoints (`internal/handlers/data_collection_upload.go`
-there) once it closes — a presigned S3 POST for ordinary files, true S3
-multipart upload for anything at or above `UPLOAD_MULTIPART_THRESHOLD_BYTES`.
-Uploading is best-effort and runs in the background while the next segment
-records: a failed upload marks the session `failed` server-side and leaves
-the local files untouched, so a later run — the openmind-api resumes an
-upload against the same `session_dir` instead of duplicating it — or a
-manual retry can pick it back up. Within one segment, up to
-`UPLOAD_CONCURRENCY` files upload at the same time rather than one after
-another — otherwise a big file early in the (alphabetical) upload order can
-burn most of the segment's upload deadline on a slow link, leaving small
-files later in the order to fail with a timeout despite being individually
-quick. The first file to fail cancels the rest of that segment's in-flight
-and pending uploads rather than letting them keep spending the deadline on a
-segment that's already going to be retried as a whole. `DELETE_AFTER_UPLOAD=true` removes a
-segment's local files once (and only once) its upload has actually
-succeeded; it stays off by default; a robot's disk is cheap compared to
-losing data to a bug in a new upload path.
+Set `OPENMIND_API_URL` and `OPENMIND_API_KEY` to upload each closed segment
+to the [openmind-api](https://github.com/OpenMind/openmind-api). Uploading
+runs in the background; a failed upload leaves the local files in place and
+retries automatically. `UPLOAD_CONCURRENCY` (default `4`) controls how many
+files in a segment upload at once, and `DELETE_AFTER_UPLOAD` (default
+`false`) removes local files once a segment is confirmed uploaded.
 
-Without both `OPENMIND_API_URL` and `OPENMIND_API_KEY` set, rotation still
-happens (segmenting the recording locally) but nothing is uploaded --
-`UPLOAD_ENABLED` (default `true`) is the operator's intent, actual uploading
-additionally requires both to be set, and the recorder logs a warning once
-at startup if it's on but not fully configured.
+Without both env vars set, the recorder still rotates and records locally — it just doesn't upload.
 
 ### Preprocessing before upload
 
@@ -467,22 +444,14 @@ segment's directory stays self-contained for `align_recording.py` /
 
 ## Control API
 
-A small HTTP server, bound to `CONTROL_ADDR` (default `127.0.0.1:9191`),
-lets an operator start/stop recording and pause/resume uploading on a
-*running* process, without restarting the container. Both are on by
-default — this only matters once you want to change one at runtime.
+An HTTP server bound to `CONTROL_ADDR` (default `127.0.0.1:9191`) lets you
+start/stop recording and pause/resume uploading without restarting the
+container. Both are on by default.
 
-- `GET /status` - current state as JSON: `recording`, `uploading`,
-  `current_session` (empty while recording is paused), `recordings_bytes`,
-  `max_bytes`, `pending_uploads`
-- `POST /recording/start` / `POST /recording/stop` - stopping closes out the
-  current session the same way a normal rotation does (so it's immediately
-  eligible for upload/retention); starting opens a fresh one. Both are
-  idempotent no-ops if already in the requested state.
-- `POST /upload/start` / `POST /upload/stop` - toggles whether the
-  catch-up sweep and session-close uploads actually reach the
-  openmind-api; starting also kicks off an immediate catch-up pass instead
-  of waiting for the next `RETENTION_SWEEP_INTERVAL` tick.
+- `GET /status` - `recording`, `uploading`, `current_session`,
+  `recordings_bytes`, `max_bytes`, `pending_uploads`
+- `POST /recording/start` / `POST /recording/stop`
+- `POST /upload/start` / `POST /upload/stop`
 
 ```bash
 curl localhost:9191/status
@@ -490,37 +459,17 @@ curl -X POST localhost:9191/recording/stop
 curl -X POST localhost:9191/upload/stop
 ```
 
-Pausing uploading does **not** pause `RETENTION_MAX_BYTES` cap enforcement:
-a robot with uploading manually turned off still gets its oldest
-never-uploaded sessions deleted if the cap is hit, same as if uploading had
-failed on its own (see "Retention & the catch-up/cap sweep" above) — disk
-safety always takes priority over data you asked to keep local for a while.
+Pausing uploading does not pause `RETENTION_MAX_BYTES` cap enforcement —
+old, never-uploaded sessions can still be deleted if the disk cap is hit.
 
-The server has no authentication and is loopback-only by design: the
-container runs with host networking, so it's reachable from the Thor host
-itself (including other local processes, like the OTA agent) but not from
-the network at large.
+The server has no authentication and is loopback-only (reachable from the
+host, not the network at large).
 
 ## Scheduling
 
 `SCHEDULE_FILE` points at an optional YAML file describing a daily
-recording/uploading schedule -- see `config/schedule.example.yaml` for the
-format. It's unset by default, which means no schedule: recording and
-uploading both stay on continuously, exactly as if this feature didn't
-exist. Scheduling is opt-in and additive, never a behavior change on its
-own.
-
-The schedule doesn't hook into the recorder specially -- it's built
-entirely on top of the Control API above: a background reconciler checks
-every 30s whether recording/uploading should be on right now and, if not,
-calls the same `SendRecordingCmd` / `SetUploading` the HTTP handlers use.
-Anything else that wanted a different scheme (weekday-only recording, a
-webhook-driven pause, whatever) could be built the same way, either as
-another file loaded by `internal/schedule` or as an external process
-calling the HTTP endpoints directly -- the control plane doesn't care who
-the caller is.
-
-To run it:
+recording/uploading schedule — see `config/schedule.example.yaml` for the
+format. Unset by default: recording and uploading stay on continuously.
 
 ```bash
 docker run -d \
@@ -530,13 +479,8 @@ docker run -d \
   om1-telemetry
 ```
 
-A schedule file that fails to load or parse logs an error and is treated
-the same as SCHEDULE_FILE being unset -- recording and uploading stay on
-continuously rather than the process crashing or refusing to start over a
-typo. A manual `curl` against the Control API between scheduled
-transitions is not overridden until the schedule's next tick; there's no
-special precedence between the two, since the schedule is just another
-caller of the same API.
+A schedule file that fails to load or parse is treated the same as
+`SCHEDULE_FILE` being unset.
 
 ## Testing
 
