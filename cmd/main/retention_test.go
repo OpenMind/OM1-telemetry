@@ -1,16 +1,21 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 
+	"om1-telemetry/config"
+	"om1-telemetry/internal/control"
 	"om1-telemetry/internal/upload"
 )
 
@@ -244,4 +249,166 @@ func TestRetentionSweep_uploadsOldestUnmarkedFirstAndSkipsProtectedAndAlreadyUpl
 	require.Zero(t, api.createCalls[apiSessionDir(root, alreadyDone)],
 		"a session already marked uploaded must not be re-uploaded")
 	require.Zero(t, api.createCalls[apiSessionDir(root, live)])
+}
+
+// TestRunRetentionSweeps_capEnforcementNotBlockedByStuckCatchUpUpload
+// reproduces the scenario that let the recordings cap go unenforced for
+// hours in production: a large catch-up backlog plus a bad network, where
+// retentionSweep's single combined call could spend its whole time stuck in
+// the upload loop and never reach enforceRetentionCap. runRetentionSweeps
+// now ticks the two on separate goroutines specifically so this can't
+// happen -- this test makes the create-session call for the oldest
+// directory slow (longer than several sweep intervals, so catch-up can't
+// even finish its first attempt in time) and asserts a different, over-cap
+// directory still gets deleted promptly regardless.
+//
+// The delay is real wall-clock time, not context cancellation: uploadSession
+// runs each attempt on its own independent timeout unrelated to
+// runRetentionSweeps' ctx (see uploadSession in main.go), so this test can't
+// rely on canceling ctx to unblock a hung HTTP call -- it has to actually
+// let the slow response land.
+func TestRunRetentionSweeps_capEnforcementNotBlockedByStuckCatchUpUpload(t *testing.T) {
+	const sweepInterval = 20 * time.Millisecond
+	const slowUpload = 300 * time.Millisecond // several sweep intervals
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/data/collection/sessions", func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(slowUpload)
+		w.WriteHeader(http.StatusInternalServerError)
+	})
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+	client := upload.New(upload.Config{BaseURL: srv.URL, APIKey: "k"})
+
+	root := t.TempDir()
+	slow := filepath.Join(root, "2026-08-14", "2026-08-14_00-00-00")
+	writeFile(t, slow, "meta.json", []byte(`{}`))
+	overCap := filepath.Join(root, "2026-08-15", "2026-08-15_00-00-00")
+	writeFile(t, overCap, "b.bin", make([]byte, 200))
+	// Neither directory is marked uploaded or protected: catch-up will pick
+	// up "slow" first (oldest first) and be stuck on its slow response for
+	// several sweep intervals, never reaching "overCap" in that time -- so
+	// if cap enforcement deletes "overCap" before "slow"'s attempt even
+	// returns, it can only be the independent enforcement ticker doing it.
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cfg := config.RetentionConfig{MaxBytes: 10, SweepInterval: sweepInterval}
+
+	done := make(chan struct{})
+	go func() {
+		runRetentionSweeps(ctx, client, root, filepath.Join(root, "missing-boot.jsonl"), func() string { return "" }, cfg, control.New())
+		close(done)
+	}()
+
+	require.Eventually(t, func() bool {
+		_, err := os.Stat(overCap)
+		return os.IsNotExist(err)
+	}, slowUpload/2, 5*time.Millisecond,
+		"cap enforcement must delete the over-cap directory well before the stuck catch-up upload even returns")
+
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("runRetentionSweeps did not shut down after ctx cancellation")
+	}
+}
+
+// TestRunRetentionSweeps_uploadDisabled_skipsCatchUpButStillEnforcesCap
+// covers the control-API pause: disabling uploading must stop the catch-up
+// ticker from ever calling out, while RETENTION_MAX_BYTES enforcement (the
+// hard disk-safety guarantee) keeps running regardless -- see
+// enforceRetentionCap's doc comment on why cap enforcement never yields to
+// upload state.
+func TestRunRetentionSweeps_uploadDisabled_skipsCatchUpButStillEnforcesCap(t *testing.T) {
+	const sweepInterval = 20 * time.Millisecond
+
+	var hit atomic.Bool
+	mux := http.NewServeMux()
+	mux.HandleFunc("/data/collection/sessions", func(w http.ResponseWriter, r *http.Request) {
+		hit.Store(true)
+		w.WriteHeader(http.StatusInternalServerError)
+	})
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+	client := upload.New(upload.Config{BaseURL: srv.URL, APIKey: "k"})
+
+	root := t.TempDir()
+	notUploaded := filepath.Join(root, "2026-08-14", "2026-08-14_00-00-00")
+	writeFile(t, notUploaded, "meta.json", []byte(`{}`))
+	overCap := filepath.Join(root, "2026-08-15", "2026-08-15_00-00-00")
+	writeFile(t, overCap, "b.bin", make([]byte, 200))
+
+	ctl := control.New()
+	ctl.SetUploading(false)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cfg := config.RetentionConfig{MaxBytes: 10, SweepInterval: sweepInterval}
+
+	done := make(chan struct{})
+	go func() {
+		runRetentionSweeps(ctx, client, root, filepath.Join(root, "missing-boot.jsonl"), func() string { return "" }, cfg, ctl)
+		close(done)
+	}()
+
+	require.Eventually(t, func() bool {
+		_, err := os.Stat(overCap)
+		return os.IsNotExist(err)
+	}, time.Second, 5*time.Millisecond,
+		"cap enforcement must still delete over-cap directories while uploading is disabled")
+
+	time.Sleep(5 * sweepInterval) // several ticks' worth of chances to (wrongly) call out
+	require.False(t, hit.Load(), "catch-up uploads must not run while uploading is disabled")
+
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("runRetentionSweeps did not shut down after ctx cancellation")
+	}
+}
+
+// TestRunRetentionSweeps_uploadTrigger_runsImmediateSweep covers
+// POST /upload/start's promise: an operator re-enabling uploading gets the
+// backlog cleared right away, not on whatever's left of the current sweep
+// interval.
+func TestRunRetentionSweeps_uploadTrigger_runsImmediateSweep(t *testing.T) {
+	const longSweepInterval = 2 * time.Second // must not fire on its own during this test
+
+	var hit atomic.Bool
+	mux := http.NewServeMux()
+	mux.HandleFunc("/data/collection/sessions", func(w http.ResponseWriter, r *http.Request) {
+		hit.Store(true)
+		w.WriteHeader(http.StatusInternalServerError)
+	})
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+	client := upload.New(upload.Config{BaseURL: srv.URL, APIKey: "k"})
+
+	root := t.TempDir()
+	notUploaded := filepath.Join(root, "2026-08-14", "2026-08-14_00-00-00")
+	writeFile(t, notUploaded, "meta.json", []byte(`{}`))
+
+	ctl := control.New()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cfg := config.RetentionConfig{MaxBytes: 1 << 30, SweepInterval: longSweepInterval}
+
+	done := make(chan struct{})
+	go func() {
+		runRetentionSweeps(ctx, client, root, filepath.Join(root, "missing-boot.jsonl"), func() string { return "" }, cfg, ctl)
+		close(done)
+	}()
+
+	ctl.TriggerUpload()
+
+	require.Eventually(t, func() bool { return hit.Load() }, 500*time.Millisecond, 5*time.Millisecond,
+		"TriggerUpload must cause an immediate catch-up sweep without waiting for the long tick interval")
+
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("runRetentionSweeps did not shut down after ctx cancellation")
+	}
 }

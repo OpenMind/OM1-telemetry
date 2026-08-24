@@ -150,6 +150,7 @@ Any of the following override the selected profile / defaults:
 - `UPLOAD_CONCURRENCY` - How many of a session's files upload at the same time, instead of one at a time sharing the session's whole upload deadline (default: `4`)
 - `RETENTION_MAX_BYTES` - Hard cap on `RECORDINGS_DIR`'s total size; once exceeded, sessions are deleted oldest first (preferring already-uploaded ones, but not-yet-uploaded ones too if that's what it takes) until it isn't (default: `107374182400`, 100 GiB; `0` disables cap enforcement — see "Retention & the catch-up/cap sweep" below)
 - `RETENTION_SWEEP_INTERVAL` - How often the retention sweep looks for finished-but-not-yet-uploaded sessions and, if over the cap, deletes uploaded ones (default: `5m`)
+- `CONTROL_ADDR` - Bind address for the control-plane HTTP server (default: `127.0.0.1:9191`; loopback-only, no authentication — see "Control API" below)
 
 CycloneDDS domain IDs (not endpoints/addresses) are how independent DDS
 "networks" on the same host/subnet are separated — leave at the default `0`
@@ -438,7 +439,7 @@ lost locally.
 
 - `lowstate_frames.bin`, `odom_frames.bin`, `lidar_scans.bin` are each
   compressed whole, as one opaque zstd blob (e.g. `lowstate_frames.bin` →
-  `lowstate_frames.zstd.bin`) — fixed-schema binary streams where the
+  `lowstate_frames.zstd`) — fixed-schema binary streams where the
   existing timestamps CSV's `byte_offset` column is still correct once the
   file is decompressed, so nothing about per-record framing needs to
   change.
@@ -447,7 +448,7 @@ lost locally.
   entropy coder, so re-zstd'ing it as-is barely helps. `compressDepth`
   instead decodes every frame back to raw pixels first, concatenates them,
   and zstd-compresses *that* (measured ~2.5x smaller than the RVL stream,
-  losslessly) as `depth_frames.zstd.bin`. `depth_timestamps.csv` gets
+  losslessly) as `depth_frames.zstd`. `depth_timestamps.csv` gets
   rewritten in place to match — once decoded, every frame is a fixed
   `width*height*2` bytes rather than RVL's variable length, and `method`
   becomes `raw_u16le`. If depth ever contains a frame using
@@ -459,7 +460,7 @@ lost locally.
   `compressPointcloud` decodes each frame's CDR payload, extracts its
   float32 x/y/z points, and re-encodes them with
   [Draco](https://github.com/google/draco) (`draco_encoder -qp 11`) —
-  concatenated into `pointcloud_frames.drc.bin`, with
+  concatenated into `pointcloud_frames.drc`, with
   `pointcloud_timestamps.csv` rewritten to match (Draco's per-frame output
   size varies, unlike the whole-file cases above). This step needs
   `draco_encoder` on `PATH`; see `make install-draco` below and the
@@ -515,6 +516,42 @@ physically lives in the first session's directory. Every later segment gets
 its own copy of it (a snapshot taken when that segment closes), so each
 segment's directory stays self-contained for `align_recording.py` /
 `fix_session_time.py` without needing the boot session alongside it.
+
+## Control API
+
+A small HTTP server, bound to `CONTROL_ADDR` (default `127.0.0.1:9191`),
+lets an operator start/stop recording and pause/resume uploading on a
+*running* process, without restarting the container. Both are on by
+default — this only matters once you want to change one at runtime.
+
+- `GET /status` - current state as JSON: `recording`, `uploading`,
+  `current_session` (empty while recording is paused), `recordings_bytes`,
+  `max_bytes`, `pending_uploads`
+- `POST /recording/start` / `POST /recording/stop` - stopping closes out the
+  current session the same way a normal rotation does (so it's immediately
+  eligible for upload/retention); starting opens a fresh one. Both are
+  idempotent no-ops if already in the requested state.
+- `POST /upload/start` / `POST /upload/stop` - toggles whether the
+  catch-up sweep and session-close uploads actually reach the
+  openmind-api; starting also kicks off an immediate catch-up pass instead
+  of waiting for the next `RETENTION_SWEEP_INTERVAL` tick.
+
+```bash
+curl localhost:9191/status
+curl -X POST localhost:9191/recording/stop
+curl -X POST localhost:9191/upload/stop
+```
+
+Pausing uploading does **not** pause `RETENTION_MAX_BYTES` cap enforcement:
+a robot with uploading manually turned off still gets its oldest
+never-uploaded sessions deleted if the cap is hit, same as if uploading had
+failed on its own (see "Retention & the catch-up/cap sweep" above) — disk
+safety always takes priority over data you asked to keep local for a while.
+
+The server has no authentication and is loopback-only by design: the
+container runs with host networking, so it's reachable from the Thor host
+itself (including other local processes, like the OTA agent) but not from
+the network at large.
 
 ## Testing
 

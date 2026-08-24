@@ -172,6 +172,16 @@ func RecordingsDir() string {
 	return envStr("RECORDINGS_DIR", "recordings")
 }
 
+// ControlAddr is the bind address for the control-plane HTTP server (see
+// internal/control), which lets an operator start/stop recording and
+// pause/resume uploading without restarting the process. Loopback-only by
+// default: the container already runs with host networking, so this is
+// reachable from the host but not the network at large, and the control
+// API has no authentication of its own.
+func ControlAddr() string {
+	return envStr("CONTROL_ADDR", "127.0.0.1:9191")
+}
+
 // Load builds the recorder configuration for a session directory the caller
 // has already created.
 //

@@ -7,9 +7,11 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"sync"
 	"time"
 
 	"om1-telemetry/config"
+	"om1-telemetry/internal/control"
 	"om1-telemetry/internal/session"
 	"om1-telemetry/internal/upload"
 )
@@ -22,9 +24,10 @@ import (
 // upload.regularFiles never mistakes it for session data.
 const uploadMarkerName = ".uploaded"
 
-// retentionSweep is the backstop for the two upload call sites in main's
-// event loop (rotation and shutdown), which only ever handle the segment
-// that just closed and never retry a failed one. Each tick it:
+// retentionSweep is a single, synchronous pass covering both catch-up
+// uploads and cap enforcement -- the backstop for the two upload call sites
+// in main's event loop (rotation and shutdown), which only ever handle the
+// segment that just closed and never retry a failed one. It:
 //
 //  1. If uploader is configured, walks every dated session directory,
 //     oldest first, and uploads any that were never marked uploaded --
@@ -39,6 +42,11 @@ const uploadMarkerName = ".uploaded"
 // now) or the directory still holding the live boot-relative clock journal
 // (see bootSessionDir) -- both are still changing, so neither "uploaded" nor
 // "safe to delete" can be true of them yet.
+//
+// runRetentionSweeps does NOT call this as one unit -- it ticks catchUpUploads
+// and enforceRetentionCap on separate tickers instead. This combined form is
+// kept as a building block for tests, and for anything that wants a single
+// deterministic "do a full sweep now" call.
 func retentionSweep(uploader *upload.Client, recordingsDir, bootTimebasePath, currentDir string, maxBytes int64) {
 	dirs, err := session.ListClosed(recordingsDir)
 	if err != nil {
@@ -50,17 +58,28 @@ func retentionSweep(uploader *upload.Client, recordingsDir, bootTimebasePath, cu
 		return dir == currentDir || bootSessionDir(bootTimebasePath, dir)
 	}
 
-	if uploader != nil {
-		for _, dir := range dirs {
-			if protected(dir) || isUploaded(dir) {
-				continue
-			}
-			opts := uploadOptions(bootTimebasePath, dir)
-			uploadSession(uploader, dir, apiSessionDir(recordingsDir, dir), readStartedAt(dir), false, opts)
-		}
-	}
-
+	catchUpUploads(uploader, dirs, protected, recordingsDir, bootTimebasePath)
 	enforceRetentionCap(recordingsDir, dirs, protected, maxBytes)
+}
+
+// catchUpUploads retries every closed, not-yet-uploaded, non-protected
+// directory in dirs, oldest first. Split out from retentionSweep so
+// runRetentionSweeps can tick it independently of enforceRetentionCap: each
+// uploadSession call here can block for minutes under bad network conditions
+// (up to the upload client's own per-session timeout), and with a large
+// enough backlog a full pass can take hours -- cap enforcement, the hard
+// disk-safety guarantee, must never wait on that.
+func catchUpUploads(uploader *upload.Client, dirs []string, protected func(string) bool, recordingsDir, bootTimebasePath string) {
+	if uploader == nil {
+		return
+	}
+	for _, dir := range dirs {
+		if protected(dir) || isUploaded(dir) {
+			continue
+		}
+		opts := uploadOptions(bootTimebasePath, dir)
+		uploadSession(uploader, dir, apiSessionDir(recordingsDir, dir), readStartedAt(dir), false, opts)
+	}
 }
 
 // enforceRetentionCap deletes directories from dirs, oldest first, until
@@ -148,6 +167,24 @@ func isUploaded(dir string) bool {
 	return err == nil
 }
 
+// pendingUploadCount reports how many closed sessions have not yet been
+// confirmed uploaded -- the backlog a catch-up sweep still has to clear.
+// Best-effort, for status reporting (see internal/control.Extra): an error
+// listing sessions yields 0 rather than failing the caller.
+func pendingUploadCount(recordingsDir string) int {
+	dirs, err := session.ListClosed(recordingsDir)
+	if err != nil {
+		return 0
+	}
+	n := 0
+	for _, dir := range dirs {
+		if !isUploaded(dir) {
+			n++
+		}
+	}
+	return n
+}
+
 // markUploaded records that dir's files have all been uploaded, so later
 // sweeps skip it -- best-effort: a missing marker only costs a redundant
 // upload attempt next sweep, which UploadSession's own session_dir resume
@@ -203,15 +240,24 @@ func readStartedAt(dir string) time.Time {
 	return time.Unix(0, m.SessionStartUnixNs)
 }
 
-// runRetentionSweeps drives retentionSweep on cfg's schedule until ctx is
-// canceled. currentDir returns the directory currently being recorded to at
-// the moment each tick fires -- read fresh each time, since rotation moves
-// it over the sweeper's lifetime.
+// runRetentionSweeps drives catch-up uploads and cap enforcement on their
+// own separate tickers until ctx is canceled, so a slow or stuck upload
+// backlog can never delay cap enforcement -- see catchUpUploads and
+// enforceRetentionCap. currentDir returns the directory currently being
+// recorded to at the moment each tick fires -- read fresh each time, since
+// rotation moves it over the sweeper's lifetime.
 //
-// Runs regardless of whether uploader is configured: cap enforcement
-// (deleting the oldest directories, uploaded or not) must hold even when
-// there's nowhere to upload to -- see enforceRetentionCap.
-func runRetentionSweeps(ctx context.Context, uploader *upload.Client, recordingsDir, bootTimebasePath string, currentDir func() string, cfg config.RetentionConfig) {
+// This used to run both as one retentionSweep call per tick. Under a large
+// catch-up backlog and a bad network, that single call could take hours --
+// each uploadSession attempt can block for minutes, and cap enforcement
+// (a directory listing plus some local deletes, no network involved) only
+// ran once the whole backlog had been walked. Splitting them onto separate
+// tickers means cap enforcement -- the hard disk-safety guarantee -- keeps
+// running on schedule regardless of how long catch-up uploads are taking.
+//
+// Runs regardless of whether uploader is configured: cap enforcement must
+// hold even when there's nowhere to upload to.
+func runRetentionSweeps(ctx context.Context, uploader *upload.Client, recordingsDir, bootTimebasePath string, currentDir func() string, cfg config.RetentionConfig, ctl *control.State) {
 	if cfg.MaxBytes <= 0 {
 		return
 	}
@@ -219,15 +265,67 @@ func runRetentionSweeps(ctx context.Context, uploader *upload.Client, recordings
 	if interval <= 0 {
 		interval = 5 * time.Minute
 	}
-	ticker := time.NewTicker(interval)
-	defer ticker.Stop()
 
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-			retentionSweep(uploader, recordingsDir, bootTimebasePath, currentDir(), cfg.MaxBytes)
+	listClosed := func() (dirs []string, protected func(string) bool, ok bool) {
+		dirs, err := session.ListClosed(recordingsDir)
+		if err != nil {
+			slog.Warn("retention: cannot list session directories", "dir", recordingsDir, "err", err)
+			return nil, nil, false
 		}
+		cd := currentDir()
+		return dirs, func(dir string) bool {
+			return dir == cd || bootSessionDir(bootTimebasePath, dir)
+		}, true
 	}
+
+	var wg sync.WaitGroup
+
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				if dirs, protected, ok := listClosed(); ok {
+					enforceRetentionCap(recordingsDir, dirs, protected, cfg.MaxBytes)
+				}
+			}
+		}
+	}()
+
+	if uploader != nil {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			ticker := time.NewTicker(interval)
+			defer ticker.Stop()
+			sweep := func() {
+				if !ctl.Uploading() {
+					return
+				}
+				if dirs, protected, ok := listClosed(); ok {
+					catchUpUploads(uploader, dirs, protected, recordingsDir, bootTimebasePath)
+				}
+			}
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-ticker.C:
+					sweep()
+				case <-ctl.UploadTrigger:
+					// An operator just re-enabled uploading via the
+					// control API (or asked for a sweep directly) and
+					// wants the backlog cleared now, not on the next tick.
+					sweep()
+				}
+			}
+		}()
+	}
+
+	wg.Wait()
 }
