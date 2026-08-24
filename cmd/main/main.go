@@ -31,6 +31,8 @@ import (
 const uploadTimeout = 10 * time.Minute
 
 func main() {
+	// Sampled before anything else, so the session's monotonic anchor covers
+	// the whole run.
 	clk := clock.New()
 
 	recordingsDir := config.RecordingsDir()
@@ -41,6 +43,8 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Sweep sessions an earlier run left undated. After Open, so this run's own
+	// pending directory is excluded.
 	session.Janitor(recordingsDir, sess.RealDir())
 
 	cfg := config.Load(sess.Dir())
@@ -71,6 +75,9 @@ func main() {
 
 	bootTimebasePath := sess.TimebasePath()
 
+	// Journals the monotonic-to-UTC mapping and, the first time NTP confirms
+	// the wall clock, moves a pending session to its true date. Recorders write
+	// through a symlink, so the rename does not disturb them.
 	clkCtx, clkCancel := context.WithCancel(context.Background())
 	watcher := clock.NewWatcher(clk, bootTimebasePath, func(clock.Record) {
 		currentMu.Lock()

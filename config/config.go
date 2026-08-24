@@ -91,7 +91,9 @@ type AudioConfig struct {
 	TimestampsFile string
 }
 
-// FeaturesConfig configures ingestion of the video-processor's feature-event log; disabled when SourcePath is empty.
+// FeaturesConfig configures ingestion of the video-processor's feature-event
+// log (capture-time-stamped, video-derived events). Disabled when SourcePath
+// is empty.
 type FeaturesConfig struct {
 	SourcePath     string
 	OutputFile     string
@@ -128,7 +130,8 @@ type OdomConfig struct {
 }
 
 type LowstateConfig struct {
-	// RobotType selects the LowState DDS schema ("go2" or "g1").
+	// RobotType selects the LowState DDS schema: "go2" (unitree_go/msg/
+	// LowState) or "g1" (unitree_hg/msg/LowState).
 	RobotType      string
 	DDSDomainID    uint32
 	DDSTopic       string
@@ -143,7 +146,9 @@ type NetworkConfig struct {
 	DataFile     string
 }
 
-// RecordingsDir is the root under which sessions are created.
+// RecordingsDir is the root under which sessions are created. The session
+// package needs it before Load runs, because it decides the session directory
+// name -- which depends on whether the clock can be trusted yet.
 func RecordingsDir() string {
 	return envStr("RECORDINGS_DIR", "recordings")
 }
@@ -158,7 +163,13 @@ func ScheduleFile() string {
 	return envStr("SCHEDULE_FILE", "")
 }
 
-// Load builds the recorder configuration for a session directory the caller has already created.
+// Load builds the recorder configuration for a session directory the caller
+// has already created.
+//
+// The directory is passed in rather than derived from time.Now(): a robot that
+// booted without a network can have a wall clock days off, and a directory
+// named from it would be wrong and frozen for the whole session. See
+// internal/session.
 func Load(sessionDir string) Config {
 	robotType, profile := ResolveProfile()
 
@@ -173,11 +184,18 @@ func Load(sessionDir string) Config {
 		SessionDir:       sessionDir,
 		Video:            videoConfigs(profile, sessionDir),
 		Audio: AudioConfig{
+			// Audio is the audio track of the video-processor's muxed session
+			// stream (single capture clock). ffmpeg selects it with -vn. Served
+			// gst-direct on :8555 for the lowest-latency, capture-stamped source;
+			// override to mediamtx (rtsp://localhost:8554/live) for an off-host
+			// recorder.
 			RTSPURL:        envStr("AUDIO_RTSP_URL", "rtsp://localhost:8555/live"),
 			OutputFile:     filepath.Join(sessionDir, "audio.ogg"),
 			TimestampsFile: filepath.Join(sessionDir, "audio_timestamps.csv"),
 		},
 		Features: FeaturesConfig{
+			// Path to the video-processor's feature-log JSONL on a shared
+			// volume. Empty (default) disables ingestion.
 			SourcePath:     envStr("VIDEO_FEATURES_LOG", ""),
 			OutputFile:     filepath.Join(sessionDir, "video_features.jsonl"),
 			TimestampsFile: filepath.Join(sessionDir, "video_features_timestamps.csv"),

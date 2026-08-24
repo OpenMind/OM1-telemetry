@@ -16,6 +16,8 @@ import (
 
 var datedPattern = regexp.MustCompile(`^\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2}(_\d+)?$`)
 
+// A robot whose clock is fine must behave exactly as it did before pending/
+// existed: a plain dated directory, no symlink, nothing to promote.
 func TestOpen_trustedClockUsesDatedDirectory(t *testing.T) {
 	root := t.TempDir()
 	clk := clock.NewWithSync(clock.SyncYes)
@@ -31,6 +33,9 @@ func TestOpen_trustedClockUsesDatedDirectory(t *testing.T) {
 	require.True(t, os.IsNotExist(err), "no symlink should be created")
 }
 
+// SyncUnknown means the marker is not visible, which is what a deployment that
+// does not mount /run/systemd/timesync looks like. It must not be treated as a
+// bad clock, or every such session lands in pending/.
 func TestOpen_unknownSyncIsTreatedAsTrusted(t *testing.T) {
 	root := t.TempDir()
 
@@ -67,12 +72,16 @@ func TestOpen_untrustedClockUsesPendingDirAndSymlink(t *testing.T) {
 	require.NotZero(t, meta.SessionStartMonoNs)
 }
 
+// The whole point of the symlink: a recorder that opened a file before the
+// rename keeps writing to it, and a recorder that opens one after the rename
+// lands in the new directory. Neither notices.
 func TestPromote_doesNotDisturbOpenOrFutureWriters(t *testing.T) {
 	root := t.TempDir()
 	s, err := Open(root, clock.NewWithSync(clock.SyncNo))
 	require.NoError(t, err)
 	pendingDir := s.RealDir()
 
+	// A recorder that is already running.
 	open, err := os.Create(filepath.Join(s.Dir(), "lidar_timestamps.csv"))
 	require.NoError(t, err)
 	defer func() { _ = open.Close() }()
@@ -85,6 +94,7 @@ func TestPromote_doesNotDisturbOpenOrFutureWriters(t *testing.T) {
 	require.NotEqual(t, pendingDir, s.RealDir())
 	require.True(t, datedPattern.MatchString(filepath.Base(s.RealDir())), s.RealDir())
 
+	// The already-open descriptor follows the inode.
 	_, err = open.WriteString("after\n")
 	require.NoError(t, err)
 	require.NoError(t, open.Sync())
@@ -94,6 +104,7 @@ func TestPromote_doesNotDisturbOpenOrFutureWriters(t *testing.T) {
 	require.Equal(t, "before\nafter\n", string(content),
 		"writes from both sides of the rename must land in the same file")
 
+	// A new segment opened through the unchanged Dir() lands in the new place.
 	require.NoError(t, os.WriteFile(filepath.Join(s.Dir(), "segment2.mp4"), []byte("x"), 0o644))
 	_, err = os.Stat(filepath.Join(s.RealDir(), "segment2.mp4"))
 	require.NoError(t, err)
@@ -139,9 +150,13 @@ func writePendingSession(t *testing.T, root, name string, journal []clock.Record
 	return dir
 }
 
+// The crash case: the clock synced and was journaled, but the process died
+// before it could promote. The journal is enough to date it afterwards.
 func TestJanitor_recoversSessionUsingItsJournal(t *testing.T) {
 	root := t.TempDir()
 
+	// Started 2 hours (on the monotonic clock) before NTP landed on a known
+	// wall time, so the true start is that wall time minus 2 hours.
 	syncWall := time.Date(2026, 7, 14, 9, 30, 0, 0, time.UTC)
 	startMono := int64(30 * time.Second)
 	syncMono := startMono + int64(2*time.Hour)
@@ -156,6 +171,8 @@ func TestJanitor_recoversSessionUsingItsJournal(t *testing.T) {
 	_, err := os.Stat(dir)
 	require.True(t, os.IsNotExist(err), "the recovered session should have moved out of pending/")
 
+	// Directory names are local time, as they have always been; the recovered
+	// instant is what matters and is asserted below.
 	trueStart := syncWall.Add(-2 * time.Hour).Local()
 	recovered := filepath.Join(root, trueStart.Format(dateLayout), trueStart.Format(sessionLayout))
 	data, err := os.ReadFile(filepath.Join(recovered, "lidar_scans.bin"))
@@ -170,6 +187,9 @@ func TestJanitor_recoversSessionUsingItsJournal(t *testing.T) {
 	require.Equal(t, syncWall.Add(-2*time.Hour).UnixNano(), meta.SessionStartUnixNs)
 }
 
+// A session that never saw a synchronized clock cannot be dated by anything --
+// its monotonic timeline ended with that boot. Leaving it undated is the honest
+// outcome; inventing a date would be worse.
 func TestJanitor_leavesUndatableSessionAlone(t *testing.T) {
 	root := t.TempDir()
 	dir := writePendingSession(t, root, "beef5678_000030000", []clock.Record{
@@ -188,6 +208,7 @@ func TestJanitor_skipsTheLiveSession(t *testing.T) {
 	s, err := Open(root, clock.NewWithSync(clock.SyncNo))
 	require.NoError(t, err)
 
+	// Give the live session a journal that would otherwise make it recoverable.
 	require.NoError(t, os.WriteFile(filepath.Join(s.Dir(), TimebaseFileName),
 		[]byte(`{"kind":"start","mono_ns":1,"utc_ns":1}`+"\n"+
 			`{"kind":"step","mono_ns":2,"utc_ns":1000000000,"synced":true}`+"\n"), 0o644))
@@ -202,6 +223,7 @@ func TestJanitor_noPendingDirIsNotAnError(t *testing.T) {
 	require.NotPanics(t, func() { Janitor(t.TempDir(), "") })
 }
 
+// Two sessions promoted into the same second must not collide.
 func TestUniqueDir_avoidsCollision(t *testing.T) {
 	root := t.TempDir()
 	base := filepath.Join(root, "2026-07-14_07-30-00")
