@@ -13,10 +13,7 @@ import (
 	"om1-telemetry/internal/cdr"
 )
 
-// encodeTestPointCloud2 mirrors internal/pointcloud/dds_reader.go's
-// encodePointCloud2 closely enough for decodePointCloud2/extractXYZ to be
-// tested without a real DDS sample: a single FLOAT32 x/y/z field layout,
-// point_step 12 (tightly packed, no padding).
+// encodeTestPointCloud2 encodes a single FLOAT32 x/y/z field layout for testing without a real DDS sample.
 func encodeTestPointCloud2(t *testing.T, pts [][3]float32) []byte {
 	t.Helper()
 	w := cdr.NewWriter()
@@ -141,10 +138,7 @@ func TestCompressPointcloud_unparseableFrameLeavesFileUntouched(t *testing.T) {
 	require.NoFileExists(t, filepath.Join(dir, pointcloudDracoName))
 }
 
-// stubDracoEncoderPath overrides dracoEncoderPath for the duration of one
-// test and returns a func to restore it -- dracoEncoderPath is normally a
-// sync.OnceValues, memoized process-wide, so tests must swap the whole var
-// rather than trying to reset the underlying LookPath call.
+// stubDracoEncoderPath overrides dracoEncoderPath for one test and returns a func to restore it.
 func stubDracoEncoderPath(t *testing.T, path string, err error) func() {
 	t.Helper()
 	orig := dracoEncoderPath

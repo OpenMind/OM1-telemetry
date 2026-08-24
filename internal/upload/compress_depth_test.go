@@ -16,10 +16,7 @@ const (
 	testDepthHeight = 3
 )
 
-// writeSyntheticDepth writes an RVL-encoded depth_frames.bin +
-// depth_timestamps.csv pair for numFrames frames of testDepthWidth x
-// testDepthHeight pixels, and returns the original (pre-encode) pixel
-// values per frame for later comparison.
+// writeSyntheticDepth writes an RVL-encoded depth pair and returns the original pixel values per frame.
 func writeSyntheticDepth(t *testing.T, dir string, numFrames int) [][]uint16 {
 	t.Helper()
 	n := testDepthWidth * testDepthHeight
@@ -97,8 +94,6 @@ func TestCompressDepth_fallsBackToWholeFileOnNonRVLFrame(t *testing.T) {
 	dir := t.TempDir()
 	writeSyntheticDepth(t, dir, 2)
 
-	// Overwrite with a csv that includes one "raw" fallback frame -- append
-	// a 3rd row referencing bytes that were never actually RVL-encoded.
 	csvRaw, err := os.ReadFile(filepath.Join(dir, depthTimestampsName))
 	require.NoError(t, err)
 	bin, err := os.ReadFile(filepath.Join(dir, depthFramesName))
@@ -111,10 +106,6 @@ func TestCompressDepth_fallsBackToWholeFileOnNonRVLFrame(t *testing.T) {
 
 	require.NoError(t, compressDepth(dir, Options{}))
 
-	// Falls back to compressWholeFile: whole original bin gets zstd-wrapped
-	// as-is, csv is left completely untouched (still describes RVL framing
-	// for the frames that are RVL, which remains correct after
-	// decompression).
 	require.NoFileExists(t, filepath.Join(dir, depthFramesName))
 	compressed, err := os.ReadFile(filepath.Join(dir, "depth_frames.zstd"))
 	require.NoError(t, err)

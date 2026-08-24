@@ -16,9 +16,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// fakeAPI stands in for the openmind-api's data-collection endpoints. It
-// hands back presigned "POST" fields that actually point at fakeS3, and
-// records what a real server would need to, so tests can assert on it.
+// fakeAPI stands in for the openmind-api's data-collection endpoints.
 type fakeAPI struct {
 	mu sync.Mutex
 
@@ -30,10 +28,7 @@ type fakeAPI struct {
 	failRequests  map[string]int
 	multipartData map[string][]byte // uploadID -> reassembled bytes
 
-	// postDelay, when set, makes every direct-POST S3 upload take that long,
-	// so a test can tell concurrent uploads from serial ones by wall-clock
-	// time. running/maxRunning track how many such uploads actually
-	// overlapped.
+	// postDelay makes every direct-POST S3 upload take that long, so concurrency can be measured by wall-clock time.
 	postDelay  time.Duration
 	running    int
 	maxRunning int
@@ -299,11 +294,6 @@ func TestUploadSession_smallFilesUseDirectPost(t *testing.T) {
 
 	dir := t.TempDir()
 	writeFile(t, dir, "meta.json", []byte(`{"ok":true}`))
-	// network_status.csv isn't one of the preprocessing pipeline's
-	// compression targets, so it's a stand-in for "some small file" here --
-	// deliberately not lidar_scans.bin/odom_frames.bin/lowstate_frames.bin,
-	// which compressWholeFiles now intercepts (see TestUploadSession_
-	// compressesLargeBinaryFilesBeforeUpload in preprocess_test.go).
 	writeFile(t, dir, "network_status.csv", []byte("scandata"))
 
 	c := New(Config{BaseURL: apiSrv.URL, APIKey: "test-key"})
