@@ -112,42 +112,12 @@ func main() {
 		slog.Warn("upload enabled but OPENMIND_API_URL / OPENMIND_API_KEY not both set; recording locally only")
 	}
 
-	// ctl is the control-plane state: both recording and uploading start
-	// on, matching this process's behavior before the control API existed.
-	// See internal/control and the RecordingCmds case in the loop below.
-	ctl := control.New()
-
-	// currentDirFn is read fresh on every retention tick and every /status
-	// request, since rotation (below) moves current for as long as the
-	// process runs. It reports "" while recording is paused via the
-	// control API, so a closed-but-not-reopened session is no longer
-	// treated as the live, protected-from-deletion segment.
-	currentDirFn := func() string {
-		if !ctl.Recording() {
-			return ""
-		}
+	controlAddr := config.ControlAddr()
+	ctl, currentDirFn, controlCancel := setupControl(controlAddr, recordingsDir, maxBytes, func() string {
 		currentMu.Lock()
 		defer currentMu.Unlock()
 		return current.RealDir()
-	}
-
-	ctl.Extra = func() control.Extra {
-		bytes, _ := dirSize(recordingsDir)
-		return control.Extra{
-			CurrentSession:  currentDirFn(),
-			RecordingsBytes: bytes,
-			MaxBytes:        maxBytes,
-			PendingUploads:  pendingUploadCount(recordingsDir),
-		}
-	}
-
-	controlCtx, controlCancel := context.WithCancel(context.Background())
-	controlAddr := config.ControlAddr()
-	go func() {
-		if err := control.Serve(controlCtx, controlAddr, ctl); err != nil {
-			slog.Error("control server stopped", "addr", controlAddr, "err", err)
-		}
-	}()
+	})
 
 	// The catch-up-upload / disk-cap sweep is independent of session
 	// rotation: it retries segments the rotation/shutdown upload paths gave
@@ -319,6 +289,44 @@ loop:
 			"dir", sess.RealDir(),
 			"note", "it will be dated on a later start if it ever syncs")
 	}
+}
+
+// setupControl builds the control-plane state (see internal/control) and
+// starts its HTTP server on addr in the background. rawCurrentDir reports
+// the live session's directory with no awareness of pause state -- the
+// returned currentDirFn wraps it to report "" while recording is paused,
+// so retention no longer treats a closed-but-not-reopened session as the
+// live, protected-from-deletion segment. The returned cancel func stops
+// the HTTP server; the caller (main) still owns driving ctl.RecordingCmds
+// and calling ctl.SetRecording as recording starts/stops.
+func setupControl(addr, recordingsDir string, maxBytes int64, rawCurrentDir func() string) (ctl *control.State, currentDirFn func() string, cancel context.CancelFunc) {
+	ctl = control.New()
+
+	currentDirFn = func() string {
+		if !ctl.Recording() {
+			return ""
+		}
+		return rawCurrentDir()
+	}
+
+	ctl.Extra = func() control.Extra {
+		bytes, _ := dirSize(recordingsDir)
+		return control.Extra{
+			CurrentSession:  currentDirFn(),
+			RecordingsBytes: bytes,
+			MaxBytes:        maxBytes,
+			PendingUploads:  pendingUploadCount(recordingsDir),
+		}
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		if err := control.Serve(ctx, addr, ctl); err != nil {
+			slog.Error("control server stopped", "addr", addr, "err", err)
+		}
+	}()
+
+	return ctl, currentDirFn, cancel
 }
 
 // uploadFinishedSessionAsync kicks off finished's upload in the background,
