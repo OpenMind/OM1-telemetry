@@ -186,7 +186,7 @@ func TestUploadSession_compressesLargeBinaryFilesBeforeUpload(t *testing.T) {
 		_, gotOriginal := sess.uploaded["lowstate_frames.bin"]
 		require.False(t, gotOriginal, "the raw .bin must never reach S3 -- only the compressed form does")
 
-		compressed, ok := sess.uploaded["lowstate_frames.zstd.bin"]
+		compressed, ok := sess.uploaded["lowstate_frames.zstd"]
 		require.True(t, ok, "the zstd-compressed form must be uploaded instead")
 		decompressed, err := zstdDecompress(compressed)
 		require.NoError(t, err)

@@ -68,7 +68,7 @@ func TestCompressDepth_decodesRVLAndZstdCompressesLosslessly(t *testing.T) {
 	require.FileExists(t, filepath.Join(dir, rawDirName, depthTimestampsName),
 		"the pre-rewrite csv must be preserved alongside the original bin")
 
-	compressed, err := os.ReadFile(filepath.Join(dir, "depth_frames.zstd.bin"))
+	compressed, err := os.ReadFile(filepath.Join(dir, "depth_frames.zstd"))
 	require.NoError(t, err)
 	raw, err := zstdDecompress(compressed)
 	require.NoError(t, err)
@@ -116,7 +116,7 @@ func TestCompressDepth_fallsBackToWholeFileOnNonRVLFrame(t *testing.T) {
 	// for the frames that are RVL, which remains correct after
 	// decompression).
 	require.NoFileExists(t, filepath.Join(dir, depthFramesName))
-	compressed, err := os.ReadFile(filepath.Join(dir, "depth_frames.zstd.bin"))
+	compressed, err := os.ReadFile(filepath.Join(dir, "depth_frames.zstd"))
 	require.NoError(t, err)
 	decompressed, err := zstdDecompress(compressed)
 	require.NoError(t, err)
@@ -132,11 +132,11 @@ func TestCompressDepth_isIdempotentOnRetry(t *testing.T) {
 	writeSyntheticDepth(t, dir, 2)
 
 	require.NoError(t, compressDepth(dir, Options{}))
-	first, err := os.ReadFile(filepath.Join(dir, "depth_frames.zstd.bin"))
+	first, err := os.ReadFile(filepath.Join(dir, "depth_frames.zstd"))
 	require.NoError(t, err)
 
 	require.NoError(t, compressDepth(dir, Options{}))
-	second, err := os.ReadFile(filepath.Join(dir, "depth_frames.zstd.bin"))
+	second, err := os.ReadFile(filepath.Join(dir, "depth_frames.zstd"))
 	require.NoError(t, err)
 
 	require.Equal(t, first, second)
@@ -148,5 +148,5 @@ func TestCompressDepth_missingFileIsANoop(t *testing.T) {
 
 	require.NoError(t, compressDepth(dir, Options{}))
 
-	require.NoFileExists(t, filepath.Join(dir, "depth_frames.zstd.bin"))
+	require.NoFileExists(t, filepath.Join(dir, "depth_frames.zstd"))
 }

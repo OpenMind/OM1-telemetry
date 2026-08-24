@@ -23,7 +23,7 @@ var zstdWholeFileTargets = []string{
 
 // compressWholeFiles replaces each of zstdWholeFileTargets with a zstd-
 // compressed copy under a new name, e.g. lowstate_frames.bin ->
-// lowstate_frames.zstd.bin. The original is kept locally under raw/ (see
+// lowstate_frames.zstd. The original is kept locally under raw/ (see
 // rawstore.go) -- only the compressed copy is ever uploaded.
 func compressWholeFiles(localDir string, opts Options) error {
 	for _, name := range zstdWholeFileTargets {
@@ -67,14 +67,14 @@ func compressWholeFile(localDir, name string) error {
 	return archiveOriginal(localDir, name)
 }
 
-// zstdName turns "foo.bin" into "foo.zstd.bin" -- the compressed form keeps
-// the .bin suffix openmind-api's bucket policy already allows (the same
-// trick convertJSONLToJSON uses for .jsonl -> .json), while the ".zstd"
-// segment marks it as not being the file's original format.
+// zstdName turns "foo.bin" into "foo.zstd" -- openmind-api's bucket policy
+// now allows the .zstd extension directly, so there's no need to keep the
+// original extension around the way convertJSONLToJSON's .jsonl -> .json
+// trick still does.
 func zstdName(name string) string {
 	ext := filepath.Ext(name)
 	stem := strings.TrimSuffix(name, ext)
-	return stem + ".zstd" + ext
+	return stem + ".zstd"
 }
 
 func zstdCompress(raw []byte) ([]byte, error) {

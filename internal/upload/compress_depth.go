@@ -28,9 +28,9 @@ type depthRecord struct {
 }
 
 // compressDepth replaces depth_frames.bin -- which stores each frame RVL-
-// encoded (see internal/depth, internal/rvl) -- with depth_frames.zstd.bin:
-// the *decoded* raw little-endian uint16 depth frames, concatenated frame
-// by frame and zstd-compressed as one blob, losslessly.
+// encoded (see internal/depth, internal/rvl) -- with depth_frames.zstd: the
+// *decoded* raw little-endian uint16 depth frames, concatenated frame by
+// frame and zstd-compressed as one blob, losslessly.
 //
 // Decoding first is deliberate: RVL is a lightweight, real-time-safe codec
 // (why the live recorder uses it), not a strong entropy coder -- zstd'ing
@@ -54,7 +54,7 @@ type depthRecord struct {
 // raw/ first, so the pre-compression bin+csv pair stays usable together
 // there.
 func compressDepth(localDir string, opts Options) error {
-	dstName := zstdName(depthFramesName) // depth_frames.zstd.bin
+	dstName := zstdName(depthFramesName) // depth_frames.zstd
 	if _, err := os.Stat(filepath.Join(localDir, dstName)); err == nil {
 		if err := archiveOriginal(localDir, depthFramesName); err != nil {
 			return err

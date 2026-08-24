@@ -20,7 +20,7 @@ import (
 const (
 	pointcloudFramesName     = "pointcloud_frames.bin"
 	pointcloudTimestampsName = "pointcloud_timestamps.csv"
-	pointcloudDracoName      = "pointcloud_frames.drc.bin"
+	pointcloudDracoName      = "pointcloud_frames.drc"
 
 	// dracoQuantizationBits sets draco_encoder's position quantization
 	// (-qp). 11 bits per axis: enough precision for lidar-scale point
@@ -46,7 +46,7 @@ var dracoEncoderPath = sync.OnceValues(func() (string, error) {
 
 // compressPointcloud replaces pointcloud_frames.bin -- which stores each
 // frame as a zstd-compressed, CDR-encoded ROS PointCloud2 message (see
-// internal/pointcloud) -- with pointcloud_frames.drc.bin: each frame's XYZ
+// internal/pointcloud) -- with pointcloud_frames.drc: each frame's XYZ
 // geometry re-encoded with Google's Draco, concatenated frame by frame.
 //
 // A no-op, leaving pointcloud_frames.bin exactly as recorded, if:

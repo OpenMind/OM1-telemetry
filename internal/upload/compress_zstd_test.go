@@ -24,7 +24,7 @@ func TestCompressWholeFiles_roundTripsAndArchivesOriginal(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, original, archived, "archiving must not alter the original bytes")
 
-	compressed, err := os.ReadFile(filepath.Join(dir, "lowstate_frames.zstd.bin"))
+	compressed, err := os.ReadFile(filepath.Join(dir, "lowstate_frames.zstd"))
 	require.NoError(t, err)
 	decompressed, err := zstdDecompress(compressed)
 	require.NoError(t, err)
@@ -39,7 +39,7 @@ func TestCompressWholeFiles_compressesAllThreeTargets(t *testing.T) {
 
 	require.NoError(t, compressWholeFiles(dir, Options{}))
 
-	for _, name := range []string{"lowstate_frames.zstd.bin", "odom_frames.zstd.bin", "lidar_scans.zstd.bin"} {
+	for _, name := range []string{"lowstate_frames.zstd", "odom_frames.zstd", "lidar_scans.zstd"} {
 		require.FileExists(t, filepath.Join(dir, name))
 	}
 }
@@ -50,7 +50,7 @@ func TestCompressWholeFiles_missingFileIsANoop(t *testing.T) {
 
 	require.NoError(t, compressWholeFiles(dir, Options{}))
 
-	require.NoFileExists(t, filepath.Join(dir, "lowstate_frames.zstd.bin"))
+	require.NoFileExists(t, filepath.Join(dir, "lowstate_frames.zstd"))
 }
 
 func TestCompressWholeFile_isIdempotentOnRetry(t *testing.T) {
@@ -58,18 +58,18 @@ func TestCompressWholeFile_isIdempotentOnRetry(t *testing.T) {
 	writeFile(t, dir, "odom_frames.bin", []byte("odometry payload"))
 
 	require.NoError(t, compressWholeFile(dir, "odom_frames.bin"))
-	firstCompressed, err := os.ReadFile(filepath.Join(dir, "odom_frames.zstd.bin"))
+	firstCompressed, err := os.ReadFile(filepath.Join(dir, "odom_frames.zstd"))
 	require.NoError(t, err)
 
 	require.NoError(t, compressWholeFile(dir, "odom_frames.bin"),
 		"a retry after the original was already archived must not error")
 
-	secondCompressed, err := os.ReadFile(filepath.Join(dir, "odom_frames.zstd.bin"))
+	secondCompressed, err := os.ReadFile(filepath.Join(dir, "odom_frames.zstd"))
 	require.NoError(t, err)
 	require.Equal(t, firstCompressed, secondCompressed, "a retry must not recompress or otherwise change the output")
 	require.FileExists(t, filepath.Join(dir, rawDirName, "odom_frames.bin"))
 }
 
 func TestZstdName(t *testing.T) {
-	require.Equal(t, "lowstate_frames.zstd.bin", zstdName("lowstate_frames.bin"))
+	require.Equal(t, "lowstate_frames.zstd", zstdName("lowstate_frames.bin"))
 }
