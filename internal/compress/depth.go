@@ -1,4 +1,4 @@
-package upload
+package compress
 
 import (
 	"bytes"
@@ -26,29 +26,15 @@ type depthRecord struct {
 	monoNs                              int64
 }
 
-// compressDepth decodes RVL-encoded depth frames back to raw pixels and re-compresses them as one zstd blob,
-// rewriting depth_timestamps.csv to match. Falls back to compressWholeFile if any frame isn't standard RVL.
-func compressDepth(localDir string, opts Options) error {
-	dstName := zstdName(depthFramesName)
-	if _, err := os.Stat(filepath.Join(localDir, dstName)); err == nil {
-		if err := archiveOriginal(localDir, depthFramesName); err != nil {
-			return err
+// Depth decodes RVL-encoded depth frames back to raw pixels and re-compresses them as one zstd blob,
+// rewriting depth_timestamps.csv to match. Falls back to compressWholeFile if any frame isn't standard
+// RVL. Lossless end to end, so depth_frames.bin is deleted once the rewrite commits, with no backup.
+func Depth(localDir string) error {
+	csvRaw, err := os.ReadFile(filepath.Join(localDir, depthTimestampsName))
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
 		}
-		return ensureRawCopy(localDir, depthTimestampsName)
-	} else if !os.IsNotExist(err) {
-		return err
-	}
-
-	binSrc, err := findSource(localDir, depthFramesName)
-	if err != nil {
-		return err
-	}
-	if binSrc == "" {
-		return nil
-	}
-
-	csvRaw, err := originalCSVBytes(localDir, depthTimestampsName)
-	if err != nil {
 		return err
 	}
 	records, err := parseDepthCSV(csvRaw)
@@ -59,8 +45,16 @@ func compressDepth(localDir string, opts Options) error {
 		return nil
 	}
 
-	bin, err := os.ReadFile(binSrc)
+	if records[0].method != "rvl" {
+		// A prior run already committed the rewrite; only cleanup could be left to retry.
+		return removeIfExists(localDir, depthFramesName)
+	}
+
+	bin, err := os.ReadFile(filepath.Join(localDir, depthFramesName))
 	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
 		return err
 	}
 
@@ -69,21 +63,21 @@ func compressDepth(localDir string, opts Options) error {
 		return compressWholeFile(localDir, depthFramesName)
 	}
 
-	compressed, err := zstdCompress(raw)
+	compressed, err := Compress(raw)
 	if err != nil {
 		return fmt.Errorf("preprocess: zstd compress: %w", err)
 	}
 
-	if err := ensureRawCopy(localDir, depthTimestampsName); err != nil {
-		return err
-	}
-	if err := archiveOriginal(localDir, depthFramesName); err != nil {
+	// The compressed blob and rewritten csv must both land before the original is removed: either
+	// write landing alone is a safe, idempotent retry target, but there is no way back once the
+	// source bytes are gone.
+	if err := writeAtomic(localDir, zstdName(depthFramesName), compressed); err != nil {
 		return err
 	}
 	if err := writeAtomic(localDir, depthTimestampsName, formatDepthCSV(newRecords)); err != nil {
 		return err
 	}
-	return writeAtomic(localDir, dstName, compressed)
+	return removeIfExists(localDir, depthFramesName)
 }
 
 // decodeDepthFrames decodes every RVL frame in bin to raw pixels; ok=false if any frame isn't standard RVL.

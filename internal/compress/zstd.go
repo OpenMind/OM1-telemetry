@@ -1,4 +1,4 @@
-package upload
+package compress
 
 import (
 	"fmt"
@@ -9,16 +9,17 @@ import (
 	"github.com/klauspost/compress/zstd"
 )
 
-// zstdWholeFileTargets are session files compressed as a single opaque zstd blob.
-var zstdWholeFileTargets = []string{
+// wholeFileTargets are session files compressed as a single opaque zstd blob. Lossless, so the
+// original is deleted once compression succeeds -- see Pointcloud for a step that keeps one.
+var wholeFileTargets = []string{
 	"lowstate_frames.bin",
 	"odom_frames.bin",
 	"lidar_scans.bin",
 }
 
-// compressWholeFiles replaces each of zstdWholeFileTargets with a zstd-compressed copy; original kept under raw/.
-func compressWholeFiles(localDir string, opts Options) error {
-	for _, name := range zstdWholeFileTargets {
+// WholeFiles replaces each of wholeFileTargets with a zstd-compressed copy.
+func WholeFiles(localDir string) error {
+	for _, name := range wholeFileTargets {
 		if err := compressWholeFile(localDir, name); err != nil {
 			return fmt.Errorf("preprocess: compress %s: %w", name, err)
 		}
@@ -26,35 +27,30 @@ func compressWholeFiles(localDir string, opts Options) error {
 	return nil
 }
 
-// compressWholeFile is also depth's fallback for a non-RVL frame; kept generic over name.
+// compressWholeFile is also Depth's fallback for a non-RVL frame; kept generic over name.
 func compressWholeFile(localDir, name string) error {
 	dstName := zstdName(name)
 	if _, err := os.Stat(filepath.Join(localDir, dstName)); err == nil {
-		return archiveOriginal(localDir, name)
+		return removeIfExists(localDir, name) // already compressed; clean up any leftover original
 	} else if !os.IsNotExist(err) {
 		return err
 	}
 
-	src, err := findSource(localDir, name)
+	raw, err := os.ReadFile(filepath.Join(localDir, name))
 	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
 		return err
 	}
-	if src == "" {
-		return nil
-	}
-
-	raw, err := os.ReadFile(src)
-	if err != nil {
-		return err
-	}
-	compressed, err := zstdCompress(raw)
+	compressed, err := Compress(raw)
 	if err != nil {
 		return fmt.Errorf("zstd compress: %w", err)
 	}
 	if err := writeAtomic(localDir, dstName, compressed); err != nil {
 		return err
 	}
-	return archiveOriginal(localDir, name)
+	return removeIfExists(localDir, name)
 }
 
 // zstdName turns "foo.bin" into "foo.zstd".
@@ -64,7 +60,8 @@ func zstdName(name string) string {
 	return stem + ".zstd"
 }
 
-func zstdCompress(raw []byte) ([]byte, error) {
+// Compress zstd-compresses raw.
+func Compress(raw []byte) ([]byte, error) {
 	enc, err := zstd.NewWriter(nil)
 	if err != nil {
 		return nil, err
@@ -73,7 +70,8 @@ func zstdCompress(raw []byte) ([]byte, error) {
 	return enc.EncodeAll(raw, make([]byte, 0, len(raw))), nil
 }
 
-func zstdDecompress(compressed []byte) ([]byte, error) {
+// Decompress reverses Compress.
+func Decompress(compressed []byte) ([]byte, error) {
 	dec, err := zstd.NewReader(nil)
 	if err != nil {
 		return nil, err

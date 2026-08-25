@@ -8,6 +8,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"om1-telemetry/internal/compress"
 )
 
 // Options carries per-call context the preprocess pipeline needs.
@@ -22,9 +24,9 @@ type preprocessStep func(localDir string, opts Options) error
 // preprocessSteps is the fixed pipeline UploadSession runs once a session is closed.
 var preprocessSteps = []preprocessStep{
 	convertJSONLToJSON,
-	compressWholeFiles,
-	compressDepth,
-	compressPointcloud,
+	func(localDir string, _ Options) error { return compress.WholeFiles(localDir) },
+	func(localDir string, _ Options) error { return compress.Depth(localDir) },
+	func(localDir string, _ Options) error { return compress.Pointcloud(localDir) },
 }
 
 func preprocess(localDir string, opts Options) error {

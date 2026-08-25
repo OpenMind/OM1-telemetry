@@ -8,6 +8,8 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/require"
+
+	"om1-telemetry/internal/compress"
 )
 
 func TestConvertJSONLToJSON_producesValidArrayAndRemovesSource(t *testing.T) {
@@ -175,8 +177,8 @@ func TestUploadSession_compressesLargeBinaryFilesBeforeUpload(t *testing.T) {
 	err := c.UploadSession(t.Context(), dir, "recordings/2026-08-20/2026-08-20_00-00-00", time.Now(), Options{})
 	require.NoError(t, err)
 
-	require.FileExists(t, filepath.Join(dir, "raw", "lowstate_frames.bin"),
-		"the original must be kept locally, just not uploaded")
+	require.NoFileExists(t, filepath.Join(dir, "raw", "lowstate_frames.bin"),
+		"zstd is lossless, so no local backup of the original is kept")
 
 	api.mu.Lock()
 	defer api.mu.Unlock()
@@ -188,7 +190,7 @@ func TestUploadSession_compressesLargeBinaryFilesBeforeUpload(t *testing.T) {
 
 		compressed, ok := sess.uploaded["lowstate_frames.zstd"]
 		require.True(t, ok, "the zstd-compressed form must be uploaded instead")
-		decompressed, err := zstdDecompress(compressed)
+		decompressed, err := compress.Decompress(compressed)
 		require.NoError(t, err)
 		require.Equal(t, []byte("lowstate payload lowstate payload lowstate payload"), decompressed)
 

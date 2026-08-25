@@ -1,4 +1,4 @@
-package upload
+package compress
 
 import (
 	"os"
@@ -8,47 +8,48 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestCompressWholeFiles_roundTripsAndArchivesOriginal(t *testing.T) {
+func writeFile(t *testing.T, dir, name string, data []byte) {
+	t.Helper()
+	require.NoError(t, os.MkdirAll(dir, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, name), data, 0o644))
+}
+
+func TestWholeFiles_roundTripsAndDeletesOriginal(t *testing.T) {
 	dir := t.TempDir()
 	original := []byte("some lowstate bytes, repeated repeated repeated repeated")
 	writeFile(t, dir, "lowstate_frames.bin", original)
 
-	require.NoError(t, compressWholeFiles(dir, Options{}))
+	require.NoError(t, WholeFiles(dir))
 
 	require.NoFileExists(t, filepath.Join(dir, "lowstate_frames.bin"),
-		"the original must not be uploaded -- see raw/ instead")
-	require.FileExists(t, filepath.Join(dir, rawDirName, "lowstate_frames.bin"),
-		"but it must still exist locally")
-
-	archived, err := os.ReadFile(filepath.Join(dir, rawDirName, "lowstate_frames.bin"))
-	require.NoError(t, err)
-	require.Equal(t, original, archived, "archiving must not alter the original bytes")
+		"the original must not be uploaded, and zstd is lossless so no local backup is needed either")
+	require.NoDirExists(t, filepath.Join(dir, rawDirName))
 
 	compressed, err := os.ReadFile(filepath.Join(dir, "lowstate_frames.zstd"))
 	require.NoError(t, err)
-	decompressed, err := zstdDecompress(compressed)
+	decompressed, err := Decompress(compressed)
 	require.NoError(t, err)
 	require.Equal(t, original, decompressed)
 }
 
-func TestCompressWholeFiles_compressesAllThreeTargets(t *testing.T) {
+func TestWholeFiles_compressesAllThreeTargets(t *testing.T) {
 	dir := t.TempDir()
 	writeFile(t, dir, "lowstate_frames.bin", []byte("aaaaaaaaaaaaaaaa"))
 	writeFile(t, dir, "odom_frames.bin", []byte("bbbbbbbbbbbbbbbb"))
 	writeFile(t, dir, "lidar_scans.bin", []byte("cccccccccccccccc"))
 
-	require.NoError(t, compressWholeFiles(dir, Options{}))
+	require.NoError(t, WholeFiles(dir))
 
 	for _, name := range []string{"lowstate_frames.zstd", "odom_frames.zstd", "lidar_scans.zstd"} {
 		require.FileExists(t, filepath.Join(dir, name))
 	}
 }
 
-func TestCompressWholeFiles_missingFileIsANoop(t *testing.T) {
+func TestWholeFiles_missingFileIsANoop(t *testing.T) {
 	dir := t.TempDir()
 	writeFile(t, dir, "meta.json", []byte(`{}`))
 
-	require.NoError(t, compressWholeFiles(dir, Options{}))
+	require.NoError(t, WholeFiles(dir))
 
 	require.NoFileExists(t, filepath.Join(dir, "lowstate_frames.zstd"))
 }
@@ -62,12 +63,12 @@ func TestCompressWholeFile_isIdempotentOnRetry(t *testing.T) {
 	require.NoError(t, err)
 
 	require.NoError(t, compressWholeFile(dir, "odom_frames.bin"),
-		"a retry after the original was already archived must not error")
+		"a retry after the original was already deleted must not error")
 
 	secondCompressed, err := os.ReadFile(filepath.Join(dir, "odom_frames.zstd"))
 	require.NoError(t, err)
 	require.Equal(t, firstCompressed, secondCompressed, "a retry must not recompress or otherwise change the output")
-	require.FileExists(t, filepath.Join(dir, rawDirName, "odom_frames.bin"))
+	require.NoFileExists(t, filepath.Join(dir, "odom_frames.bin"))
 }
 
 func TestZstdName(t *testing.T) {

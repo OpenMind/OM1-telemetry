@@ -1,11 +1,11 @@
-package upload
+package compress
 
 import (
 	"os"
 	"path/filepath"
 )
 
-// rawDirName holds each compression step's original, uncompressed input; never uploaded.
+// rawDirName holds a lossy step's original, uncompressed input; never uploaded.
 const rawDirName = "raw"
 
 // archiveOriginal moves name out of localDir and into localDir/raw/, preserving it locally.
@@ -79,6 +79,16 @@ func copyFile(src, dst string) error {
 		return err
 	}
 	return os.WriteFile(dst, data, 0o644)
+}
+
+// removeIfExists deletes localDir/name if present; already being gone is not an error. Used by the
+// lossless steps, which have no need for a raw/ backup once the compressed replacement is written.
+func removeIfExists(localDir, name string) error {
+	err := os.Remove(filepath.Join(localDir, name))
+	if err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	return nil
 }
 
 // writeAtomic writes data to name (relative to localDir) crash-safely via a temp file + rename.

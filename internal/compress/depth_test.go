@@ -1,4 +1,4 @@
-package upload
+package compress
 
 import (
 	"fmt"
@@ -54,20 +54,19 @@ func decodeRawU16LE(t *testing.T, raw []byte) []uint16 {
 	return out
 }
 
-func TestCompressDepth_decodesRVLAndZstdCompressesLosslessly(t *testing.T) {
+func TestDepth_decodesRVLAndZstdCompressesLosslessly(t *testing.T) {
 	dir := t.TempDir()
 	frames := writeSyntheticDepth(t, dir, 3)
 
-	require.NoError(t, compressDepth(dir, Options{}))
+	require.NoError(t, Depth(dir))
 
-	require.NoFileExists(t, filepath.Join(dir, depthFramesName))
-	require.FileExists(t, filepath.Join(dir, rawDirName, depthFramesName))
-	require.FileExists(t, filepath.Join(dir, rawDirName, depthTimestampsName),
-		"the pre-rewrite csv must be preserved alongside the original bin")
+	require.NoFileExists(t, filepath.Join(dir, depthFramesName),
+		"lossless, so the original is deleted outright once the rewrite commits")
+	require.NoDirExists(t, filepath.Join(dir, rawDirName))
 
 	compressed, err := os.ReadFile(filepath.Join(dir, "depth_frames.zstd"))
 	require.NoError(t, err)
-	raw, err := zstdDecompress(compressed)
+	raw, err := Decompress(compressed)
 	require.NoError(t, err)
 
 	got := decodeRawU16LE(t, raw)
@@ -90,7 +89,7 @@ func TestCompressDepth_decodesRVLAndZstdCompressesLosslessly(t *testing.T) {
 	}
 }
 
-func TestCompressDepth_fallsBackToWholeFileOnNonRVLFrame(t *testing.T) {
+func TestDepth_fallsBackToWholeFileOnNonRVLFrame(t *testing.T) {
 	dir := t.TempDir()
 	writeSyntheticDepth(t, dir, 2)
 
@@ -104,12 +103,12 @@ func TestCompressDepth_fallsBackToWholeFileOnNonRVLFrame(t *testing.T) {
 	writeFile(t, dir, depthFramesName, bin)
 	writeFile(t, dir, depthTimestampsName, []byte(newCSV))
 
-	require.NoError(t, compressDepth(dir, Options{}))
+	require.NoError(t, Depth(dir))
 
 	require.NoFileExists(t, filepath.Join(dir, depthFramesName))
 	compressed, err := os.ReadFile(filepath.Join(dir, "depth_frames.zstd"))
 	require.NoError(t, err)
-	decompressed, err := zstdDecompress(compressed)
+	decompressed, err := Decompress(compressed)
 	require.NoError(t, err)
 	require.Equal(t, bin, decompressed, "fallback must preserve the original bytes exactly")
 
@@ -118,26 +117,26 @@ func TestCompressDepth_fallsBackToWholeFileOnNonRVLFrame(t *testing.T) {
 	require.Equal(t, newCSV, string(stillOriginalCSV), "csv must be untouched in the fallback path")
 }
 
-func TestCompressDepth_isIdempotentOnRetry(t *testing.T) {
+func TestDepth_isIdempotentOnRetry(t *testing.T) {
 	dir := t.TempDir()
 	writeSyntheticDepth(t, dir, 2)
 
-	require.NoError(t, compressDepth(dir, Options{}))
+	require.NoError(t, Depth(dir))
 	first, err := os.ReadFile(filepath.Join(dir, "depth_frames.zstd"))
 	require.NoError(t, err)
 
-	require.NoError(t, compressDepth(dir, Options{}))
+	require.NoError(t, Depth(dir))
 	second, err := os.ReadFile(filepath.Join(dir, "depth_frames.zstd"))
 	require.NoError(t, err)
 
 	require.Equal(t, first, second)
 }
 
-func TestCompressDepth_missingFileIsANoop(t *testing.T) {
+func TestDepth_missingFileIsANoop(t *testing.T) {
 	dir := t.TempDir()
 	writeFile(t, dir, "meta.json", []byte(`{}`))
 
-	require.NoError(t, compressDepth(dir, Options{}))
+	require.NoError(t, Depth(dir))
 
 	require.NoFileExists(t, filepath.Join(dir, "depth_frames.zstd"))
 }

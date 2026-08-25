@@ -385,10 +385,15 @@ Without both env vars set, the recorder still rotates and records locally — it
 ### Preprocessing before upload
 
 Before a closed session uploads, `internal/upload` converts its JSONL logs
-to JSON (the upload bucket doesn't allow `.jsonl`) and losslessly
-compresses the larger binary streams (`lowstate`, `odom`, `lidar`,
-`depth`, `pointcloud`). Originals are kept locally under `raw/`; only the
-compressed files are uploaded.
+to JSON (the upload bucket doesn't allow `.jsonl`) and, via
+`internal/compress`, compresses the larger binary streams (`lowstate`,
+`odom`, `lidar`, `depth`, `pointcloud`) — only the compressed files are
+uploaded.
+
+`lowstate`/`odom`/`lidar`/`depth` use zstd, which is lossless, so their
+originals are simply deleted once compression succeeds. `pointcloud` uses
+Draco, which quantizes point positions and so is lossy — its original is
+kept locally under `raw/` instead of being deleted.
 
 Pointcloud compression needs `draco_encoder` on `PATH` — run `make
 install-draco`, or use the Docker image, which already builds it in. If

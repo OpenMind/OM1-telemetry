@@ -1,4 +1,4 @@
-package upload
+package compress
 
 import (
 	"bufio"
@@ -40,9 +40,10 @@ var dracoEncoderPath = sync.OnceValues(func() (string, error) {
 	return exec.LookPath("draco_encoder")
 })
 
-// compressPointcloud re-encodes each frame's XYZ geometry with Draco into pointcloud_frames.drc,
-// rewriting pointcloud_timestamps.csv to match. No-op if draco_encoder is missing or a frame doesn't parse.
-func compressPointcloud(localDir string, opts Options) error {
+// Pointcloud re-encodes each frame's XYZ geometry with Draco into pointcloud_frames.drc, rewriting
+// pointcloud_timestamps.csv to match. No-op if draco_encoder is missing or a frame doesn't parse.
+// Draco's quantization is lossy, so the original is kept locally under raw/ -- see rawstore.go.
+func Pointcloud(localDir string) error {
 	if _, err := dracoEncoderPath(); err != nil {
 		return nil
 	}
@@ -90,7 +91,7 @@ func compressPointcloud(localDir string, opts Options) error {
 		}
 		payload := bin[rec.byteOffset : rec.byteOffset+rec.byteLength]
 		if rec.method == "zstd" {
-			decoded, err := zstdDecompress(payload)
+			decoded, err := Decompress(payload)
 			if err != nil {
 				slog.Warn("preprocess: cannot zstd-decompress pointcloud frame; leaving pointcloud_frames.bin uncompressed", "seq", rec.seq, "err", err)
 				return nil

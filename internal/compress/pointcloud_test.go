@@ -1,4 +1,4 @@
-package upload
+package compress
 
 import (
 	"errors"
@@ -93,7 +93,7 @@ func TestExtractXYZ_errorsWithoutFloat32XYZFields(t *testing.T) {
 	require.Error(t, err)
 }
 
-func TestCompressPointcloud_noopWhenDracoEncoderUnavailable(t *testing.T) {
+func TestPointcloud_noopWhenDracoEncoderUnavailable(t *testing.T) {
 	restore := stubDracoEncoderPath(t, "", errors.New("not found"))
 	defer restore()
 
@@ -101,26 +101,26 @@ func TestCompressPointcloud_noopWhenDracoEncoderUnavailable(t *testing.T) {
 	writeFile(t, dir, pointcloudFramesName, []byte("whatever"))
 	writeFile(t, dir, pointcloudTimestampsName, []byte("unix_ns,seq,byte_offset,byte_length,method,mono_ns\n1,0,0,8,raw,1\n"))
 
-	require.NoError(t, compressPointcloud(dir, Options{}))
+	require.NoError(t, Pointcloud(dir))
 
 	require.FileExists(t, filepath.Join(dir, pointcloudFramesName),
 		"without draco_encoder on PATH, pointcloud_frames.bin must be left exactly as recorded")
 	require.NoFileExists(t, filepath.Join(dir, pointcloudDracoName))
 }
 
-func TestCompressPointcloud_missingFileIsANoopEvenWithDracoAvailable(t *testing.T) {
+func TestPointcloud_missingFileIsANoopEvenWithDracoAvailable(t *testing.T) {
 	restore := stubDracoEncoderPath(t, "/usr/bin/true", nil)
 	defer restore()
 
 	dir := t.TempDir()
 	writeFile(t, dir, "meta.json", []byte(`{}`))
 
-	require.NoError(t, compressPointcloud(dir, Options{}))
+	require.NoError(t, Pointcloud(dir))
 
 	require.NoFileExists(t, filepath.Join(dir, pointcloudDracoName))
 }
 
-func TestCompressPointcloud_unparseableFrameLeavesFileUntouched(t *testing.T) {
+func TestPointcloud_unparseableFrameLeavesFileUntouched(t *testing.T) {
 	restore := stubDracoEncoderPath(t, "/usr/bin/true", nil)
 	defer restore()
 
@@ -130,7 +130,7 @@ func TestCompressPointcloud_unparseableFrameLeavesFileUntouched(t *testing.T) {
 	csv := fmt.Sprintf("unix_ns,seq,byte_offset,byte_length,method,mono_ns\n1,0,0,%d,raw,1\n", len(bin))
 	writeFile(t, dir, pointcloudTimestampsName, []byte(csv))
 
-	require.NoError(t, compressPointcloud(dir, Options{}))
+	require.NoError(t, Pointcloud(dir))
 
 	got, err := os.ReadFile(filepath.Join(dir, pointcloudFramesName))
 	require.NoError(t, err)
