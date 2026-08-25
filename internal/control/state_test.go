@@ -1,9 +1,7 @@
 package control
 
 import (
-	"context"
 	"testing"
-	"time"
 
 	"github.com/stretchr/testify/require"
 )
@@ -44,39 +42,4 @@ func TestTriggerUpload_nonBlockingAndCoalesces(t *testing.T) {
 		t.Fatal("second trigger should have collapsed into the first")
 	default:
 	}
-}
-
-func TestSendRecordingCmd_deliversAndWaitsForResult(t *testing.T) {
-	s := New()
-
-	go func() {
-		cmd := <-s.RecordingCmds
-		require.True(t, cmd.Start)
-		cmd.Result <- nil
-	}()
-
-	err := s.SendRecordingCmd(context.Background(), true)
-	require.NoError(t, err)
-}
-
-func TestSendRecordingCmd_propagatesHandlerError(t *testing.T) {
-	s := New()
-	wantErr := context.DeadlineExceeded // any sentinel error works here
-
-	go func() {
-		cmd := <-s.RecordingCmds
-		cmd.Result <- wantErr
-	}()
-
-	err := s.SendRecordingCmd(context.Background(), false)
-	require.ErrorIs(t, err, wantErr)
-}
-
-func TestSendRecordingCmd_timesOutIfNothingConsumes(t *testing.T) {
-	s := New()
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
-	defer cancel()
-
-	err := s.SendRecordingCmd(ctx, true)
-	require.ErrorIs(t, err, context.DeadlineExceeded)
 }

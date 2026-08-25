@@ -22,13 +22,15 @@ import (
 	"om1-telemetry/internal/network"
 	"om1-telemetry/internal/odom"
 	"om1-telemetry/internal/pointcloud"
+	"om1-telemetry/internal/retention"
+	"om1-telemetry/internal/schedule"
 	"om1-telemetry/internal/session"
 	"om1-telemetry/internal/upload"
 	"om1-telemetry/internal/video"
 )
 
-// uploadTimeout bounds one session's upload, whether kicked off by rotation or shutdown.
-const uploadTimeout = 10 * time.Minute
+// scheduleTickInterval is how often the schedule reconciler checks for a state change.
+const scheduleTickInterval = 30 * time.Second
 
 func main() {
 	// Sampled before anything else, so the session's monotonic anchor covers
@@ -49,10 +51,6 @@ func main() {
 
 	cfg := config.Load(sess.Dir())
 	sess.SetRobotType(string(cfg.RobotType))
-
-	// Captured once: cfg itself is reassigned by the event loop below, and
-	// reading cfg.Retention from another goroutine later would race.
-	maxBytes := cfg.Retention.MaxBytes
 
 	if !cfg.Collect {
 		slog.Info("data collection disabled via ENABLE_COLLECTION=false, exiting")
@@ -96,20 +94,31 @@ func main() {
 		slog.Warn("upload enabled but OPENMIND_API_URL / OPENMIND_API_KEY not both set; recording locally only")
 	}
 
-	controlAddr := config.ControlAddr()
-	ctl, currentDirFn, controlCancel := setupControl(controlAddr, recordingsDir, maxBytes, func() string {
+	ctl := control.New()
+	currentDirFn := func() string {
+		if !ctl.Recording() {
+			return ""
+		}
 		currentMu.Lock()
 		defer currentMu.Unlock()
 		return current.RealDir()
-	})
+	}
 
-	// Empty by default: a no-op, so this run behaves exactly as before this feature existed.
+	// Empty by default: Load returns (nil, nil), so this run behaves exactly
+	// as before this feature existed.
 	scheduleFile := config.ScheduleFile()
-	scheduleCancel := setupSchedule(context.Background(), scheduleFile, ctl)
+	scheduleCfg, err := schedule.Load(scheduleFile)
+	if err != nil {
+		slog.Error("could not load schedule; recording and uploading stay on continuously",
+			"path", scheduleFile, "err", err)
+		scheduleCfg = nil
+	} else if scheduleCfg != nil {
+		slog.Info("schedule loaded", "path", scheduleFile)
+	}
 
-	// Uploading (never cap enforcement) is gated on ctl.Uploading -- see runRetentionSweeps.
+	// Uploading (never cap enforcement) is gated on ctl.Uploading -- see retention.RunSweeps.
 	sweepCtx, sweepCancel := context.WithCancel(context.Background())
-	go runRetentionSweeps(sweepCtx, uploader, recordingsDir, bootTimebasePath, currentDirFn, cfg.Retention, ctl)
+	go retention.RunSweeps(sweepCtx, uploader, recordingsDir, bootTimebasePath, currentDirFn, cfg.Retention, ctl)
 
 	rs := startRecorders(cfg, mon, videoHeartbeatNames)
 
@@ -141,7 +150,6 @@ func main() {
 		"heartbeat", "30s interval; logs only when broken/recovered",
 		"session-rotate-interval", cfg.SessionRotateInterval,
 		"upload-ready", uploader != nil,
-		"control-addr", controlAddr,
 		"schedule-file", scheduleFile,
 	)
 	slog.Info("press Ctrl-C to stop")
@@ -158,8 +166,81 @@ func main() {
 		rotateC = ticker.C
 	}
 
+	// A nil scheduleC blocks forever in the select below, so an unset/unloadable
+	// schedule leaves recording and uploading on continuously -- the same as if
+	// this feature didn't exist.
+	var scheduleC <-chan time.Time
+	if scheduleCfg != nil {
+		ticker := time.NewTicker(scheduleTickInterval)
+		defer ticker.Stop()
+		scheduleC = ticker.C
+	}
+
 	var uploadWG sync.WaitGroup
 	uploadDelete := cfg.Upload.DeleteAfterUpload
+
+	// pauseRecording is the schedule's close-half: same as a rotation's
+	// close-half, but no next session is opened.
+	pauseRecording := func() {
+		rs.Stop()
+		unregisterHeartbeats(mon, cfg, videoHeartbeatNames)
+		finished := sess
+		if err := finished.Close(); err != nil {
+			slog.Warn("could not finalize session metadata", "dir", finished.RealDir(), "err", err)
+		}
+		retention.SnapshotTimebase(bootTimebasePath, finished.RealDir())
+		ctl.SetRecording(false)
+		slog.Info("recording paused by schedule", "session", finished.RealDir())
+		retention.UploadFinishedSessionAsync(&uploadWG, uploader, ctl, recordingsDir, bootTimebasePath, finished, uploadDelete)
+	}
+
+	// resumeRecording is the schedule's open-half: same as a rotation's open-half.
+	resumeRecording := func() error {
+		next, err := session.OpenNext(recordingsDir, clk, watcher.SyncState())
+		if err != nil {
+			return err
+		}
+		nextCfg := config.Load(next.Dir())
+		next.SetRobotType(string(nextCfg.RobotType))
+
+		currentMu.Lock()
+		current = next
+		currentMu.Unlock()
+
+		sess, cfg = next, nextCfg
+		registerHeartbeats(mon, cfg, videoHeartbeatNames)
+		rs = startRecorders(cfg, mon, videoHeartbeatNames)
+		ctl.SetRecording(true)
+		slog.Info("recording resumed by schedule", "session", sess.RealDir())
+		return nil
+	}
+
+	// reconcileSchedule brings recording/uploading in line with scheduleCfg;
+	// a no-op on any axis already in the wanted state.
+	reconcileSchedule := func() {
+		now := time.Now()
+
+		if want := scheduleCfg.Recording.Active(now); want != ctl.Recording() {
+			if want {
+				if err := resumeRecording(); err != nil {
+					slog.Error("schedule: could not resume recording", "err", err)
+				}
+			} else {
+				pauseRecording()
+			}
+		}
+
+		if want := scheduleCfg.Upload.Active(now); want != ctl.Uploading() {
+			ctl.SetUploading(want)
+			if want {
+				ctl.TriggerUpload()
+			}
+		}
+	}
+
+	if scheduleCfg != nil {
+		reconcileSchedule() // apply immediately on startup, not just on the next tick
+	}
 
 loop:
 	for {
@@ -167,51 +248,12 @@ loop:
 		case <-shutdownSignal:
 			break loop
 
-		case cmd := <-ctl.RecordingCmds:
-			if cmd.Start == ctl.Recording() {
-				cmd.Result <- nil // already in the requested state
-				continue
-			}
-
-			if !cmd.Start {
-				// Same as a rotation's close-half, but no next session is opened.
-				rs.Stop()
-				unregisterHeartbeats(mon, cfg, videoHeartbeatNames)
-				finished := sess
-				if err := finished.Close(); err != nil {
-					slog.Warn("could not finalize session metadata", "dir", finished.RealDir(), "err", err)
-				}
-				snapshotTimebase(bootTimebasePath, finished.RealDir())
-				ctl.SetRecording(false)
-				slog.Info("recording paused via control API", "session", finished.RealDir())
-				uploadFinishedSessionAsync(&uploadWG, uploader, ctl, recordingsDir, bootTimebasePath, finished, uploadDelete)
-				cmd.Result <- nil
-				continue
-			}
-
-			// Resume: same as a rotation's open-half.
-			next, err := session.OpenNext(recordingsDir, clk, watcher.SyncState())
-			if err != nil {
-				cmd.Result <- err
-				continue
-			}
-			nextCfg := config.Load(next.Dir())
-			next.SetRobotType(string(nextCfg.RobotType))
-
-			currentMu.Lock()
-			current = next
-			currentMu.Unlock()
-
-			sess, cfg = next, nextCfg
-			registerHeartbeats(mon, cfg, videoHeartbeatNames)
-			rs = startRecorders(cfg, mon, videoHeartbeatNames)
-			ctl.SetRecording(true)
-			slog.Info("recording resumed via control API", "session", sess.RealDir())
-			cmd.Result <- nil
+		case <-scheduleC:
+			reconcileSchedule()
 
 		case <-rotateC:
 			if !ctl.Recording() {
-				continue // paused via the control API; nothing to rotate
+				continue // paused by the schedule; nothing to rotate
 			}
 
 			rs.Stop()
@@ -219,7 +261,7 @@ loop:
 			if err := finished.Close(); err != nil {
 				slog.Warn("could not finalize session metadata", "dir", finished.RealDir(), "err", err)
 			}
-			snapshotTimebase(bootTimebasePath, finished.RealDir())
+			retention.SnapshotTimebase(bootTimebasePath, finished.RealDir())
 
 			next, err := session.OpenNext(recordingsDir, clk, watcher.SyncState())
 			if err != nil {
@@ -239,7 +281,7 @@ loop:
 
 			slog.Info("session rotated", "session", sess.RealDir())
 
-			uploadFinishedSessionAsync(&uploadWG, uploader, ctl, recordingsDir, bootTimebasePath, finished, uploadDelete)
+			retention.UploadFinishedSessionAsync(&uploadWG, uploader, ctl, recordingsDir, bootTimebasePath, finished, uploadDelete)
 		}
 	}
 
@@ -247,18 +289,16 @@ loop:
 
 	hbCancel()
 	sweepCancel()
-	scheduleCancel()
-	controlCancel()
 	if ctl.Recording() {
 		rs.Stop()
 		if err := sess.Close(); err != nil {
 			slog.Warn("could not finalize session metadata", "dir", sess.RealDir(), "err", err)
 		}
-		snapshotTimebase(bootTimebasePath, sess.RealDir())
+		retention.SnapshotTimebase(bootTimebasePath, sess.RealDir())
 
 		if uploader != nil && ctl.Uploading() {
-			opts := uploadOptions(bootTimebasePath, sess.RealDir())
-			uploadSession(uploader, sess.RealDir(), apiSessionDir(recordingsDir, sess.RealDir()), time.Unix(0, sess.StartUnixNs()), uploadDelete, opts)
+			opts := retention.UploadOptions(bootTimebasePath, sess.RealDir())
+			retention.UploadSession(uploader, sess.RealDir(), retention.APISessionDir(recordingsDir, sess.RealDir()), time.Unix(0, sess.StartUnixNs()), uploadDelete, opts)
 		}
 	}
 	uploadWG.Wait()
@@ -269,115 +309,6 @@ loop:
 		slog.Warn("session is still undated: the clock never synchronized while recording",
 			"dir", sess.RealDir(),
 			"note", "it will be dated on a later start if it ever syncs")
-	}
-}
-
-// setupControl builds the control-plane state and starts its HTTP server on addr.
-func setupControl(addr, recordingsDir string, maxBytes int64, rawCurrentDir func() string) (ctl *control.State, currentDirFn func() string, cancel context.CancelFunc) {
-	ctl = control.New()
-
-	currentDirFn = func() string {
-		if !ctl.Recording() {
-			return ""
-		}
-		return rawCurrentDir()
-	}
-
-	ctl.Extra = func() control.Extra {
-		bytes, _ := dirSize(recordingsDir)
-		return control.Extra{
-			CurrentSession:  currentDirFn(),
-			RecordingsBytes: bytes,
-			MaxBytes:        maxBytes,
-			PendingUploads:  pendingUploadCount(recordingsDir),
-		}
-	}
-
-	ctx, cancel := context.WithCancel(context.Background())
-	go func() {
-		if err := control.Serve(ctx, addr, ctl); err != nil {
-			slog.Error("control server stopped", "addr", addr, "err", err)
-		}
-	}()
-
-	return ctl, currentDirFn, cancel
-}
-
-// uploadFinishedSessionAsync kicks off finished's upload in the background if uploading is enabled.
-func uploadFinishedSessionAsync(wg *sync.WaitGroup, uploader *upload.Client, ctl *control.State, recordingsDir, bootTimebasePath string, finished *session.Session, uploadDelete bool) {
-	if uploader == nil || !ctl.Uploading() {
-		return
-	}
-	opts := uploadOptions(bootTimebasePath, finished.RealDir())
-	wg.Add(1)
-	go func(dir, apiDir string, startedAt time.Time, opts upload.Options) {
-		defer wg.Done()
-		uploadSession(uploader, dir, apiDir, startedAt, uploadDelete, opts)
-	}(finished.RealDir(), apiSessionDir(recordingsDir, finished.RealDir()), time.Unix(0, finished.StartUnixNs()), opts)
-}
-
-// uploadSession uploads one finished session directory; on failure the files are kept locally for a later retry.
-func uploadSession(client *upload.Client, dir, sessionDir string, startedAt time.Time, deleteAfter bool, opts upload.Options) {
-	ctx, cancel := context.WithTimeout(context.Background(), uploadTimeout)
-	defer cancel()
-
-	if err := client.UploadSession(ctx, dir, sessionDir, startedAt, opts); err != nil {
-		slog.Error("session upload failed; files kept locally for retry", "dir", dir, "err", err)
-		return
-	}
-	slog.Info("session uploaded", "dir", dir, "session_dir", sessionDir)
-	markUploaded(dir)
-
-	if deleteAfter && opts.PreserveJSONL == "" {
-		if err := os.RemoveAll(dir); err != nil {
-			slog.Warn("could not delete uploaded session directory", "dir", dir, "err", err)
-		}
-	}
-}
-
-// uploadOptions protects the live clock journal when dir is the boot session's own directory.
-func uploadOptions(bootTimebasePath, dir string) upload.Options {
-	if bootSessionDir(bootTimebasePath, dir) {
-		return upload.Options{PreserveJSONL: clock.TimebaseName}
-	}
-	return upload.Options{}
-}
-
-// bootSessionDir reports whether dir holds the live boot-relative clock journal.
-func bootSessionDir(bootTimebasePath, dir string) bool {
-	want, err := os.Stat(bootTimebasePath)
-	if err != nil {
-		return false
-	}
-	got, err := os.Stat(filepath.Join(dir, clock.TimebaseName))
-	if err != nil {
-		return false
-	}
-	return os.SameFile(want, got)
-}
-
-// apiSessionDir builds the openmind-api's session_dir grouping key from a session's real directory.
-func apiSessionDir(recordingsDir, realDir string) string {
-	rel, err := filepath.Rel(recordingsDir, realDir)
-	if err != nil {
-		rel = filepath.Base(realDir)
-	}
-	return filepath.ToSlash(filepath.Join(filepath.Base(recordingsDir), rel))
-}
-
-// snapshotTimebase copies the process-wide clock journal into a rotated-away session's own directory.
-func snapshotTimebase(bootPath, sessionDir string) {
-	if bootSessionDir(bootPath, sessionDir) {
-		return
-	}
-	raw, err := os.ReadFile(bootPath)
-	if err != nil {
-		slog.Warn("could not snapshot clock timebase for rotated session", "err", err)
-		return
-	}
-	dst := filepath.Join(sessionDir, clock.TimebaseName)
-	if err := os.WriteFile(dst, raw, 0o644); err != nil {
-		slog.Warn("could not write clock timebase snapshot", "dst", dst, "err", err)
 	}
 }
 

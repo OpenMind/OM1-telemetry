@@ -1,4 +1,4 @@
-package main
+package retention
 
 import (
 	"context"
@@ -27,10 +27,10 @@ func writeFile(t *testing.T, dir, name string, data []byte) {
 
 func TestMarkUploaded_isUploadedRoundTrip(t *testing.T) {
 	dir := t.TempDir()
-	require.False(t, isUploaded(dir))
+	require.False(t, IsUploaded(dir))
 
-	markUploaded(dir)
-	require.True(t, isUploaded(dir))
+	MarkUploaded(dir)
+	require.True(t, IsUploaded(dir))
 }
 
 func TestDirSize_sumsFilesRecursively(t *testing.T) {
@@ -38,7 +38,7 @@ func TestDirSize_sumsFilesRecursively(t *testing.T) {
 	writeFile(t, dir, "a.bin", make([]byte, 10))
 	writeFile(t, filepath.Join(dir, "sub"), "b.bin", make([]byte, 5))
 
-	got, err := dirSize(dir)
+	got, err := DirSize(dir)
 	require.NoError(t, err)
 	require.EqualValues(t, 15, got)
 }
@@ -50,18 +50,18 @@ func TestEnforceRetentionCap_deletesOldestUploadedFirstUntilUnderCap(t *testing.
 	newest := filepath.Join(root, "2026-08-16", "2026-08-16_00-00-00")
 
 	writeFile(t, oldest, "a.bin", make([]byte, 100))
-	markUploaded(oldest)
+	MarkUploaded(oldest)
 	writeFile(t, middle, "b.bin", make([]byte, 100))
-	markUploaded(middle)
+	MarkUploaded(middle)
 	writeFile(t, newest, "c.bin", make([]byte, 100))
-	markUploaded(newest)
+	MarkUploaded(newest)
 
-	middleSize, err := dirSize(middle)
+	middleSize, err := DirSize(middle)
 	require.NoError(t, err)
-	newestSize, err := dirSize(newest)
+	newestSize, err := DirSize(newest)
 	require.NoError(t, err)
 
-	enforceRetentionCap(root, []string{oldest, middle, newest}, func(string) bool { return false }, middleSize+newestSize)
+	EnforceRetentionCap(root, []string{oldest, middle, newest}, func(string) bool { return false }, middleSize+newestSize)
 
 	require.NoDirExists(t, oldest, "oldest uploaded dir must go first to free space")
 	require.DirExists(t, middle, "stops as soon as the cap is satisfied")
@@ -74,7 +74,7 @@ func TestEnforceRetentionCap_fallsThroughToUnuploadedWhenNothingElseCanFreeEnoug
 
 	writeFile(t, notUploaded, "a.bin", make([]byte, 200))
 
-	enforceRetentionCap(root, []string{notUploaded}, func(string) bool { return false }, 10)
+	EnforceRetentionCap(root, []string{notUploaded}, func(string) bool { return false }, 10)
 
 	require.NoDirExists(t, notUploaded, "the cap must be honored even with no uploaded data to fall back on")
 }
@@ -84,9 +84,9 @@ func TestEnforceRetentionCap_neverDeletesProtected(t *testing.T) {
 	protectedDir := filepath.Join(root, "2026-08-15", "2026-08-15_00-00-00")
 
 	writeFile(t, protectedDir, "b.bin", make([]byte, 200))
-	markUploaded(protectedDir)
+	MarkUploaded(protectedDir)
 
-	enforceRetentionCap(root, []string{protectedDir}, func(dir string) bool { return true }, 10)
+	EnforceRetentionCap(root, []string{protectedDir}, func(dir string) bool { return true }, 10)
 
 	require.DirExists(t, protectedDir, "must never delete a directory the caller marked protected, cap or no cap")
 }
@@ -98,12 +98,12 @@ func TestEnforceRetentionCap_prefersUploadedOverOlderUnuploadedWhenSufficient(t 
 
 	writeFile(t, olderUnuploaded, "a.bin", make([]byte, 200))
 	writeFile(t, newerUploaded, "b.bin", make([]byte, 200))
-	markUploaded(newerUploaded)
+	MarkUploaded(newerUploaded)
 
-	newerSize, err := dirSize(newerUploaded)
+	newerSize, err := DirSize(newerUploaded)
 	require.NoError(t, err)
 
-	enforceRetentionCap(root, []string{olderUnuploaded, newerUploaded},
+	EnforceRetentionCap(root, []string{olderUnuploaded, newerUploaded},
 		func(string) bool { return false }, newerSize)
 
 	require.NoDirExists(t, newerUploaded, "the uploaded directory should be freed first")
@@ -117,9 +117,9 @@ func TestEnforceRetentionCap_prefersUploadedButDeletesOldestOverallIfNeeded(t *t
 
 	writeFile(t, oldestUnuploaded, "a.bin", make([]byte, 200))
 	writeFile(t, newerUploaded, "b.bin", make([]byte, 200))
-	markUploaded(newerUploaded)
+	MarkUploaded(newerUploaded)
 
-	enforceRetentionCap(root, []string{oldestUnuploaded, newerUploaded}, func(string) bool { return false }, 10)
+	EnforceRetentionCap(root, []string{oldestUnuploaded, newerUploaded}, func(string) bool { return false }, 10)
 
 	require.NoDirExists(t, oldestUnuploaded)
 	require.NoDirExists(t, newerUploaded)
@@ -129,27 +129,27 @@ func TestEnforceRetentionCap_zeroMaxBytesDisablesEnforcement(t *testing.T) {
 	root := t.TempDir()
 	dir := filepath.Join(root, "2026-08-14", "2026-08-14_00-00-00")
 	writeFile(t, dir, "a.bin", make([]byte, 1000))
-	markUploaded(dir)
+	MarkUploaded(dir)
 
-	enforceRetentionCap(root, []string{dir}, func(string) bool { return false }, 0)
+	EnforceRetentionCap(root, []string{dir}, func(string) bool { return false }, 0)
 
 	require.DirExists(t, dir)
 }
 
-func TestRetentionSweep_nilUploaderSkipsCatchUpButStillEnforcesCap(t *testing.T) {
+func TestSweep_nilUploaderSkipsCatchUpButStillEnforcesCap(t *testing.T) {
 	root := t.TempDir()
 	underCap := filepath.Join(root, "2026-08-14", "2026-08-14_00-00-00")
 	writeFile(t, underCap, "a.bin", []byte("data"))
 
-	retentionSweep(nil, root, filepath.Join(root, "boot_timebase.jsonl"), "", 100)
+	Sweep(nil, root, filepath.Join(root, "boot_timebase.jsonl"), "", 100)
 
-	require.False(t, isUploaded(underCap), "without an uploader nothing can be marked uploaded")
+	require.False(t, IsUploaded(underCap), "without an uploader nothing can be marked uploaded")
 	require.DirExists(t, underCap, "comfortably under the cap, so nothing needs to be deleted")
 
 	overCap := filepath.Join(root, "2026-08-15", "2026-08-15_00-00-00")
 	writeFile(t, overCap, "b.bin", make([]byte, 200))
 
-	retentionSweep(nil, root, filepath.Join(root, "boot_timebase.jsonl"), "", 100)
+	Sweep(nil, root, filepath.Join(root, "boot_timebase.jsonl"), "", 100)
 
 	require.NoDirExists(t, underCap,
 		"with no uploader configured, cap enforcement must still delete the oldest directory rather than let the disk fill up")
@@ -205,7 +205,7 @@ func newMinimalFakeAPI(t *testing.T) (*minimalFakeAPI, string) {
 	return api, srv.URL
 }
 
-func TestRetentionSweep_uploadsOldestUnmarkedFirstAndSkipsProtectedAndAlreadyUploaded(t *testing.T) {
+func TestSweep_uploadsOldestUnmarkedFirstAndSkipsProtectedAndAlreadyUploaded(t *testing.T) {
 	api, apiURL := newMinimalFakeAPI(t)
 	client := upload.New(upload.Config{BaseURL: apiURL, APIKey: "k"})
 
@@ -216,26 +216,26 @@ func TestRetentionSweep_uploadsOldestUnmarkedFirstAndSkipsProtectedAndAlreadyUpl
 
 	writeFile(t, oldest, "meta.json", []byte(`{}`))
 	writeFile(t, alreadyDone, "meta.json", []byte(`{}`))
-	markUploaded(alreadyDone)
+	MarkUploaded(alreadyDone)
 	writeFile(t, live, "meta.json", []byte(`{}`))
 
 	bootTimebasePath := filepath.Join(root, "does-not-exist.jsonl") // no boot session protection in play
 
-	retentionSweep(client, root, bootTimebasePath, live, 0)
+	Sweep(client, root, bootTimebasePath, live, 0)
 
-	require.True(t, isUploaded(oldest), "the oldest not-yet-uploaded closed dir must get uploaded")
-	require.False(t, isUploaded(live), "the currently-open session must never be swept")
+	require.True(t, IsUploaded(oldest), "the oldest not-yet-uploaded closed dir must get uploaded")
+	require.False(t, IsUploaded(live), "the currently-open session must never be swept")
 
 	api.mu.Lock()
 	defer api.mu.Unlock()
-	require.Equal(t, 1, api.createCalls[apiSessionDir(root, oldest)])
-	require.Zero(t, api.createCalls[apiSessionDir(root, alreadyDone)],
+	require.Equal(t, 1, api.createCalls[APISessionDir(root, oldest)])
+	require.Zero(t, api.createCalls[APISessionDir(root, alreadyDone)],
 		"a session already marked uploaded must not be re-uploaded")
-	require.Zero(t, api.createCalls[apiSessionDir(root, live)])
+	require.Zero(t, api.createCalls[APISessionDir(root, live)])
 }
 
 // Cap enforcement must not block on a stuck catch-up upload.
-func TestRunRetentionSweeps_capEnforcementNotBlockedByStuckCatchUpUpload(t *testing.T) {
+func TestRunSweeps_capEnforcementNotBlockedByStuckCatchUpUpload(t *testing.T) {
 	const sweepInterval = 20 * time.Millisecond
 	const slowUpload = 300 * time.Millisecond // several sweep intervals
 
@@ -259,7 +259,7 @@ func TestRunRetentionSweeps_capEnforcementNotBlockedByStuckCatchUpUpload(t *test
 
 	done := make(chan struct{})
 	go func() {
-		runRetentionSweeps(ctx, client, root, filepath.Join(root, "missing-boot.jsonl"), func() string { return "" }, cfg, control.New())
+		RunSweeps(ctx, client, root, filepath.Join(root, "missing-boot.jsonl"), func() string { return "" }, cfg, control.New())
 		close(done)
 	}()
 
@@ -273,12 +273,12 @@ func TestRunRetentionSweeps_capEnforcementNotBlockedByStuckCatchUpUpload(t *test
 	select {
 	case <-done:
 	case <-time.After(2 * time.Second):
-		t.Fatal("runRetentionSweeps did not shut down after ctx cancellation")
+		t.Fatal("RunSweeps did not shut down after ctx cancellation")
 	}
 }
 
 // Disabling uploading must not stop RETENTION_MAX_BYTES enforcement.
-func TestRunRetentionSweeps_uploadDisabled_skipsCatchUpButStillEnforcesCap(t *testing.T) {
+func TestRunSweeps_uploadDisabled_skipsCatchUpButStillEnforcesCap(t *testing.T) {
 	const sweepInterval = 20 * time.Millisecond
 
 	var hit atomic.Bool
@@ -305,7 +305,7 @@ func TestRunRetentionSweeps_uploadDisabled_skipsCatchUpButStillEnforcesCap(t *te
 
 	done := make(chan struct{})
 	go func() {
-		runRetentionSweeps(ctx, client, root, filepath.Join(root, "missing-boot.jsonl"), func() string { return "" }, cfg, ctl)
+		RunSweeps(ctx, client, root, filepath.Join(root, "missing-boot.jsonl"), func() string { return "" }, cfg, ctl)
 		close(done)
 	}()
 
@@ -322,12 +322,12 @@ func TestRunRetentionSweeps_uploadDisabled_skipsCatchUpButStillEnforcesCap(t *te
 	select {
 	case <-done:
 	case <-time.After(2 * time.Second):
-		t.Fatal("runRetentionSweeps did not shut down after ctx cancellation")
+		t.Fatal("RunSweeps did not shut down after ctx cancellation")
 	}
 }
 
-// POST /upload/start must trigger an immediate sweep, not wait for the next tick.
-func TestRunRetentionSweeps_uploadTrigger_runsImmediateSweep(t *testing.T) {
+// TriggerUpload must cause an immediate sweep, not wait for the next tick.
+func TestRunSweeps_uploadTrigger_runsImmediateSweep(t *testing.T) {
 	const longSweepInterval = 2 * time.Second // must not fire on its own during this test
 
 	var hit atomic.Bool
@@ -351,7 +351,7 @@ func TestRunRetentionSweeps_uploadTrigger_runsImmediateSweep(t *testing.T) {
 
 	done := make(chan struct{})
 	go func() {
-		runRetentionSweeps(ctx, client, root, filepath.Join(root, "missing-boot.jsonl"), func() string { return "" }, cfg, ctl)
+		RunSweeps(ctx, client, root, filepath.Join(root, "missing-boot.jsonl"), func() string { return "" }, cfg, ctl)
 		close(done)
 	}()
 
@@ -364,6 +364,6 @@ func TestRunRetentionSweeps_uploadTrigger_runsImmediateSweep(t *testing.T) {
 	select {
 	case <-done:
 	case <-time.After(2 * time.Second):
-		t.Fatal("runRetentionSweeps did not shut down after ctx cancellation")
+		t.Fatal("RunSweeps did not shut down after ctx cancellation")
 	}
 }

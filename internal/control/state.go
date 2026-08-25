@@ -1,26 +1,10 @@
-// Package control implements a local control plane for starting/stopping
-// recording and pausing/resuming uploading without restarting the process.
+// Package control holds the recording/uploading state that main's event
+// loop and the retention sweep coordinate through, so a schedule can start
+// or stop recording and pause or resume uploading without restarting the
+// process.
 package control
 
-import (
-	"context"
-	"sync/atomic"
-)
-
-// RecordingCmd asks main's event loop to start or stop recording.
-type RecordingCmd struct {
-	Start  bool
-	Result chan error
-}
-
-// Extra supplies dynamic status detail (current session, disk usage) via a
-// callback main sets, so this package doesn't need to know about sessions.
-type Extra struct {
-	CurrentSession  string
-	RecordingsBytes int64
-	MaxBytes        int64
-	PendingUploads  int
-}
+import "sync/atomic"
 
 // State is the shared control-plane state: recording and uploading, both
 // on by default.
@@ -28,16 +12,13 @@ type State struct {
 	recording atomic.Bool
 	uploading atomic.Bool
 
-	RecordingCmds chan RecordingCmd
+	// UploadTrigger asks the retention sweep for an immediate catch-up pass.
 	UploadTrigger chan struct{}
-
-	Extra func() Extra
 }
 
 // New returns a State with both recording and uploading on.
 func New() *State {
 	s := &State{
-		RecordingCmds: make(chan RecordingCmd),
 		UploadTrigger: make(chan struct{}, 1),
 	}
 	s.recording.Store(true)
@@ -62,21 +43,5 @@ func (s *State) TriggerUpload() {
 	select {
 	case s.UploadTrigger <- struct{}{}:
 	default:
-	}
-}
-
-// SendRecordingCmd sends a start/stop request and blocks until it's handled or ctx is done.
-func (s *State) SendRecordingCmd(ctx context.Context, start bool) error {
-	cmd := RecordingCmd{Start: start, Result: make(chan error, 1)}
-	select {
-	case s.RecordingCmds <- cmd:
-	case <-ctx.Done():
-		return ctx.Err()
-	}
-	select {
-	case err := <-cmd.Result:
-		return err
-	case <-ctx.Done():
-		return ctx.Err()
 	}
 }

@@ -153,11 +153,6 @@ func RecordingsDir() string {
 	return envStr("RECORDINGS_DIR", "recordings")
 }
 
-// ControlAddr is the bind address for the control-plane HTTP server (see internal/control).
-func ControlAddr() string {
-	return envStr("CONTROL_ADDR", "127.0.0.1:9191")
-}
-
 // ScheduleFile is the path to an optional daily recording/uploading schedule (see internal/schedule).
 func ScheduleFile() string {
 	return envStr("SCHEDULE_FILE", "")
