@@ -246,7 +246,7 @@ func Load(sessionDir string) Config {
 			DeleteAfterUpload:  envBool("DELETE_AFTER_UPLOAD", false),
 			MultipartThreshold: envInt64("UPLOAD_MULTIPART_THRESHOLD_BYTES", upload.DefaultMultipartThreshold),
 			PartSize:           envInt64("UPLOAD_PART_SIZE_BYTES", upload.DefaultPartSize),
-			Concurrency:        int(envInt64("UPLOAD_CONCURRENCY", upload.DefaultConcurrency)),
+			Concurrency:        envInt("UPLOAD_CONCURRENCY", upload.DefaultConcurrency),
 		},
 		Retention: RetentionConfig{
 			MaxBytes:      envInt64("RETENTION_MAX_BYTES", 100*1024*1024*1024),
@@ -386,6 +386,17 @@ func envInt64(key string, defaultValue int64) int64 {
 	if value := os.Getenv(key); value != "" {
 		if v, err := strconv.ParseInt(value, 10, 64); err == nil {
 			return v
+		}
+	}
+	return defaultValue
+}
+
+// envInt is like envInt64, but bitSize 0 tells ParseInt to reject a value
+// that doesn't fit in a native int, so the int64 result is always safe to convert.
+func envInt(key string, defaultValue int) int {
+	if value := os.Getenv(key); value != "" {
+		if v, err := strconv.ParseInt(value, 10, 0); err == nil {
+			return int(v)
 		}
 	}
 	return defaultValue

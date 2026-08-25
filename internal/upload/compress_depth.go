@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/csv"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -91,10 +92,11 @@ func decodeDepthFrames(bin []byte, records []depthRecord) (raw []byte, newRecord
 		return nil, nil, false
 	}
 	width, height := records[0].width, records[0].height
-	if width == 0 || height == 0 {
+	if width == 0 || height == 0 || width > math.MaxInt32 || height > math.MaxInt32 {
 		return nil, nil, false
 	}
-	frameBytes := int(width) * int(height) * 2
+	w, h := int(width), int(height)
+	frameBytes := w * h * 2
 
 	raw = make([]byte, 0, frameBytes*len(records))
 	newRecords = make([]depthRecord, len(records))
@@ -107,8 +109,8 @@ func decodeDepthFrames(bin []byte, records []depthRecord) (raw []byte, newRecord
 			return nil, nil, false
 		}
 		encoded := bin[rec.byteOffset : rec.byteOffset+rec.byteLength]
-		pixels := rvl.Decode(encoded, int(width)*int(height))
-		if len(pixels) != int(width)*int(height) {
+		pixels := rvl.Decode(encoded, w*h)
+		if len(pixels) != w*h {
 			return nil, nil, false
 		}
 		for _, p := range pixels {
