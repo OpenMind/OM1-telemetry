@@ -8,3 +8,5 @@ bin/
 internal/ddsgen/
 myenv/
 recordings/
+.env
+docker-compose.override.yml

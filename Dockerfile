@@ -19,6 +19,10 @@ RUN apk --no-cache add ca-certificates libgcc libstdc++ ffmpeg
 
 WORKDIR /root/
 
+# Matches the recordings volume mount in docker-compose.yml, so a normal
+# deployment doesn't also need to repeat this path via -e/environment.
+ENV RECORDINGS_DIR=/app/recordings
+
 COPY --from=builder /app/bin/om1-telemetry ./main
 COPY --from=builder /app/.cyclonedds/install/lib/libddsc.so* /usr/lib/
 COPY --from=builder /app/.draco/install/bin/draco_encoder /usr/local/bin/

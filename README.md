@@ -196,6 +196,34 @@ RECORDINGS_DIR="/path/to/recordings" \
 ./bin/om1-telemetry
 ```
 
+## Docker deployment
+
+The recommended way to run this in production is `docker compose`, not a
+hand-assembled `docker run`:
+
+```bash
+cp .env.example .env   # then fill in ROBOT_TYPE / OPENMIND_API_URL / OPENMIND_API_KEY / RECORDINGS_DIR_HOST
+docker compose up -d --build
+```
+
+`docker-compose.yml` is the canonical reference deployment — it's what sets
+`--network host` (required: the RTSP/DDS sources this recorder subscribes to
+are only reachable on the host's own loopback/network namespace, not a
+container-private one), the recordings volume, and a `stop_grace_period`
+long enough for an in-flight upload to finish before shutdown. The optional
+volumes (`SCHEDULE_FILE`, `/run/systemd/timesync`, `/etc/localtime`) are
+commented out in the file with notes on when to enable each — see
+"Scheduling" below for the two that affect it.
+
+`RECORDINGS_DIR` itself doesn't need setting: the Dockerfile bakes in
+`/app/recordings` to match the compose file's mount point, so you only need
+to point `RECORDINGS_DIR_HOST` (in `.env`) at wherever you want that data to
+land on the host.
+
+If you'd rather not use Compose, `docker build -t om1-telemetry .` plus a
+`docker run` reproducing the same flags works identically — `docker-compose.yml`
+is just that command written down once instead of retyped per deployment.
+
 ## Session Output
 
 Each recording session creates a timestamped directory structure:
@@ -450,23 +478,16 @@ segment's directory stays self-contained for `align_recording.py` /
 
 `SCHEDULE_FILE` points at an optional YAML file describing a daily
 recording/uploading schedule — see `config/schedule.example.yaml` for the
-format. Unset by default: recording and uploading stay on continuously.
-
-```bash
-docker run -d \
-  -v /path/to/my-schedule.yaml:/app/config/schedule.yaml:ro \
-  -e SCHEDULE_FILE=/app/config/schedule.yaml \
-  -v /etc/localtime:/etc/localtime:ro \
-  ... \
-  om1-telemetry
-```
+format. Unset by default: recording and uploading stay on continuously. In
+`docker-compose.yml`, enabling it means uncommenting both the `SCHEDULE_FILE`
+environment line and its matching `schedule.yaml` volume mount.
 
 The schedule's `start`/`end` times are evaluated in the container's own
 local time, which by default is UTC (no time zone configured) -- an
-unmodified `schedule.yaml` should be written in UTC. Mounting the host's
-`/etc/localtime`, as above, gives the container the host's real local time
-instead, the same way this robot's other containers (e.g. `om1`) already
-get it, so the schedule can be written in local time too.
+unmodified `schedule.yaml` should be written in UTC. Uncommenting the
+`/etc/localtime` volume mount too gives the container the host's real local
+time instead, the same way this robot's other containers (e.g. `om1`)
+already get it, so the schedule can be written in local time too.
 
 **This only changes how the schedule's own start/end comparison is
 evaluated.** Session directory names and every recorded timestamp are
