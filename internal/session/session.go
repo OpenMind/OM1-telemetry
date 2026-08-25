@@ -399,7 +399,10 @@ func patchMetaStart(dir string, start time.Time, from string) error {
 	return writeMetaTo(dir, m)
 }
 
+// datedDir names a session directory from t's UTC date/time, regardless of t's own Location --
+// session directories must stay UTC even if the process's local time zone isn't.
 func datedDir(root string, t time.Time) string {
+	t = t.UTC()
 	return filepath.Join(root, t.Format(dateLayout), t.Format(sessionLayout))
 }
 

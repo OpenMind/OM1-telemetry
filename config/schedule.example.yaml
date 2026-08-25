@@ -1,5 +1,6 @@
-# Sample schedule for SCHEDULE_FILE. Times are HH:MM, 24h; omit a section
-# to leave that axis always on.
+# Sample schedule for SCHEDULE_FILE. Times are HH:MM, 24h, evaluated in the
+# container's own local time (UTC by default -- see README.md's "Scheduling"
+# section). Omit a section to leave that axis always on.
 recording:
   start: "09:00"
   end: "17:00"

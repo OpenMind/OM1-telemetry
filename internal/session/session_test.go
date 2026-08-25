@@ -171,9 +171,9 @@ func TestJanitor_recoversSessionUsingItsJournal(t *testing.T) {
 	_, err := os.Stat(dir)
 	require.True(t, os.IsNotExist(err), "the recovered session should have moved out of pending/")
 
-	// Directory names are local time, as they have always been; the recovered
-	// instant is what matters and is asserted below.
-	trueStart := syncWall.Add(-2 * time.Hour).Local()
+	// Directory names are always UTC, regardless of the process's own local
+	// time zone -- see datedDir.
+	trueStart := syncWall.Add(-2 * time.Hour).UTC()
 	recovered := filepath.Join(root, trueStart.Format(dateLayout), trueStart.Format(sessionLayout))
 	data, err := os.ReadFile(filepath.Join(recovered, "lidar_scans.bin"))
 	require.NoError(t, err, "session should be dated two hours before the sync")
@@ -224,6 +224,17 @@ func TestJanitor_noPendingDirIsNotAnError(t *testing.T) {
 }
 
 // Two sessions promoted into the same second must not collide.
+func TestDatedDir_alwaysUsesUTCRegardlessOfInputLocation(t *testing.T) {
+	cdt := time.FixedZone("CDT", -5*60*60) // no tzdata dependency; any non-UTC offset proves the point
+
+	// 2026-07-14 23:30:00 CDT (UTC-5) is 2026-07-15 04:30:00 UTC -- a different calendar date entirely.
+	local := time.Date(2026, 7, 14, 23, 30, 0, 0, cdt)
+
+	got := datedDir("/recordings", local)
+	require.Equal(t, filepath.Join("/recordings", "2026-07-15", "2026-07-15_04-30-00"), got,
+		"the directory name must reflect UTC, not whatever Location the input Time carries")
+}
+
 func TestUniqueDir_avoidsCollision(t *testing.T) {
 	root := t.TempDir()
 	base := filepath.Join(root, "2026-07-14_07-30-00")

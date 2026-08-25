@@ -456,9 +456,21 @@ format. Unset by default: recording and uploading stay on continuously.
 docker run -d \
   -v /path/to/my-schedule.yaml:/app/config/schedule.yaml:ro \
   -e SCHEDULE_FILE=/app/config/schedule.yaml \
+  -v /etc/localtime:/etc/localtime:ro \
   ... \
   om1-telemetry
 ```
+
+The schedule's `start`/`end` times are evaluated in the container's own
+local time, which by default is UTC (no time zone configured) -- an
+unmodified `schedule.yaml` should be written in UTC. Mounting the host's
+`/etc/localtime`, as above, gives the container the host's real local time
+instead, the same way this robot's other containers (e.g. `om1`) already
+get it, so the schedule can be written in local time too.
+
+**This only changes how the schedule's own start/end comparison is
+evaluated.** Session directory names and every recorded timestamp are
+always UTC regardless of the container's local time.
 
 A schedule file that fails to load or parse is treated the same as
 `SCHEDULE_FILE` being unset.
