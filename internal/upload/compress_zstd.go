@@ -69,7 +69,7 @@ func zstdCompress(raw []byte) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer enc.Close()
+	defer func() { _ = enc.Close() }()
 	return enc.EncodeAll(raw, make([]byte, 0, len(raw))), nil
 }
 

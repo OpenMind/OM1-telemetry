@@ -255,7 +255,7 @@ func (a *fakeAPI) handleS3(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(http.StatusBadRequest)
 			return
 		}
-		defer f.Close()
+		defer func() { _ = f.Close() }()
 		data, _ := io.ReadAll(f)
 
 		a.mu.Lock()

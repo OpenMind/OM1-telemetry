@@ -271,7 +271,7 @@ func encodeDraco(pts [][3]float32) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer os.RemoveAll(dir)
+	defer func() { _ = os.RemoveAll(dir) }()
 
 	plyPath := filepath.Join(dir, "in.ply")
 	if err := writePLY(plyPath, pts); err != nil {
@@ -298,11 +298,15 @@ func writePLY(path string, pts [][3]float32) error {
 	if err != nil {
 		return err
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 	w := bufio.NewWriter(f)
-	fmt.Fprintf(w, "ply\nformat ascii 1.0\nelement vertex %d\nproperty float x\nproperty float y\nproperty float z\nend_header\n", len(pts))
+	if _, err := fmt.Fprintf(w, "ply\nformat ascii 1.0\nelement vertex %d\nproperty float x\nproperty float y\nproperty float z\nend_header\n", len(pts)); err != nil {
+		return err
+	}
 	for _, p := range pts {
-		fmt.Fprintf(w, "%g %g %g\n", p[0], p[1], p[2])
+		if _, err := fmt.Fprintf(w, "%g %g %g\n", p[0], p[1], p[2]); err != nil {
+			return err
+		}
 	}
 	return w.Flush()
 }

@@ -269,7 +269,7 @@ func (c *Client) uploadDirect(ctx context.Context, post *presignedPOST, key, pat
 	if err != nil {
 		return err
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 
 	var body bytes.Buffer
 	mw := multipart.NewWriter(&body)
@@ -313,7 +313,7 @@ func (c *Client) uploadDirect(ctx context.Context, post *presignedPOST, key, pat
 	if err != nil {
 		return err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	raw, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode >= 300 {
 		return fmt.Errorf("s3 upload %s: %s: %s", key, resp.Status, bytes.TrimSpace(raw))
@@ -332,7 +332,7 @@ func (c *Client) uploadMultipart(ctx context.Context, sessionID, path, filename 
 	if err != nil {
 		return err
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 
 	var start struct {
 		UploadID string `json:"upload_id"`
@@ -391,7 +391,7 @@ func (c *Client) uploadPart(ctx context.Context, sessionID, filename, uploadID s
 	if err != nil {
 		return "", err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode >= 300 {
 		raw, _ := io.ReadAll(resp.Body)
 		return "", fmt.Errorf("upload part %d: %s: %s", partNumber, resp.Status, bytes.TrimSpace(raw))
@@ -425,7 +425,7 @@ func (c *Client) doJSON(ctx context.Context, method, path string, body, out any)
 	if err != nil {
 		return err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	raw, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return err
