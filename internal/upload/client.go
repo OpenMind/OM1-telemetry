@@ -33,14 +33,12 @@ const (
 // Config configures the openmind-api uploader.
 type Config struct {
 	// BaseURL is the openmind-api base, e.g. "https://<host>/api/core/v1" -- no trailing slash.
-	BaseURL string
-	APIKey  string
-	// MultipartThreshold, PartSize, and Concurrency default to the Default* constants above when zero.
+	BaseURL            string
+	APIKey             string
 	MultipartThreshold int64
 	PartSize           int64
 	Concurrency        int
-	// HTTPClient overrides the default client; used by tests.
-	HTTPClient *http.Client
+	HTTPClient         *http.Client
 }
 
 // Ready reports whether enough is configured to actually make requests.

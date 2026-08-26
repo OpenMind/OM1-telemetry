@@ -20,24 +20,23 @@ import (
 )
 
 type Config struct {
-	Collect          bool
-	RobotType        RobotType
-	EnableLidar      bool
-	EnablePointCloud bool
-	EnableDepth      bool
-	EnableOdom       bool
-	EnableLowstate   bool
-	SessionDir       string
-	Video            []VideoConfig
-	Audio            AudioConfig
-	Features         FeaturesConfig
-	Lidar            LidarConfig
-	PointCloud       PointCloudConfig
-	Depth            DepthConfig
-	Odom             OdomConfig
-	Lowstate         LowstateConfig
-	Network          NetworkConfig
-	// SessionRotateInterval, when positive, closes and reopens the session on this cadence.
+	Collect               bool
+	RobotType             RobotType
+	EnableLidar           bool
+	EnablePointCloud      bool
+	EnableDepth           bool
+	EnableOdom            bool
+	EnableLowstate        bool
+	SessionDir            string
+	Video                 []VideoConfig
+	Audio                 AudioConfig
+	Features              FeaturesConfig
+	Lidar                 LidarConfig
+	PointCloud            PointCloudConfig
+	Depth                 DepthConfig
+	Odom                  OdomConfig
+	Lowstate              LowstateConfig
+	Network               NetworkConfig
 	SessionRotateInterval time.Duration
 	Upload                UploadConfig
 	Retention             RetentionConfig
@@ -45,18 +44,15 @@ type Config struct {
 
 // RetentionConfig bounds local disk usage and the catch-up-upload/disk-cap sweep interval.
 type RetentionConfig struct {
-	// MaxBytes is the cap on RecordingsDir's total size. Zero disables cap enforcement.
-	MaxBytes int64
-	// SweepInterval is how often the catch-up/cap sweep runs.
+	MaxBytes      int64
 	SweepInterval time.Duration
 }
 
 // UploadConfig configures uploading finished session directories to the openmind-api.
 type UploadConfig struct {
-	Enabled bool
-	BaseURL string
-	APIKey  string
-	// DeleteAfterUpload removes local files once a session has uploaded successfully.
+	Enabled            bool
+	BaseURL            string
+	APIKey             string
 	DeleteAfterUpload  bool
 	MultipartThreshold int64
 	PartSize           int64
@@ -189,8 +185,6 @@ func Load(sessionDir string) Config {
 			TimestampsFile: filepath.Join(sessionDir, "audio_timestamps.csv"),
 		},
 		Features: FeaturesConfig{
-			// Path to the video-processor's feature-log JSONL on a shared
-			// volume. Empty (default) disables ingestion.
 			SourcePath:     envStr("VIDEO_FEATURES_LOG", ""),
 			OutputFile:     filepath.Join(sessionDir, "video_features.jsonl"),
 			TimestampsFile: filepath.Join(sessionDir, "video_features_timestamps.csv"),

@@ -44,18 +44,11 @@ const nsPerSec = 1e9
 
 // Config configures a feature-log ingestor.
 type Config struct {
-	// SourcePath is the video-processor feature-log JSONL to tail. When empty
-	// the recorder is disabled (see config.FeaturesConfig.Enabled).
-	SourcePath string
-	// OutputFile is the verbatim copy of ingested records (JSONL).
-	OutputFile string
-	// TimestampsFile is the CSV index keyed to the common UTC-ns clock.
+	SourcePath     string
+	OutputFile     string
 	TimestampsFile string
-	// TimebaseFile receives the monotonic<->UTC mapping from the log header.
-	TimebaseFile string
+	TimebaseFile   string
 
-	// Monitor is optional; ticks once per record so the central heartbeat
-	// monitor can detect a stalled ingestor.
 	Monitor *heartbeat.Monitor
 
 	HeartbeatName string
@@ -85,16 +78,10 @@ type FeatureStream struct {
 	out *os.File
 	ts  *os.File
 
-	// offset is the byte position up to which SourcePath has been consumed.
-	offset int64
-	// utcOffsetNs maps a monotonic ns reading to UTC ns (utc = mono + offset),
-	// recovered from the log header. Zero until a header is seen.
-	utcOffsetNs int64
-	haveOffset  bool
-	// seq numbers emitted timestamp rows.
-	seq int64
-	// skippedBacklog is set once we've fast-forwarded past pre-session records
-	// on the first successful open.
+	offset         int64
+	utcOffsetNs    int64
+	haveOffset     bool
+	seq            int64
 	skippedBacklog bool
 }
 
@@ -143,7 +130,6 @@ func (s *FeatureStream) loop(ctx context.Context) {
 	for {
 		select {
 		case <-ctx.Done():
-			// Drain any final complete lines before exiting.
 			s.poll(&loggedMissing)
 			return
 		case <-t.C:
@@ -219,9 +205,6 @@ func (s *FeatureStream) poll(loggedMissing *bool) {
 	}
 	size := st.Size()
 
-	// On the first successful open, capture the timebase from any existing
-	// header and fast-forward past the pre-session backlog so we only record
-	// events from when this session started. (Rotation later is handled below.)
 	if !s.skippedBacklog {
 		s.scanForHeader(f)
 		s.offset = size
@@ -229,9 +212,7 @@ func (s *FeatureStream) poll(loggedMissing *bool) {
 		return
 	}
 
-	// Rotation/truncation: the writer rotates via os.replace, so the path now
-	// points at a fresh, smaller file. Restart from the top to pick up its
-	// (new) header and content.
+	// The writer rotates via os.replace, so a shrunk file means a fresh one.
 	if size < s.offset {
 		slog.Info("features: source rotated; re-reading from start")
 		s.offset = 0
@@ -248,7 +229,6 @@ func (s *FeatureStream) poll(loggedMissing *bool) {
 	for {
 		line, err := r.ReadString('\n')
 		if err == io.EOF {
-			// Trailing partial line (no newline yet): leave it for next poll.
 			break
 		}
 		if err != nil {
@@ -256,7 +236,7 @@ func (s *FeatureStream) poll(loggedMissing *bool) {
 			break
 		}
 		s.offset += int64(len(line))
-		s.process(line[:len(line)-1]) // drop trailing '\n'
+		s.process(line[:len(line)-1])
 	}
 }
 
@@ -304,7 +284,7 @@ func (s *FeatureStream) process(line string) {
 
 	unixNs, ok := s.unixNs(rec)
 	if !ok {
-		return // no usable capture time; verbatim copy still kept
+		return
 	}
 	if _, err := fmt.Fprintf(s.ts, "%d,%d,%s,%d\n", unixNs, rec.TCaptureNs, rec.Type, s.seq); err != nil {
 		slog.Warn("features: timestamp write failed", "err", err)

@@ -39,7 +39,6 @@ type Session struct {
 	root string
 	clk  *clock.Clock
 
-	// startWallNs/startMonoNs are sampled when this session is opened, not at process start.
 	startWallNs int64
 	startMonoNs int64
 	syncAtStart clock.SyncState
@@ -57,22 +56,17 @@ type Session struct {
 
 // Meta is the session's meta.json.
 type Meta struct {
-	SessionDir         string `json:"session_dir"`
-	SessionStartUnixNs int64  `json:"session_start_unix_ns"`
-	SessionStartMonoNs int64  `json:"session_start_mono_ns"`
-	BootID             string `json:"boot_id,omitempty"`
-	// RobotType names the profile this session was recorded with, so an
-	// analysis tool can look up the expected publish rates without being told.
+	SessionDir            string `json:"session_dir"`
+	SessionStartUnixNs    int64  `json:"session_start_unix_ns"`
+	SessionStartMonoNs    int64  `json:"session_start_mono_ns"`
+	BootID                string `json:"boot_id,omitempty"`
 	RobotType             string `json:"robot_type,omitempty"`
 	ClockSyncStateAtStart string `json:"clock_sync_state_at_start"`
 	ClockTrustedAtStart   bool   `json:"clock_trusted_at_start"`
-	// StartTimeCorrected is set when the session was promoted out of pending/,
-	// meaning SessionStartUnixNs was recomputed from the monotonic timeline.
-	StartTimeCorrected bool   `json:"start_time_corrected,omitempty"`
-	PromotedFrom       string `json:"promoted_from,omitempty"`
-	// SessionEndUnixNs/SessionEndMonoNs are set once Close is called.
-	SessionEndUnixNs int64 `json:"session_end_unix_ns,omitempty"`
-	SessionEndMonoNs int64 `json:"session_end_mono_ns,omitempty"`
+	StartTimeCorrected    bool   `json:"start_time_corrected,omitempty"`
+	PromotedFrom          string `json:"promoted_from,omitempty"`
+	SessionEndUnixNs      int64  `json:"session_end_unix_ns,omitempty"`
+	SessionEndMonoNs      int64  `json:"session_end_mono_ns,omitempty"`
 }
 
 // Open creates the session directory. When the clock is trusted this is the
@@ -104,7 +98,6 @@ func open(root string, clk *clock.Clock, sync clock.SyncState) (*Session, error)
 		return s, nil
 	}
 
-	// Untrusted: name the directory from things that are true anyway.
 	s.pending = true
 	name := fmt.Sprintf("%s_%012d", clk.ShortBootID(), monoNs/int64(time.Millisecond))
 	s.realDir = uniqueDir(filepath.Join(root, PendingDirName, name))
@@ -114,9 +107,6 @@ func open(root string, clk *clock.Clock, sync clock.SyncState) (*Session, error)
 
 	link := filepath.Join(root, CurrentLinkName)
 	if err := repointSymlink(link, s.realDir); err != nil {
-		// Without the symlink the recorders would hold a path that a later
-		// rename invalidates, so stay put in pending/ instead. Janitor renames
-		// it on the next start.
 		slog.Warn("session: cannot create current-session symlink; session will stay in pending/ until the next start",
 			"link", link, "err", err)
 		s.dir = s.realDir
@@ -175,7 +165,6 @@ func (s *Session) Promote() error {
 	startMonoNs := s.startMonoNs
 	s.mu.Unlock()
 
-	// Carry the now-correct wall clock back along this session's own monotonic timeline.
 	wallNow, monoNow := s.clk.Now()
 	trueStart := time.Unix(0, wallNow-(monoNow-startMonoNs))
 	to := datedDir(s.root, trueStart)
@@ -196,8 +185,6 @@ func (s *Session) Promote() error {
 
 	if usingLink {
 		if err := repointSymlink(filepath.Join(s.root, CurrentLinkName), to); err != nil {
-			// The rename already happened; recorders holding open files are
-			// fine, but anything opening a new file now would fail. Loud.
 			slog.Error("session: promoted but could not repoint the current symlink",
 				"dir", to, "err", err)
 		}
@@ -377,8 +364,6 @@ func recoverStart(dir string) (time.Time, bool) {
 		if rec.Kind == "start" && !haveStart {
 			startMono, haveStart = rec.MonoNs, true
 		}
-		// The first synchronized record is the anchor. Later ones would work
-		// equally well; the first is the closest to the data that needs dating.
 		if haveStart && rec.Synced && rec.UTCNs > 0 {
 			return time.Unix(0, rec.UTCNs-(rec.MonoNs-startMono)), true
 		}
@@ -471,7 +456,7 @@ func ListClosed(root string) ([]string, error) {
 			continue
 		}
 		if _, err := time.Parse(dateLayout, de.Name()); err != nil {
-			continue // e.g. "pending" -- not a date directory
+			continue
 		}
 		dateDir := filepath.Join(root, de.Name())
 		sessionEntries, err := os.ReadDir(dateDir)

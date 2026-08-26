@@ -27,8 +27,6 @@ type Config struct {
 
 	DataFile string
 
-	// Monitor is optional; if non-nil, ticks once per successful sample
-	// write so heartbeat.Monitor can detect when this recorder dies.
 	Monitor *heartbeat.Monitor
 }
 
@@ -136,7 +134,6 @@ func (n *NetworkStream) record(ctx context.Context) error {
 		}
 		seq++
 
-		// Heartbeat: one tick per recorded sample. Safe if Monitor is nil.
 		n.cfg.Monitor.Tick(HeartbeatName)
 
 		select {
@@ -177,7 +174,6 @@ func (n *NetworkStream) ping(ctx context.Context, binaryWarned *bool) pingResult
 			}
 		}
 	} else if *binaryWarned {
-		// We previously warned about a broken ping; it's working now.
 		slog.Info("network: ping command working again")
 		*binaryWarned = false
 	}
