@@ -239,7 +239,7 @@ func main() {
 	}
 
 	if scheduleCfg != nil {
-		reconcileSchedule() // apply immediately on startup, not just on the next tick
+		reconcileSchedule()
 	}
 
 loop:
@@ -253,13 +253,9 @@ loop:
 
 		case <-rotateC:
 			if !ctl.Recording() {
-				continue // paused by the schedule; nothing to rotate
+				continue
 			}
 
-			// Only the ephemeral streams (features/network) stop here --
-			// rs.persistent (DDS, video, audio) stays connected and just
-			// rotates its output files below, so rotation never drops a
-			// sample or frame the way a full Stop+Start would.
 			rs.stopEphemeral()
 			finished := sess
 			if err := finished.Close(); err != nil {
@@ -280,7 +276,7 @@ loop:
 			currentMu.Unlock()
 
 			sess, cfg = next, nextCfg
-			registerHeartbeats(mon, cfg, videoHeartbeatNames) // resets the grace period for the fresh streams below
+			registerHeartbeats(mon, cfg, videoHeartbeatNames)
 
 			persistent := rs.persistent
 			rs = startEphemeral(cfg, mon)

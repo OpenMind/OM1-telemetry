@@ -31,7 +31,7 @@ func WholeFiles(localDir string) error {
 func compressWholeFile(localDir, name string) error {
 	dstName := zstdName(name)
 	if _, err := os.Stat(filepath.Join(localDir, dstName)); err == nil {
-		return removeIfExists(localDir, name) // already compressed; clean up any leftover original
+		return removeIfExists(localDir, name)
 	} else if !os.IsNotExist(err) {
 		return err
 	}

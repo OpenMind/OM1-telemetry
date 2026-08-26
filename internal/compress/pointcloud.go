@@ -62,7 +62,7 @@ func Pointcloud(localDir string) error {
 		return err
 	}
 	if binSrc == "" {
-		return nil // pointcloud disabled for this session
+		return nil
 	}
 
 	csvRaw, err := originalCSVBytes(localDir, pointcloudTimestampsName)
