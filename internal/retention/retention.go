@@ -125,7 +125,17 @@ func SnapshotTimebase(bootPath, sessionDir string) {
 }
 
 // UploadSession uploads one finished session directory; on failure the files are kept locally for a later retry.
-func UploadSession(client *upload.Client, dir, sessionDir string, startedAt time.Time, deleteAfter bool, opts upload.Options) {
+//
+// dir is claimed for the duration of the upload, so a concurrent call for
+// the same dir (another upload path, or retention's cap enforcement) skips
+// it instead of racing.
+func UploadSession(ctl *control.State, client *upload.Client, dir, sessionDir string, startedAt time.Time, deleteAfter bool, opts upload.Options) {
+	if !ctl.TryClaimDir(dir) {
+		slog.Info("retention: skipping upload, already in flight", "dir", dir)
+		return
+	}
+	defer ctl.ReleaseDir(dir)
+
 	ctx, cancel := context.WithTimeout(context.Background(), uploadTimeout)
 	defer cancel()
 
@@ -152,12 +162,12 @@ func UploadFinishedSessionAsync(wg *sync.WaitGroup, uploader *upload.Client, ctl
 	wg.Add(1)
 	go func(dir, apiDir string, startedAt time.Time, opts upload.Options) {
 		defer wg.Done()
-		UploadSession(uploader, dir, apiDir, startedAt, uploadDelete, opts)
+		UploadSession(ctl, uploader, dir, apiDir, startedAt, uploadDelete, opts)
 	}(finished.RealDir(), APISessionDir(recordingsDir, finished.RealDir()), time.Unix(0, finished.StartUnixNs()), opts)
 }
 
 // Sweep runs catch-up uploads and cap enforcement once; kept as a building block for tests.
-func Sweep(uploader *upload.Client, recordingsDir, bootTimebasePath, currentDir string, maxBytes int64) {
+func Sweep(ctl *control.State, uploader *upload.Client, recordingsDir, bootTimebasePath, currentDir string, maxBytes int64) {
 	dirs, err := session.ListClosed(recordingsDir)
 	if err != nil {
 		slog.Warn("retention: cannot list session directories", "dir", recordingsDir, "err", err)
@@ -168,12 +178,12 @@ func Sweep(uploader *upload.Client, recordingsDir, bootTimebasePath, currentDir 
 		return dir == currentDir || BootSessionDir(bootTimebasePath, dir)
 	}
 
-	CatchUpUploads(uploader, dirs, protected, recordingsDir, bootTimebasePath)
-	EnforceRetentionCap(recordingsDir, dirs, protected, maxBytes)
+	CatchUpUploads(ctl, uploader, dirs, protected, recordingsDir, bootTimebasePath)
+	EnforceRetentionCap(ctl, recordingsDir, dirs, protected, maxBytes)
 }
 
 // CatchUpUploads retries every closed, not-yet-uploaded, non-protected directory in dirs, oldest first.
-func CatchUpUploads(uploader *upload.Client, dirs []string, protected func(string) bool, recordingsDir, bootTimebasePath string) {
+func CatchUpUploads(ctl *control.State, uploader *upload.Client, dirs []string, protected func(string) bool, recordingsDir, bootTimebasePath string) {
 	if uploader == nil {
 		return
 	}
@@ -182,12 +192,12 @@ func CatchUpUploads(uploader *upload.Client, dirs []string, protected func(strin
 			continue
 		}
 		opts := UploadOptions(bootTimebasePath, dir)
-		UploadSession(uploader, dir, APISessionDir(recordingsDir, dir), ReadStartedAt(dir), false, opts)
+		UploadSession(ctl, uploader, dir, APISessionDir(recordingsDir, dir), ReadStartedAt(dir), false, opts)
 	}
 }
 
 // EnforceRetentionCap deletes directories oldest-first (uploaded ones first) until recordingsDir is at or under maxBytes.
-func EnforceRetentionCap(recordingsDir string, dirs []string, protected func(string) bool, maxBytes int64) {
+func EnforceRetentionCap(ctl *control.State, recordingsDir string, dirs []string, protected func(string) bool, maxBytes int64) {
 	if maxBytes <= 0 {
 		return
 	}
@@ -198,6 +208,14 @@ func EnforceRetentionCap(recordingsDir string, dirs []string, protected func(str
 	}
 
 	deleteDir := func(dir string) bool {
+		// Claim dir first so a delete can never land while an upload of the
+		// same directory is in flight -- see UploadSession.
+		if !ctl.TryClaimDir(dir) {
+			slog.Info("retention: skipping delete, dir is in flight", "dir", dir)
+			return false
+		}
+		defer ctl.ReleaseDir(dir)
+
 		freed, err := DirSize(dir)
 		if err != nil {
 			slog.Warn("retention: cannot measure session directory size", "dir", dir, "err", err)
@@ -250,9 +268,6 @@ func EnforceRetentionCap(recordingsDir string, dirs []string, protected func(str
 
 // RunSweeps drives catch-up uploads and cap enforcement on separate tickers until ctx is canceled.
 func RunSweeps(ctx context.Context, uploader *upload.Client, recordingsDir, bootTimebasePath string, currentDir func() string, cfg config.RetentionConfig, ctl *control.State) {
-	if cfg.MaxBytes <= 0 {
-		return
-	}
 	interval := cfg.SweepInterval
 	if interval <= 0 {
 		interval = 5 * time.Minute
@@ -272,22 +287,26 @@ func RunSweeps(ctx context.Context, uploader *upload.Client, recordingsDir, boot
 
 	var wg sync.WaitGroup
 
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		ticker := time.NewTicker(interval)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-ticker.C:
-				if dirs, protected, ok := listClosed(); ok {
-					EnforceRetentionCap(recordingsDir, dirs, protected, cfg.MaxBytes)
+	// MaxBytes <= 0 disables the disk-space cap only -- catch-up uploads below
+	// run independently of it.
+	if cfg.MaxBytes > 0 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			ticker := time.NewTicker(interval)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-ticker.C:
+					if dirs, protected, ok := listClosed(); ok {
+						EnforceRetentionCap(ctl, recordingsDir, dirs, protected, cfg.MaxBytes)
+					}
 				}
 			}
-		}
-	}()
+		}()
+	}
 
 	if uploader != nil {
 		wg.Add(1)
@@ -300,7 +319,7 @@ func RunSweeps(ctx context.Context, uploader *upload.Client, recordingsDir, boot
 					return
 				}
 				if dirs, protected, ok := listClosed(); ok {
-					CatchUpUploads(uploader, dirs, protected, recordingsDir, bootTimebasePath)
+					CatchUpUploads(ctl, uploader, dirs, protected, recordingsDir, bootTimebasePath)
 				}
 			}
 			for {

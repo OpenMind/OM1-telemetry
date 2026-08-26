@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"os"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -31,8 +32,19 @@ type LowstateStream struct {
 	cfg     Config
 	running atomic.Bool
 	cancel  context.CancelFunc
-	done    chan struct{}
 	wg      sync.WaitGroup
+
+	filesMu sync.Mutex
+	files   *outputFiles
+}
+
+// outputFiles is the current pair of open output files plus the counters
+// that continue across a Rotate.
+type outputFiles struct {
+	data       *os.File
+	ts         *os.File
+	seq        int64
+	byteOffset int64
 }
 
 func New(cfg Config) *LowstateStream {
@@ -45,7 +57,6 @@ func (l *LowstateStream) Start() {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	l.cancel = cancel
-	l.done = make(chan struct{})
 	l.wg.Add(1)
 	go l.loop(ctx)
 }
@@ -56,13 +67,41 @@ func (l *LowstateStream) Stop() {
 	}
 	l.cancel()
 	l.wg.Wait()
-	close(l.done)
+	l.closeFiles()
 	slog.Info("lowstate stream stopped")
+}
+
+// Rotate switches the stream's output to a new pair of files without
+// touching the DDS subscription, so a session rotation never has to
+// resubscribe -- and so never drops samples the way a Stop+Start cycle would.
+func (l *LowstateStream) Rotate(dataFile, timestampsFile string) error {
+	files, err := openOutputFiles(dataFile, timestampsFile)
+	if err != nil {
+		return fmt.Errorf("rotate: %w", err)
+	}
+
+	l.filesMu.Lock()
+	old := l.files
+	l.files = files
+	l.filesMu.Unlock()
+
+	if old != nil {
+		closeOutputFiles(old, "lowstate")
+	}
+	return nil
 }
 
 func (l *LowstateStream) loop(ctx context.Context) {
 	defer l.wg.Done()
 	for ctx.Err() == nil {
+		if err := l.ensureFilesOpen(); err != nil {
+			slog.Error("lowstate: cannot open output files; retrying in 2 s", "err", err)
+			select {
+			case <-ctx.Done():
+			case <-time.After(2 * time.Second):
+			}
+			continue
+		}
 		if err := l.record(ctx); err != nil && ctx.Err() == nil {
 			slog.Error("lowstate recorder error; reconnecting in 2 s", "err", err)
 			select {
@@ -73,6 +112,22 @@ func (l *LowstateStream) loop(ctx context.Context) {
 	}
 }
 
+// ensureFilesOpen opens the stream's initial output files, unless a Rotate
+// call already installed a pair first.
+func (l *LowstateStream) ensureFilesOpen() error {
+	l.filesMu.Lock()
+	defer l.filesMu.Unlock()
+	if l.files != nil {
+		return nil
+	}
+	files, err := openOutputFiles(l.cfg.DataFile, l.cfg.TimestampsFile)
+	if err != nil {
+		return err
+	}
+	l.files = files
+	return nil
+}
+
 func (l *LowstateStream) record(ctx context.Context) error {
 	receiver, closeSub, err := subscribeDDS(ctx, l.cfg.DDSDomainID, l.cfg.DDSTopic, l.cfg.RobotType)
 	if err != nil {
@@ -80,72 +135,21 @@ func (l *LowstateStream) record(ctx context.Context) error {
 	}
 	defer closeSub()
 
-	tsResult, err := recordutil.OpenForAppend(l.cfg.TimestampsFile)
-	if err != nil {
-		return fmt.Errorf("open timestamps file: %w", err)
-	}
-	tsFile := tsResult.File
-	defer func() {
-		if err := tsFile.Close(); err != nil {
-			slog.Error("failed to close timestamps file", "err", err)
-		}
-	}()
-
-	dataResult, err := recordutil.OpenForAppend(l.cfg.DataFile)
-	if err != nil {
-		return fmt.Errorf("open data file: %w", err)
-	}
-	dataFile := dataResult.File
-	defer func() {
-		if err := dataFile.Close(); err != nil {
-			slog.Error("failed to close data file", "err", err)
-		}
-	}()
-
-	if tsResult.PrevSize == 0 {
-		if _, err := fmt.Fprintln(tsFile, "unix_ns,seq,byte_offset,mono_ns"); err != nil {
-			return fmt.Errorf("write header: %w", err)
-		}
-	}
-
-	lastSeq, err := recordutil.ReadLastSeq(l.cfg.TimestampsFile)
-	if err != nil {
-		slog.Warn("could not read last seq; starting from 0", "err", err)
-		lastSeq = -1
-	}
-	seq := lastSeq + 1
-	byteOffset := dataResult.PrevSize
-
-	if dataResult.PrevSize > 0 {
-		slog.Info("lowstate resuming previous session",
-			"starting_seq", seq,
-			"starting_byte_offset", byteOffset)
-	}
-
 	slog.Info("lowstate recorder started", "domain", l.cfg.DDSDomainID, "topic", l.cfg.DDSTopic, "robot_type", l.cfg.RobotType)
 
 	syncTicker := time.NewTicker(syncInterval)
 	defer syncTicker.Stop()
 
-	flush := func() {
-		if err := dataFile.Sync(); err != nil {
-			slog.Warn("lowstate data sync failed", "err", err)
-		}
-		if err := tsFile.Sync(); err != nil {
-			slog.Warn("lowstate ts sync failed", "err", err)
-		}
-	}
-
 	for {
 		select {
 		case <-ctx.Done():
-			flush()
+			l.flush()
 			return nil
 		case <-syncTicker.C:
-			flush()
+			l.flush()
 		case sample, ok := <-receiver:
 			if !ok {
-				flush()
+				l.flush()
 				return fmt.Errorf("dds subscriber channel closed")
 			}
 
@@ -153,25 +157,117 @@ func (l *LowstateStream) record(ctx context.Context) error {
 			if unixNs == 0 {
 				unixNs = time.Now().UnixNano()
 			}
-			// Boot-clock receive time. unixNs above is the publisher's stamp,
-			// taken on this host's wall clock, so a clock step spoils it;
-			// monoNs is immune and says which correction applies to this row.
-			// See internal/clock.
+			// monoNs pairs with unixNs so a later clock correction can be
+			// reapplied; unaffected by wall-clock steps. See internal/clock.
 			monoNs := clock.MonoNs()
 
-			n, err := dataFile.Write(sample.data)
-			if err != nil {
-				return fmt.Errorf("write data: %w", err)
+			if err := l.write(sample.data, unixNs, monoNs); err != nil {
+				return err
 			}
-
-			if _, err := fmt.Fprintf(tsFile, "%d,%d,%d,%d\n", unixNs, seq, byteOffset, monoNs); err != nil {
-				return fmt.Errorf("write timestamp: %w", err)
-			}
-
-			byteOffset += int64(n)
-			seq++
 
 			l.cfg.Monitor.Tick(HeartbeatName)
 		}
+	}
+}
+
+// write appends one sample to the current output files. Held under filesMu
+// for the whole write so a concurrent Rotate can never split a sample
+// across the old and new files.
+func (l *LowstateStream) write(data []byte, unixNs, monoNs int64) error {
+	l.filesMu.Lock()
+	defer l.filesMu.Unlock()
+	f := l.files
+
+	n, err := f.data.Write(data)
+	if err != nil {
+		return fmt.Errorf("write data: %w", err)
+	}
+	if _, err := fmt.Fprintf(f.ts, "%d,%d,%d,%d\n", unixNs, f.seq, f.byteOffset, monoNs); err != nil {
+		return fmt.Errorf("write timestamp: %w", err)
+	}
+	f.byteOffset += int64(n)
+	f.seq++
+	return nil
+}
+
+func (l *LowstateStream) flush() {
+	l.filesMu.Lock()
+	f := l.files
+	l.filesMu.Unlock()
+	if f == nil {
+		return
+	}
+	if err := f.data.Sync(); err != nil {
+		slog.Warn("lowstate data sync failed", "err", err)
+	}
+	if err := f.ts.Sync(); err != nil {
+		slog.Warn("lowstate ts sync failed", "err", err)
+	}
+}
+
+func (l *LowstateStream) closeFiles() {
+	l.filesMu.Lock()
+	f := l.files
+	l.files = nil
+	l.filesMu.Unlock()
+	if f != nil {
+		closeOutputFiles(f, "lowstate")
+	}
+}
+
+// openOutputFiles opens dataPath/tsPath in append mode and resumes their
+// counters from what's already on disk, so a reconnect or a process restart
+// never clobbers or duplicates prior data.
+func openOutputFiles(dataPath, tsPath string) (*outputFiles, error) {
+	tsResult, err := recordutil.OpenForAppend(tsPath)
+	if err != nil {
+		return nil, fmt.Errorf("open timestamps file: %w", err)
+	}
+	dataResult, err := recordutil.OpenForAppend(dataPath)
+	if err != nil {
+		_ = tsResult.File.Close()
+		return nil, fmt.Errorf("open data file: %w", err)
+	}
+
+	if tsResult.PrevSize == 0 {
+		if _, err := fmt.Fprintln(tsResult.File, "unix_ns,seq,byte_offset,mono_ns"); err != nil {
+			_ = tsResult.File.Close()
+			_ = dataResult.File.Close()
+			return nil, fmt.Errorf("write header: %w", err)
+		}
+	}
+
+	lastSeq, err := recordutil.ReadLastSeq(tsPath)
+	if err != nil {
+		slog.Warn("could not read last seq; starting from 0", "err", err)
+		lastSeq = -1
+	}
+
+	if dataResult.PrevSize > 0 {
+		slog.Info("lowstate resuming previous session",
+			"starting_seq", lastSeq+1,
+			"starting_byte_offset", dataResult.PrevSize)
+	}
+
+	return &outputFiles{
+		data:       dataResult.File,
+		ts:         tsResult.File,
+		seq:        lastSeq + 1,
+		byteOffset: dataResult.PrevSize,
+	}, nil
+}
+
+func closeOutputFiles(f *outputFiles, streamName string) {
+	if err := f.data.Sync(); err != nil {
+		slog.Warn(streamName+" data sync failed", "err", err)
+	}
+	if err := f.data.Close(); err != nil {
+		slog.Error("failed to close data file", "err", err)
+	}
+	if err := f.ts.Sync(); err != nil {
+		slog.Warn(streamName+" ts sync failed", "err", err)
+	}
+	if err := f.ts.Close(); err != nil {
+		slog.Error("failed to close timestamps file", "err", err)
 	}
 }

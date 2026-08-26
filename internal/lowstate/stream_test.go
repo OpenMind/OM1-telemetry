@@ -84,3 +84,50 @@ func TestStop_idempotent(t *testing.T) {
 	stream.Stop()
 	stream.Stop()
 }
+
+func TestRotate_opensNewFilesAndPreservesOldOnes(t *testing.T) {
+	dir := t.TempDir()
+	stream := New(Config{
+		RobotType:      "go2",
+		DDSDomainID:    0,
+		DDSTopic:       "rt/lowstate/unreachable",
+		TimestampsFile: filepath.Join(dir, "a_timestamps.csv"),
+		DataFile:       filepath.Join(dir, "a_data.bin"),
+	})
+
+	stream.Start()
+	defer stream.Stop()
+	time.Sleep(20 * time.Millisecond) // give loop() time to open the initial files
+
+	newData := filepath.Join(dir, "b_data.bin")
+	newTS := filepath.Join(dir, "b_timestamps.csv")
+	require.NoError(t, stream.Rotate(newData, newTS))
+
+	require.FileExists(t, filepath.Join(dir, "a_data.bin"), "the pre-rotation data file must not be deleted")
+	require.FileExists(t, filepath.Join(dir, "a_timestamps.csv"), "the pre-rotation timestamps file must not be deleted")
+	require.FileExists(t, newData, "rotate must create the new data file")
+	require.FileExists(t, newTS, "rotate must create the new timestamps file")
+}
+
+func TestRotate_beforeStart_stillOpensFiles(t *testing.T) {
+	dir := t.TempDir()
+	stream := New(Config{
+		RobotType:      "go2",
+		DDSDomainID:    0,
+		DDSTopic:       "rt/lowstate/unreachable",
+		TimestampsFile: filepath.Join(dir, "a_timestamps.csv"),
+		DataFile:       filepath.Join(dir, "a_data.bin"),
+	})
+
+	newData := filepath.Join(dir, "b_data.bin")
+	newTS := filepath.Join(dir, "b_timestamps.csv")
+	require.NoError(t, stream.Rotate(newData, newTS),
+		"a rotate racing ahead of the stream's own initial file open must still succeed")
+
+	stream.Start()
+	defer stream.Stop()
+	time.Sleep(20 * time.Millisecond)
+
+	require.FileExists(t, newData)
+	require.FileExists(t, newTS)
+}

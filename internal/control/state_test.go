@@ -43,3 +43,18 @@ func TestTriggerUpload_nonBlockingAndCoalesces(t *testing.T) {
 	default:
 	}
 }
+
+func TestTryClaimDir_secondClaimFailsUntilReleased(t *testing.T) {
+	s := New()
+	require.True(t, s.TryClaimDir("/a"), "first claim on a free dir must succeed")
+	require.False(t, s.TryClaimDir("/a"), "a second claim on an already-held dir must fail")
+
+	s.ReleaseDir("/a")
+	require.True(t, s.TryClaimDir("/a"), "the dir must be claimable again once released")
+}
+
+func TestTryClaimDir_independentPerDir(t *testing.T) {
+	s := New()
+	require.True(t, s.TryClaimDir("/a"))
+	require.True(t, s.TryClaimDir("/b"), "claiming one dir must not affect another")
+}

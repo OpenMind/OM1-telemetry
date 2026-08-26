@@ -120,7 +120,7 @@ func main() {
 	sweepCtx, sweepCancel := context.WithCancel(context.Background())
 	go retention.RunSweeps(sweepCtx, uploader, recordingsDir, bootTimebasePath, currentDirFn, cfg.Retention, ctl)
 
-	rs := startRecorders(cfg, mon, videoHeartbeatNames)
+	rs := startRecorders(cfg, mon, recordingsDir, videoHeartbeatNames)
 
 	videoURLs := make([]string, 0, len(cfg.Video))
 	for _, vc := range cfg.Video {
@@ -209,7 +209,7 @@ func main() {
 
 		sess, cfg = next, nextCfg
 		registerHeartbeats(mon, cfg, videoHeartbeatNames)
-		rs = startRecorders(cfg, mon, videoHeartbeatNames)
+		rs = startRecorders(cfg, mon, recordingsDir, videoHeartbeatNames)
 		ctl.SetRecording(true)
 		slog.Info("recording resumed by schedule", "session", sess.RealDir())
 		return nil
@@ -256,7 +256,11 @@ loop:
 				continue // paused by the schedule; nothing to rotate
 			}
 
-			rs.Stop()
+			// Only the ephemeral streams (features/network) stop here --
+			// rs.persistent (DDS, video, audio) stays connected and just
+			// rotates its output files below, so rotation never drops a
+			// sample or frame the way a full Stop+Start would.
+			rs.stopEphemeral()
 			finished := sess
 			if err := finished.Close(); err != nil {
 				slog.Warn("could not finalize session metadata", "dir", finished.RealDir(), "err", err)
@@ -277,7 +281,11 @@ loop:
 
 			sess, cfg = next, nextCfg
 			registerHeartbeats(mon, cfg, videoHeartbeatNames) // resets the grace period for the fresh streams below
-			rs = startRecorders(cfg, mon, videoHeartbeatNames)
+
+			persistent := rs.persistent
+			rs = startEphemeral(cfg, mon)
+			rs.persistent = persistent
+			rs.persistent.rotate(cfg)
 
 			slog.Info("session rotated", "session", sess.RealDir())
 
@@ -298,7 +306,7 @@ loop:
 
 		if uploader != nil && ctl.Uploading() {
 			opts := retention.UploadOptions(bootTimebasePath, sess.RealDir())
-			retention.UploadSession(uploader, sess.RealDir(), retention.APISessionDir(recordingsDir, sess.RealDir()), time.Unix(0, sess.StartUnixNs()), uploadDelete, opts)
+			retention.UploadSession(ctl, uploader, sess.RealDir(), retention.APISessionDir(recordingsDir, sess.RealDir()), time.Unix(0, sess.StartUnixNs()), uploadDelete, opts)
 		}
 	}
 	uploadWG.Wait()
@@ -365,44 +373,174 @@ func unregisterHeartbeats(mon *heartbeat.Monitor, cfg config.Config, videoHeartb
 	}
 }
 
-// recorderSet is every stream started for one session; disabled streams are left nil.
-type recorderSet struct {
-	videoStreams     []*video.VideoRTSPStream
-	audioStream      *audio.AudioRTSPStream
-	featureStream    *features.FeatureStream
+// persistentStreams is every recorder that stays alive across a session
+// rotation (see rotate): the DDS streams and the video/audio RTSP streams.
+// Their subscriptions and connections are expensive to reestablish, so
+// rotation only swaps their output files instead of stopping and
+// restarting them; only a real pause/resume tears them down and rebuilds
+// them.
+type persistentStreams struct {
 	lidarStream      *lidar.LidarStream
 	pointCloudStream *pointcloud.PointCloudStream
 	depthStream      *depth.DepthStream
 	odomStream       *odom.OdomStream
 	lowstateStream   *lowstate.LowstateStream
-	networkStream    *network.NetworkStream
+	videoStreams     []*video.VideoRTSPStream
+	audioStream      *audio.AudioRTSPStream
 }
 
-// startRecorders builds and starts every stream for cfg's session directory.
-func startRecorders(cfg config.Config, mon *heartbeat.Monitor, videoHeartbeatNames []string) *recorderSet {
-	rs := &recorderSet{}
+func newPersistentStreams(cfg config.Config, mon *heartbeat.Monitor, recordingsDir string, videoHeartbeatNames []string) persistentStreams {
+	var p persistentStreams
 
-	rs.videoStreams = make([]*video.VideoRTSPStream, 0, len(cfg.Video))
+	if cfg.EnableLidar {
+		lidarCfg := cfg.Lidar.LidarStreamConfig()
+		lidarCfg.Monitor = mon
+		p.lidarStream = lidar.New(lidarCfg)
+	}
+	if cfg.EnablePointCloud {
+		pointCloudCfg := cfg.PointCloud.PointCloudStreamConfig()
+		pointCloudCfg.Monitor = mon
+		p.pointCloudStream = pointcloud.New(pointCloudCfg)
+	}
+	if cfg.EnableDepth {
+		depthCfg := cfg.Depth.DepthStreamConfig()
+		depthCfg.Monitor = mon
+		p.depthStream = depth.New(depthCfg)
+	}
+	if cfg.EnableOdom {
+		odomCfg := cfg.Odom.OdomStreamConfig()
+		odomCfg.Monitor = mon
+		p.odomStream = odom.New(odomCfg)
+	}
+	if cfg.EnableLowstate {
+		lowstateCfg := cfg.Lowstate.LowstateStreamConfig()
+		lowstateCfg.Monitor = mon
+		p.lowstateStream = lowstate.New(lowstateCfg)
+	}
+
+	p.videoStreams = make([]*video.VideoRTSPStream, 0, len(cfg.Video))
 	for i, vc := range cfg.Video {
 		vcfg := vc.VideoStreamConfig()
 		vcfg.Monitor = mon
 		vcfg.HeartbeatName = videoHeartbeatNames[i]
+		vcfg.RotateInterval = cfg.SessionRotateInterval
+		vcfg.ScratchDir = filepath.Join(recordingsDir, ".rotating", vc.Name)
 		if vcfg.FramesFile == "" {
-			ext := filepath.Ext(vcfg.OutputFile)
-			stem := vcfg.OutputFile[:len(vcfg.OutputFile)-len(ext)]
-			vcfg.FramesFile = stem + "_frames.csv"
+			vcfg.FramesFile = framesFileFor(vcfg.OutputFile, "_frames.csv")
 		}
-		rs.videoStreams = append(rs.videoStreams, video.New(vcfg))
+		p.videoStreams = append(p.videoStreams, video.New(vcfg))
 	}
 
 	audioCfg := cfg.Audio.AudioStreamConfig()
 	audioCfg.Monitor = mon
+	audioCfg.RotateInterval = cfg.SessionRotateInterval
+	audioCfg.ScratchDir = filepath.Join(recordingsDir, ".rotating", "audio")
 	if audioCfg.FramesFile == "" {
-		ext := filepath.Ext(audioCfg.OutputFile)
-		stem := audioCfg.OutputFile[:len(audioCfg.OutputFile)-len(ext)]
-		audioCfg.FramesFile = stem + "_packets.csv"
+		audioCfg.FramesFile = framesFileFor(audioCfg.OutputFile, "_packets.csv")
 	}
-	rs.audioStream = audio.New(audioCfg)
+	p.audioStream = audio.New(audioCfg)
+
+	return p
+}
+
+func (p *persistentStreams) start() {
+	if p.lidarStream != nil {
+		p.lidarStream.Start()
+	}
+	if p.pointCloudStream != nil {
+		p.pointCloudStream.Start()
+	}
+	if p.depthStream != nil {
+		p.depthStream.Start()
+	}
+	if p.odomStream != nil {
+		p.odomStream.Start()
+	}
+	if p.lowstateStream != nil {
+		p.lowstateStream.Start()
+	}
+	for _, vs := range p.videoStreams {
+		vs.Start()
+	}
+	p.audioStream.Start()
+}
+
+func (p *persistentStreams) stop() {
+	if p.lidarStream != nil {
+		p.lidarStream.Stop()
+	}
+	if p.pointCloudStream != nil {
+		p.pointCloudStream.Stop()
+	}
+	if p.depthStream != nil {
+		p.depthStream.Stop()
+	}
+	if p.odomStream != nil {
+		p.odomStream.Stop()
+	}
+	if p.lowstateStream != nil {
+		p.lowstateStream.Stop()
+	}
+	for _, vs := range p.videoStreams {
+		vs.Stop()
+	}
+	p.audioStream.Stop()
+}
+
+// rotate switches every persistent stream's output to cfg's session
+// directory without resubscribing or reconnecting.
+func (p *persistentStreams) rotate(cfg config.Config) {
+	if p.lidarStream != nil {
+		if err := p.lidarStream.Rotate(cfg.Lidar.DataFile, cfg.Lidar.TimestampsFile); err != nil {
+			slog.Error("lidar: rotate failed", "err", err)
+		}
+	}
+	if p.pointCloudStream != nil {
+		if err := p.pointCloudStream.Rotate(cfg.PointCloud.DataFile, cfg.PointCloud.TimestampsFile); err != nil {
+			slog.Error("pointcloud: rotate failed", "err", err)
+		}
+	}
+	if p.depthStream != nil {
+		if err := p.depthStream.Rotate(cfg.Depth.DataFile, cfg.Depth.TimestampsFile); err != nil {
+			slog.Error("depth: rotate failed", "err", err)
+		}
+	}
+	if p.odomStream != nil {
+		if err := p.odomStream.Rotate(cfg.Odom.DataFile, cfg.Odom.TimestampsFile); err != nil {
+			slog.Error("odom: rotate failed", "err", err)
+		}
+	}
+	if p.lowstateStream != nil {
+		if err := p.lowstateStream.Rotate(cfg.Lowstate.DataFile, cfg.Lowstate.TimestampsFile); err != nil {
+			slog.Error("lowstate: rotate failed", "err", err)
+		}
+	}
+	for i, vs := range p.videoStreams {
+		vc := cfg.Video[i]
+		vs.Rotate(vc.TimestampsFile, framesFileFor(vc.OutputFile, "_frames.csv"))
+	}
+	p.audioStream.Rotate(cfg.Audio.TimestampsFile, framesFileFor(cfg.Audio.OutputFile, "_packets.csv"))
+}
+
+// framesFileFor derives the per-frame timestamps CSV path that sits
+// alongside outputFile; config.go's VideoConfig/AudioConfig don't carry a
+// FramesFile of their own.
+func framesFileFor(outputFile, suffix string) string {
+	ext := filepath.Ext(outputFile)
+	return outputFile[:len(outputFile)-len(ext)] + suffix
+}
+
+// recorderSet is every stream started for one session; disabled streams are left nil.
+type recorderSet struct {
+	featureStream *features.FeatureStream
+	networkStream *network.NetworkStream
+	persistent    persistentStreams
+}
+
+// startEphemeral builds and starts every stream that gets rebuilt on each
+// session rotation -- everything except persistentStreams.
+func startEphemeral(cfg config.Config, mon *heartbeat.Monitor) *recorderSet {
+	rs := &recorderSet{}
 
 	if cfg.Features.Enabled() {
 		featureCfg := cfg.Features.FeatureStreamConfig()
@@ -410,90 +548,40 @@ func startRecorders(cfg config.Config, mon *heartbeat.Monitor, videoHeartbeatNam
 		rs.featureStream = features.New(featureCfg)
 	}
 
-	if cfg.EnableLidar {
-		lidarCfg := cfg.Lidar.LidarStreamConfig()
-		lidarCfg.Monitor = mon
-		rs.lidarStream = lidar.New(lidarCfg)
-	}
-
-	if cfg.EnablePointCloud {
-		pointCloudCfg := cfg.PointCloud.PointCloudStreamConfig()
-		pointCloudCfg.Monitor = mon
-		rs.pointCloudStream = pointcloud.New(pointCloudCfg)
-	}
-
-	if cfg.EnableDepth {
-		depthCfg := cfg.Depth.DepthStreamConfig()
-		depthCfg.Monitor = mon
-		rs.depthStream = depth.New(depthCfg)
-	}
-
-	if cfg.EnableOdom {
-		odomCfg := cfg.Odom.OdomStreamConfig()
-		odomCfg.Monitor = mon
-		rs.odomStream = odom.New(odomCfg)
-	}
-
-	if cfg.EnableLowstate {
-		lowstateCfg := cfg.Lowstate.LowstateStreamConfig()
-		lowstateCfg.Monitor = mon
-		rs.lowstateStream = lowstate.New(lowstateCfg)
-	}
-
 	networkCfg := cfg.Network.NetworkStreamConfig()
 	networkCfg.Monitor = mon
 	rs.networkStream = network.New(networkCfg)
 
-	for _, vs := range rs.videoStreams {
-		vs.Start()
-	}
-	rs.audioStream.Start()
 	if rs.featureStream != nil {
 		rs.featureStream.Start()
-	}
-	if rs.lidarStream != nil {
-		rs.lidarStream.Start()
-	}
-	if rs.pointCloudStream != nil {
-		rs.pointCloudStream.Start()
-	}
-	if rs.depthStream != nil {
-		rs.depthStream.Start()
-	}
-	if rs.odomStream != nil {
-		rs.odomStream.Start()
-	}
-	if rs.lowstateStream != nil {
-		rs.lowstateStream.Start()
 	}
 	rs.networkStream.Start()
 
 	return rs
 }
 
-// Stop stops every stream in the set, blocking until each has flushed to disk.
-func (rs *recorderSet) Stop() {
-	for _, vs := range rs.videoStreams {
-		vs.Stop()
-	}
-	rs.audioStream.Stop()
+// stopEphemeral stops every stream that gets rebuilt on each session
+// rotation, blocking until each has flushed to disk. rs.persistent is left
+// running; see persistentStreams.rotate.
+func (rs *recorderSet) stopEphemeral() {
 	if rs.featureStream != nil {
 		rs.featureStream.Stop()
 	}
-	if rs.lidarStream != nil {
-		rs.lidarStream.Stop()
-	}
-	if rs.pointCloudStream != nil {
-		rs.pointCloudStream.Stop()
-	}
-	if rs.depthStream != nil {
-		rs.depthStream.Stop()
-	}
-	if rs.odomStream != nil {
-		rs.odomStream.Stop()
-	}
-	if rs.lowstateStream != nil {
-		rs.lowstateStream.Stop()
-	}
 	rs.networkStream.Stop()
+}
+
+// startRecorders builds and starts every stream for cfg's session directory,
+// including the persistent streams. Used for the very first session and
+// whenever recording resumes after a real pause.
+func startRecorders(cfg config.Config, mon *heartbeat.Monitor, recordingsDir string, videoHeartbeatNames []string) *recorderSet {
+	rs := startEphemeral(cfg, mon)
+	rs.persistent = newPersistentStreams(cfg, mon, recordingsDir, videoHeartbeatNames)
+	rs.persistent.start()
+	return rs
+}
+
+// Stop stops every stream in the set, blocking until each has flushed to disk.
+func (rs *recorderSet) Stop() {
+	rs.stopEphemeral()
+	rs.persistent.stop()
 }
