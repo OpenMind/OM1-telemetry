@@ -208,8 +208,6 @@ func EnforceRetentionCap(ctl *control.State, recordingsDir string, dirs []string
 	}
 
 	deleteDir := func(dir string) bool {
-		// Claim dir first so a delete can never land while an upload of the
-		// same directory is in flight -- see UploadSession.
 		if !ctl.TryClaimDir(dir) {
 			slog.Info("retention: skipping delete, dir is in flight", "dir", dir)
 			return false
@@ -238,7 +236,7 @@ func EnforceRetentionCap(ctl *control.State, recordingsDir string, dirs []string
 	}
 
 	deleted := make(map[string]bool, len(dirs))
-	for _, dir := range dirs { // pass 1: already-uploaded directories only
+	for _, dir := range dirs {
 		if total <= maxBytes {
 			break
 		}
@@ -287,8 +285,6 @@ func RunSweeps(ctx context.Context, uploader *upload.Client, recordingsDir, boot
 
 	var wg sync.WaitGroup
 
-	// MaxBytes <= 0 disables the disk-space cap only -- catch-up uploads below
-	// run independently of it.
 	if cfg.MaxBytes > 0 {
 		wg.Add(1)
 		go func() {
