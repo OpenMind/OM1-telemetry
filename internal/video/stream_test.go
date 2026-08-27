@@ -142,9 +142,9 @@ func TestFinishSegment_relocatesFileIndexesItAndPrefixesWithStem(t *testing.T) {
 		OutputFile: filepath.Join(t.TempDir(), "front_camera.mp4"),
 		ScratchDir: scratchDir,
 	})
-	stream.Rotate(filepath.Join(sessionDir, "front_camera_timestamps.csv"), "") // no frames file: skip async ffprobe
-
 	processStart := time.Unix(1_800_000_000, 0)
+	stream.Rotate(processStart, filepath.Join(sessionDir, "front_camera_timestamps.csv"), "") // no frames file: skip async ffprobe
+
 	stream.finishSegment(scratchFile, 12.5, processStart, 5_000_000_000)
 
 	wantFinal := filepath.Join(sessionDir, "front_camera_20260826T185832.mp4")
@@ -174,9 +174,9 @@ func TestWatchSegments_joinsBareFilenameFromSegmentListWithScratchDir(t *testing
 		OutputFile: filepath.Join(t.TempDir(), "front_camera.mp4"),
 		ScratchDir: scratchDir,
 	})
-	stream.Rotate(filepath.Join(sessionDir, "front_camera_timestamps.csv"), "")
-
 	processStart := time.Unix(1_800_000_000, 0)
+	stream.Rotate(processStart, filepath.Join(sessionDir, "front_camera_timestamps.csv"), "")
+
 	stream.watchSegments(strings.NewReader("20260826T185832.mp4,0.000000,3.000000\n"), processStart, 0)
 
 	require.FileExists(t, filepath.Join(sessionDir, "front_camera_20260826T185832.mp4"),
@@ -201,12 +201,43 @@ func TestRotate_installsNewTargetForSubsequentSegments(t *testing.T) {
 	stream.finishSegment(seg1, 0, time.Now(), 0)
 	require.FileExists(t, filepath.Join(firstDir, "front_camera_seg1.mp4"))
 
-	stream.Rotate(filepath.Join(secondDir, "front_camera_timestamps.csv"), "")
+	stream.Rotate(time.Now(), filepath.Join(secondDir, "front_camera_timestamps.csv"), "")
 
 	seg2 := filepath.Join(scratchDir, "seg2.mp4")
 	require.NoError(t, os.WriteFile(seg2, []byte("b"), 0o644))
 	stream.finishSegment(seg2, 0, time.Now(), 0)
 	require.FileExists(t, filepath.Join(secondDir, "front_camera_seg2.mp4"), "after Rotate, new segments must land in the new session directory")
+}
+
+// Regression: targetFor must attribute by the segment's own timestamp even
+// when Rotate for the next session has already run.
+func TestTargetFor_attributesByOwnTimestampEvenWhenRotateRacesAhead(t *testing.T) {
+	scratchDir := t.TempDir()
+	sessionNDir := t.TempDir()
+	sessionN1Dir := t.TempDir()
+
+	sessionNStart := time.Unix(1_800_000_000, 0)
+	sessionN1Start := sessionNStart.Add(10 * time.Second)
+
+	stream := New(Config{
+		RTSPURL:        "rtsp://192.0.2.1:8554/unreachable",
+		OutputFile:     filepath.Join(t.TempDir(), "front_camera.mp4"),
+		TimestampsFile: filepath.Join(sessionNDir, "front_camera_timestamps.csv"),
+		SessionStart:   sessionNStart,
+		ScratchDir:     scratchDir,
+	})
+	stream.ensureTarget()
+
+	stream.Rotate(sessionN1Start, filepath.Join(sessionN1Dir, "front_camera_timestamps.csv"), "")
+
+	seg := filepath.Join(scratchDir, "seg.mp4")
+	require.NoError(t, os.WriteFile(seg, []byte("a"), 0o644))
+
+	stream.finishSegment(seg, 0, sessionNStart.Add(5*time.Second), 0)
+
+	require.FileExists(t, filepath.Join(sessionNDir, "front_camera_seg.mp4"),
+		"a segment that started during session N must land in session N's directory, even if Rotate for N+1 already ran")
+	require.NoFileExists(t, filepath.Join(sessionN1Dir, "front_camera_seg.mp4"))
 }
 
 func TestAppendSegmentEntry_emptyPath_isNoOp(t *testing.T) {

@@ -35,6 +35,8 @@ type Config struct {
 	OutputFile     string
 	TimestampsFile string
 	FramesFile     string
+	// SessionStart is the first session's start time.
+	SessionStart time.Time
 
 	// RotateInterval sets ffmpeg's segment_time; zero uses fallbackSegmentTime.
 	RotateInterval time.Duration
@@ -44,6 +46,9 @@ type Config struct {
 
 	Monitor *heartbeat.Monitor
 }
+
+// maxTargets bounds how many recent segmentTargets a stream retains.
+const maxTargets = 4
 
 type AudioRTSPStream struct {
 	cfg     Config
@@ -55,12 +60,12 @@ type AudioRTSPStream struct {
 	allDone chan struct{}
 
 	targetMu sync.Mutex
-	target   *segmentTarget
+	targets  []*segmentTarget
 }
 
-// segmentTarget is where finished segments currently get relocated, logged,
-// and have their frames extracted -- swapped by Rotate.
+// segmentTarget is one session's relocation/indexing destination.
 type segmentTarget struct {
+	sessionStart   time.Time
 	timestampsFile string
 	framesWrite    *recordutil.FrameCSVWriter
 }
@@ -95,12 +100,15 @@ func (a *AudioRTSPStream) Stop() {
 	slog.Info("audio stream stopped")
 }
 
-// Rotate switches where finished segments land, without touching the
-// underlying ffmpeg process or its RTSP connection -- so a session rotation
-// never drops audio the way a Stop+Start cycle would.
-func (a *AudioRTSPStream) Rotate(timestampsFile, framesFile string) {
+// Rotate adds sessionStart's directory as a new relocation target, without
+// touching the underlying ffmpeg process or its RTSP connection.
+func (a *AudioRTSPStream) Rotate(sessionStart time.Time, timestampsFile, framesFile string) {
+	t := newSegmentTarget(sessionStart, timestampsFile, framesFile)
 	a.targetMu.Lock()
-	a.target = newSegmentTarget(timestampsFile, framesFile)
+	a.targets = append(a.targets, t)
+	if len(a.targets) > maxTargets {
+		a.targets = a.targets[len(a.targets)-maxTargets:]
+	}
 	a.targetMu.Unlock()
 }
 
@@ -109,23 +117,34 @@ func (a *AudioRTSPStream) Rotate(timestampsFile, framesFile string) {
 func (a *AudioRTSPStream) ensureTarget() {
 	a.targetMu.Lock()
 	defer a.targetMu.Unlock()
-	if a.target == nil {
-		a.target = newSegmentTarget(a.cfg.TimestampsFile, a.cfg.FramesFile)
+	if len(a.targets) == 0 {
+		a.targets = append(a.targets, newSegmentTarget(a.cfg.SessionStart, a.cfg.TimestampsFile, a.cfg.FramesFile))
 	}
 }
 
-func newSegmentTarget(timestampsFile, framesFile string) *segmentTarget {
+func newSegmentTarget(sessionStart time.Time, timestampsFile, framesFile string) *segmentTarget {
 	var fw *recordutil.FrameCSVWriter
 	if framesFile != "" {
 		fw = recordutil.NewFrameCSVWriter(framesFile)
 	}
-	return &segmentTarget{timestampsFile: timestampsFile, framesWrite: fw}
+	return &segmentTarget{sessionStart: sessionStart, timestampsFile: timestampsFile, framesWrite: fw}
 }
 
-func (a *AudioRTSPStream) currentTarget() *segmentTarget {
+// targetFor returns the target whose session started most recently at or
+// before startWallClock.
+func (a *AudioRTSPStream) targetFor(startWallClock time.Time) *segmentTarget {
 	a.targetMu.Lock()
 	defer a.targetMu.Unlock()
-	return a.target
+	best := a.targets[0]
+	for _, t := range a.targets[1:] {
+		if t.sessionStart.After(startWallClock) {
+			continue
+		}
+		if t.sessionStart.After(best.sessionStart) {
+			best = t
+		}
+	}
+	return best
 }
 
 func (a *AudioRTSPStream) loop(ctx context.Context) {
@@ -272,9 +291,9 @@ func parseSegmentListLine(line string) (file string, startSeconds float64, ok bo
 // into the current target's session directory, indexes it, and kicks off
 // its (async) frame extraction.
 func (a *AudioRTSPStream) finishSegment(scratchFile string, startSeconds float64, processStart time.Time, processStartMonoNs int64) {
-	target := a.currentTarget()
 	startWallClock := processStart.Add(time.Duration(startSeconds * float64(time.Second)))
 	startMonoNs := processStartMonoNs + int64(startSeconds*float64(time.Second))
+	target := a.targetFor(startWallClock)
 
 	finalFile := filepath.Join(filepath.Dir(target.timestampsFile),
 		fmt.Sprintf("%s_%s", a.stem, filepath.Base(scratchFile)))

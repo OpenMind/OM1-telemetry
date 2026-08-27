@@ -120,7 +120,7 @@ func main() {
 	sweepCtx, sweepCancel := context.WithCancel(context.Background())
 	go retention.RunSweeps(sweepCtx, uploader, recordingsDir, bootTimebasePath, currentDirFn, cfg.Retention, ctl)
 
-	rs := startRecorders(cfg, mon, recordingsDir, videoHeartbeatNames)
+	rs := startRecorders(cfg, mon, recordingsDir, sess, videoHeartbeatNames)
 
 	videoURLs := make([]string, 0, len(cfg.Video))
 	for _, vc := range cfg.Video {
@@ -209,7 +209,7 @@ func main() {
 
 		sess, cfg = next, nextCfg
 		registerHeartbeats(mon, cfg, videoHeartbeatNames)
-		rs = startRecorders(cfg, mon, recordingsDir, videoHeartbeatNames)
+		rs = startRecorders(cfg, mon, recordingsDir, sess, videoHeartbeatNames)
 		ctl.SetRecording(true)
 		slog.Info("recording resumed by schedule", "session", sess.RealDir())
 		return nil
@@ -281,7 +281,7 @@ loop:
 			persistent := rs.persistent
 			rs = startEphemeral(cfg, mon)
 			rs.persistent = persistent
-			rs.persistent.rotate(cfg)
+			rs.persistent.rotate(cfg, sess)
 
 			slog.Info("session rotated", "session", sess.RealDir())
 
@@ -385,8 +385,10 @@ type persistentStreams struct {
 	audioStream      *audio.AudioRTSPStream
 }
 
-func newPersistentStreams(cfg config.Config, mon *heartbeat.Monitor, recordingsDir string, videoHeartbeatNames []string) persistentStreams {
+func newPersistentStreams(cfg config.Config, mon *heartbeat.Monitor, recordingsDir string, sess *session.Session, videoHeartbeatNames []string) persistentStreams {
 	var p persistentStreams
+	sessionStart := time.Unix(0, sess.StartUnixNs())
+	sessionRealDir := sess.RealDir()
 
 	if cfg.EnableLidar {
 		lidarCfg := cfg.Lidar.LidarStreamConfig()
@@ -421,8 +423,13 @@ func newPersistentStreams(cfg config.Config, mon *heartbeat.Monitor, recordingsD
 		vcfg.HeartbeatName = videoHeartbeatNames[i]
 		vcfg.RotateInterval = cfg.SessionRotateInterval
 		vcfg.ScratchDir = filepath.Join(recordingsDir, ".rotating", vc.Name)
+		vcfg.SessionStart = sessionStart
+		vcfg.OutputFile = realPath(vcfg.OutputFile, sessionRealDir)
+		vcfg.TimestampsFile = realPath(vcfg.TimestampsFile, sessionRealDir)
 		if vcfg.FramesFile == "" {
 			vcfg.FramesFile = framesFileFor(vcfg.OutputFile, "_frames.csv")
+		} else {
+			vcfg.FramesFile = realPath(vcfg.FramesFile, sessionRealDir)
 		}
 		p.videoStreams = append(p.videoStreams, video.New(vcfg))
 	}
@@ -431,8 +438,13 @@ func newPersistentStreams(cfg config.Config, mon *heartbeat.Monitor, recordingsD
 	audioCfg.Monitor = mon
 	audioCfg.RotateInterval = cfg.SessionRotateInterval
 	audioCfg.ScratchDir = filepath.Join(recordingsDir, ".rotating", "audio")
+	audioCfg.SessionStart = sessionStart
+	audioCfg.OutputFile = realPath(audioCfg.OutputFile, sessionRealDir)
+	audioCfg.TimestampsFile = realPath(audioCfg.TimestampsFile, sessionRealDir)
 	if audioCfg.FramesFile == "" {
 		audioCfg.FramesFile = framesFileFor(audioCfg.OutputFile, "_packets.csv")
+	} else {
+		audioCfg.FramesFile = realPath(audioCfg.FramesFile, sessionRealDir)
 	}
 	p.audioStream = audio.New(audioCfg)
 
@@ -483,9 +495,11 @@ func (p *persistentStreams) stop() {
 	p.audioStream.Stop()
 }
 
-// rotate switches every persistent stream's output to cfg's session
+// rotate switches every persistent stream's output to sess's session
 // directory without resubscribing or reconnecting.
-func (p *persistentStreams) rotate(cfg config.Config) {
+func (p *persistentStreams) rotate(cfg config.Config, sess *session.Session) {
+	sessionStart := time.Unix(0, sess.StartUnixNs())
+	sessionRealDir := sess.RealDir()
 	if p.lidarStream != nil {
 		if err := p.lidarStream.Rotate(cfg.Lidar.DataFile, cfg.Lidar.TimestampsFile); err != nil {
 			slog.Error("lidar: rotate failed", "err", err)
@@ -513,9 +527,19 @@ func (p *persistentStreams) rotate(cfg config.Config) {
 	}
 	for i, vs := range p.videoStreams {
 		vc := cfg.Video[i]
-		vs.Rotate(vc.TimestampsFile, framesFileFor(vc.OutputFile, "_frames.csv"))
+		out := realPath(vc.OutputFile, sessionRealDir)
+		ts := realPath(vc.TimestampsFile, sessionRealDir)
+		vs.Rotate(sessionStart, ts, framesFileFor(out, "_frames.csv"))
 	}
-	p.audioStream.Rotate(cfg.Audio.TimestampsFile, framesFileFor(cfg.Audio.OutputFile, "_packets.csv"))
+	audioOut := realPath(cfg.Audio.OutputFile, sessionRealDir)
+	audioTs := realPath(cfg.Audio.TimestampsFile, sessionRealDir)
+	p.audioStream.Rotate(sessionStart, audioTs, framesFileFor(audioOut, "_packets.csv"))
+}
+
+// realPath rewrites path to sit in realDir instead of whatever directory it
+// was built from.
+func realPath(path, realDir string) string {
+	return filepath.Join(realDir, filepath.Base(path))
 }
 
 // framesFileFor derives the per-frame timestamps CSV path that sits
@@ -567,11 +591,10 @@ func (rs *recorderSet) stopEphemeral() {
 }
 
 // startRecorders builds and starts every stream for cfg's session directory,
-// including the persistent streams. Used for the very first session and
-// whenever recording resumes after a real pause.
-func startRecorders(cfg config.Config, mon *heartbeat.Monitor, recordingsDir string, videoHeartbeatNames []string) *recorderSet {
+// including the persistent streams.
+func startRecorders(cfg config.Config, mon *heartbeat.Monitor, recordingsDir string, sess *session.Session, videoHeartbeatNames []string) *recorderSet {
 	rs := startEphemeral(cfg, mon)
-	rs.persistent = newPersistentStreams(cfg, mon, recordingsDir, videoHeartbeatNames)
+	rs.persistent = newPersistentStreams(cfg, mon, recordingsDir, sess, videoHeartbeatNames)
 	rs.persistent.start()
 	return rs
 }

@@ -100,9 +100,9 @@ func TestFinishSegment_relocatesFileIndexesItAndPrefixesWithStem(t *testing.T) {
 		OutputFile: filepath.Join(t.TempDir(), "audio.ogg"),
 		ScratchDir: scratchDir,
 	})
-	stream.Rotate(filepath.Join(sessionDir, "audio_timestamps.csv"), "") // no frames file: skip async ffprobe
-
 	processStart := time.Unix(1_800_000_000, 0)
+	stream.Rotate(processStart, filepath.Join(sessionDir, "audio_timestamps.csv"), "") // no frames file: skip async ffprobe
+
 	stream.finishSegment(scratchFile, 12.5, processStart, 5_000_000_000)
 
 	wantFinal := filepath.Join(sessionDir, "audio_20260826T185832.ogg")
@@ -132,9 +132,9 @@ func TestWatchSegments_joinsBareFilenameFromSegmentListWithScratchDir(t *testing
 		OutputFile: filepath.Join(t.TempDir(), "audio.ogg"),
 		ScratchDir: scratchDir,
 	})
-	stream.Rotate(filepath.Join(sessionDir, "audio_timestamps.csv"), "")
-
 	processStart := time.Unix(1_800_000_000, 0)
+	stream.Rotate(processStart, filepath.Join(sessionDir, "audio_timestamps.csv"), "")
+
 	stream.watchSegments(strings.NewReader("20260826T185832.ogg,0.000000,3.000000\n"), processStart, 0)
 
 	require.FileExists(t, filepath.Join(sessionDir, "audio_20260826T185832.ogg"),
@@ -159,12 +159,43 @@ func TestRotate_installsNewTargetForSubsequentSegments(t *testing.T) {
 	stream.finishSegment(seg1, 0, time.Now(), 0)
 	require.FileExists(t, filepath.Join(firstDir, "audio_seg1.ogg"))
 
-	stream.Rotate(filepath.Join(secondDir, "audio_timestamps.csv"), "")
+	stream.Rotate(time.Now(), filepath.Join(secondDir, "audio_timestamps.csv"), "")
 
 	seg2 := filepath.Join(scratchDir, "seg2.ogg")
 	require.NoError(t, os.WriteFile(seg2, []byte("b"), 0o644))
 	stream.finishSegment(seg2, 0, time.Now(), 0)
 	require.FileExists(t, filepath.Join(secondDir, "audio_seg2.ogg"), "after Rotate, new segments must land in the new session directory")
+}
+
+// Regression: targetFor must attribute by the segment's own timestamp even
+// when Rotate for the next session has already run.
+func TestTargetFor_attributesByOwnTimestampEvenWhenRotateRacesAhead(t *testing.T) {
+	scratchDir := t.TempDir()
+	sessionNDir := t.TempDir()
+	sessionN1Dir := t.TempDir()
+
+	sessionNStart := time.Unix(1_800_000_000, 0)
+	sessionN1Start := sessionNStart.Add(10 * time.Second)
+
+	stream := New(Config{
+		RTSPURL:        "rtsp://192.0.2.1:8554/unreachable",
+		OutputFile:     filepath.Join(t.TempDir(), "audio.ogg"),
+		TimestampsFile: filepath.Join(sessionNDir, "audio_timestamps.csv"),
+		SessionStart:   sessionNStart,
+		ScratchDir:     scratchDir,
+	})
+	stream.ensureTarget()
+
+	stream.Rotate(sessionN1Start, filepath.Join(sessionN1Dir, "audio_timestamps.csv"), "")
+
+	seg := filepath.Join(scratchDir, "seg.ogg")
+	require.NoError(t, os.WriteFile(seg, []byte("a"), 0o644))
+
+	stream.finishSegment(seg, 0, sessionNStart.Add(5*time.Second), 0)
+
+	require.FileExists(t, filepath.Join(sessionNDir, "audio_seg.ogg"),
+		"a segment that started during session N must land in session N's directory, even if Rotate for N+1 already ran")
+	require.NoFileExists(t, filepath.Join(sessionN1Dir, "audio_seg.ogg"))
 }
 
 func TestAppendSegmentEntry_emptyPath_isNoOp(t *testing.T) {

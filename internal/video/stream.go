@@ -35,6 +35,8 @@ type Config struct {
 	OutputFile     string
 	TimestampsFile string
 	FramesFile     string
+	// SessionStart is the first session's start time.
+	SessionStart time.Time
 
 	// RotateInterval sets ffmpeg's segment_time; zero uses fallbackSegmentTime.
 	RotateInterval time.Duration
@@ -47,6 +49,9 @@ type Config struct {
 	HeartbeatName string
 }
 
+// maxTargets bounds how many recent segmentTargets a stream retains.
+const maxTargets = 4
+
 type VideoRTSPStream struct {
 	cfg     Config
 	stem    string // relocated-filename prefix, fixed at construction
@@ -57,12 +62,12 @@ type VideoRTSPStream struct {
 	allDone chan struct{}
 
 	targetMu sync.Mutex
-	target   *segmentTarget
+	targets  []*segmentTarget
 }
 
-// segmentTarget is where finished segments currently get relocated, logged,
-// and have their frames extracted -- swapped by Rotate.
+// segmentTarget is one session's relocation/indexing destination.
 type segmentTarget struct {
+	sessionStart   time.Time
 	timestampsFile string
 	framesWrite    *recordutil.FrameCSVWriter
 }
@@ -101,12 +106,15 @@ func (v *VideoRTSPStream) Stop() {
 	slog.Info("video stream stopped", "camera", v.cfg.HeartbeatName)
 }
 
-// Rotate switches where finished segments land, without touching the
-// underlying ffmpeg process or its RTSP connection -- so a session rotation
-// never drops a frame the way a Stop+Start cycle would.
-func (v *VideoRTSPStream) Rotate(timestampsFile, framesFile string) {
+// Rotate adds sessionStart's directory as a new relocation target, without
+// touching the underlying ffmpeg process or its RTSP connection.
+func (v *VideoRTSPStream) Rotate(sessionStart time.Time, timestampsFile, framesFile string) {
+	t := newSegmentTarget(sessionStart, timestampsFile, framesFile)
 	v.targetMu.Lock()
-	v.target = newSegmentTarget(timestampsFile, framesFile)
+	v.targets = append(v.targets, t)
+	if len(v.targets) > maxTargets {
+		v.targets = v.targets[len(v.targets)-maxTargets:]
+	}
 	v.targetMu.Unlock()
 }
 
@@ -115,23 +123,34 @@ func (v *VideoRTSPStream) Rotate(timestampsFile, framesFile string) {
 func (v *VideoRTSPStream) ensureTarget() {
 	v.targetMu.Lock()
 	defer v.targetMu.Unlock()
-	if v.target == nil {
-		v.target = newSegmentTarget(v.cfg.TimestampsFile, v.cfg.FramesFile)
+	if len(v.targets) == 0 {
+		v.targets = append(v.targets, newSegmentTarget(v.cfg.SessionStart, v.cfg.TimestampsFile, v.cfg.FramesFile))
 	}
 }
 
-func newSegmentTarget(timestampsFile, framesFile string) *segmentTarget {
+func newSegmentTarget(sessionStart time.Time, timestampsFile, framesFile string) *segmentTarget {
 	var fw *recordutil.FrameCSVWriter
 	if framesFile != "" {
 		fw = recordutil.NewFrameCSVWriter(framesFile)
 	}
-	return &segmentTarget{timestampsFile: timestampsFile, framesWrite: fw}
+	return &segmentTarget{sessionStart: sessionStart, timestampsFile: timestampsFile, framesWrite: fw}
 }
 
-func (v *VideoRTSPStream) currentTarget() *segmentTarget {
+// targetFor returns the target whose session started most recently at or
+// before startWallClock.
+func (v *VideoRTSPStream) targetFor(startWallClock time.Time) *segmentTarget {
 	v.targetMu.Lock()
 	defer v.targetMu.Unlock()
-	return v.target
+	best := v.targets[0]
+	for _, t := range v.targets[1:] {
+		if t.sessionStart.After(startWallClock) {
+			continue
+		}
+		if t.sessionStart.After(best.sessionStart) {
+			best = t
+		}
+	}
+	return best
 }
 
 func (v *VideoRTSPStream) loop(ctx context.Context) {
@@ -273,9 +292,9 @@ func parseSegmentListLine(line string) (file string, startSeconds float64, ok bo
 // into the current target's session directory, indexes it, and kicks off
 // its (async) frame extraction.
 func (v *VideoRTSPStream) finishSegment(scratchFile string, startSeconds float64, processStart time.Time, processStartMonoNs int64) {
-	target := v.currentTarget()
 	startWallClock := processStart.Add(time.Duration(startSeconds * float64(time.Second)))
 	startMonoNs := processStartMonoNs + int64(startSeconds*float64(time.Second))
+	target := v.targetFor(startWallClock)
 
 	finalFile := filepath.Join(filepath.Dir(target.timestampsFile),
 		fmt.Sprintf("%s_%s", v.stem, filepath.Base(scratchFile)))
