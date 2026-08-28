@@ -18,6 +18,7 @@ All streams are timestamped and organized into session directories for easy alig
 - **Go 1.25** or later
 - **ffmpeg** installed and available in PATH
 - **CMake + a C compiler** (to build CycloneDDS — see "Build prerequisites" below)
+- **`draco_encoder` on PATH** (optional — only needed for point cloud compression before upload; run `make install-draco` to build it. See "Compressing the large binary streams" below.)
 
 ### Build prerequisites (CycloneDDS)
 
@@ -139,6 +140,17 @@ Any of the following override the selected profile / defaults:
 - `LOWSTATE_DDS_DOMAIN` - CycloneDDS domain ID for lowstate (default: `0`)
 - `LOWSTATE_DDS_TOPIC` - DDS topic for lowstate data (default: `rt/lowstate`)
 - `RECORDINGS_DIR` - Base directory for recordings (default: `recordings`)
+- `SESSION_ROTATE_INTERVAL` - Close the current session and open a fresh one on this cadence, so each segment can be uploaded without waiting for the whole run to end (default: `5m`; `0` disables rotation — one session for the life of the process, as before this feature existed)
+- `UPLOAD_ENABLED` - Upload each rotated-away session to the openmind-api (default: `true`; actual uploading additionally requires `OPENMIND_API_URL` and `OPENMIND_API_KEY` — see "Cloud upload" below)
+- `OPENMIND_API_URL` - Base URL of the openmind-api, e.g. `https://<host>/api/core/v1` (default: empty — upload stays off, recording-only, until this is set)
+- `OPENMIND_API_KEY` - API key sent as `Authorization: Bearer <key>` (default: empty)
+- `DELETE_AFTER_UPLOAD` - Delete a session's local files once it has uploaded successfully (default: `false` — keep everything locally regardless of upload)
+- `UPLOAD_MULTIPART_THRESHOLD_BYTES` - Files at or above this size go through S3 multipart upload instead of a single presigned POST (default: `104857600`, 100 MiB)
+- `UPLOAD_PART_SIZE_BYTES` - Chunk size for multipart uploads (default: `16777216`, 16 MiB)
+- `UPLOAD_CONCURRENCY` - How many of a session's files upload at the same time, instead of one at a time sharing the session's whole upload deadline (default: `4`)
+- `RETENTION_MAX_BYTES` - Hard cap on `RECORDINGS_DIR`'s total size; once exceeded, sessions are deleted oldest first (preferring already-uploaded ones, but not-yet-uploaded ones too if that's what it takes) until it isn't (default: `107374182400`, 100 GiB; `0` disables cap enforcement — see "Retention & the catch-up/cap sweep" below)
+- `RETENTION_SWEEP_INTERVAL` - How often the retention sweep looks for finished-but-not-yet-uploaded sessions and, if over the cap, deletes uploaded ones (default: `5m`)
+- `SCHEDULE_FILE` - Path to a daily recording/uploading schedule (default: empty — no schedule; recording and uploading stay on continuously, exactly as if this feature didn't exist — see "Scheduling" below)
 
 CycloneDDS domain IDs (not endpoints/addresses) are how independent DDS
 "networks" on the same host/subnet are separated — leave at the default `0`
@@ -184,6 +196,34 @@ RECORDINGS_DIR="/path/to/recordings" \
 ./bin/om1-telemetry
 ```
 
+## Docker deployment
+
+The recommended way to run this in production is `docker compose`, not a
+hand-assembled `docker run`:
+
+```bash
+cp .env.example .env   # then fill in ROBOT_TYPE / OPENMIND_API_URL / OPENMIND_API_KEY / RECORDINGS_DIR_HOST
+docker compose up -d --build
+```
+
+`docker-compose.yml` is the canonical reference deployment — it's what sets
+`--network host` (required: the RTSP/DDS sources this recorder subscribes to
+are only reachable on the host's own loopback/network namespace, not a
+container-private one), the recordings volume, and a `stop_grace_period`
+long enough for an in-flight upload to finish before shutdown. The optional
+volumes (`SCHEDULE_FILE`, `/run/systemd/timesync`, `/etc/localtime`) are
+commented out in the file with notes on when to enable each — see
+"Scheduling" below for the two that affect it.
+
+`RECORDINGS_DIR` itself doesn't need setting: the Dockerfile bakes in
+`/app/recordings` to match the compose file's mount point, so you only need
+to point `RECORDINGS_DIR_HOST` (in `.env`) at wherever you want that data to
+land on the host.
+
+If you'd rather not use Compose, `docker build -t om1-telemetry .` plus a
+`docker run` reproducing the same flags works identically — `docker-compose.yml`
+is just that command written down once instead of retyped per deployment.
+
 ## Session Output
 
 Each recording session creates a timestamped directory structure:
@@ -192,7 +232,7 @@ Each recording session creates a timestamped directory structure:
 recordings/
 └── 2026-05-15/
     └── 2026-05-15_14-30-00/
-        ├── meta.json                  # Session metadata (start time, boot id, clock state)
+        ├── meta.json                  # Session metadata (start/end time, boot id, clock state)
         ├── clock_timebase.jsonl       # Monotonic<->UTC journal; see "Recording without a clock"
         ├── front_camera_raw.mp4       # G1: front pre-CV camera recording
         ├── rear_camera_raw.mp4        # G1: rear pre-CV camera recording
@@ -354,6 +394,107 @@ a few ms — the camera recorder would need to read per-frame capture time from
 RTP/RTCP sender reports (e.g. via a `gortsplib`-based client) instead of the
 ffmpeg record-start anchor. That is a larger change and is intentionally not
 done here; the feature-log timeline covers the common case.
+
+## Session rotation & cloud upload
+
+`SESSION_ROTATE_INTERVAL` (default `5m`) closes the current session and
+opens a new one on that cadence, so each segment can be uploaded as it
+finishes rather than waiting for the whole run.
+
+Set `OPENMIND_API_URL` and `OPENMIND_API_KEY` to upload each closed segment
+to the [openmind-api](https://github.com/OpenMind/openmind-api). Uploading
+runs in the background; a failed upload leaves the local files in place and
+retries automatically. `UPLOAD_CONCURRENCY` (default `4`) controls how many
+files in a segment upload at once, and `DELETE_AFTER_UPLOAD` (default
+`false`) removes local files once a segment is confirmed uploaded.
+
+Without both env vars set, the recorder still rotates and records locally — it just doesn't upload.
+
+### Preprocessing before upload
+
+Before a closed session uploads, `internal/upload` converts its JSONL logs
+to JSON (the upload bucket doesn't allow `.jsonl`) and, via
+`internal/compress`, compresses the larger binary streams (`lowstate`,
+`odom`, `lidar`, `depth`, `pointcloud`) — only the compressed files are
+uploaded.
+
+`lowstate`/`odom`/`lidar`/`depth` use zstd, which is lossless, so their
+originals are simply deleted once compression succeeds. `pointcloud` uses
+Draco, which quantizes point positions and so is lossy — its original is
+kept locally under `raw/` instead of being deleted.
+
+Pointcloud compression needs `draco_encoder` on `PATH` — run `make
+install-draco`, or use the Docker image, which already builds it in. If
+it's missing, that one stream just uploads uncompressed instead of failing.
+
+### Retention & the catch-up/cap sweep
+
+The rotation and shutdown upload paths above only ever handle the one
+segment that just closed, and never retry it if that upload fails — a robot
+that's offline for an hour, or a run that crashes mid-upload, would
+otherwise leave that data stuck locally forever. `internal/retention`
+runs a separate sweep, every `RETENTION_SWEEP_INTERVAL`, that:
+
+1. If upload is configured, walks every closed session directory, oldest
+   first, and uploads any that were never confirmed uploaded — the same
+   idempotent `UploadSession` call rotation uses, so a partially-uploaded
+   segment resumes rather than duplicating. A directory is marked uploaded
+   (a `.uploaded` file inside it, never itself uploaded) only after that
+   call succeeds.
+2. If `RECORDINGS_DIR`'s total size is still over `RETENTION_MAX_BYTES`
+   afterward, deletes directories oldest first until it isn't — preferring
+   already-uploaded ones, but falling through to not-yet-uploaded ones if
+   deleting only uploaded directories isn't enough (or none exist, e.g.
+   upload isn't configured at all).
+
+It never touches the session currently being recorded to, or whichever
+segment still physically holds the live `clock_timebase.jsonl` journal (see
+"Interaction with clock trust" below). Otherwise, `RETENTION_MAX_BYTES` is a
+hard cap: a robot that's been offline, or has upload turned off entirely,
+still gets its oldest data deleted rather than filling its disk and
+silently stopping recording — losing the oldest, least-recoverable segment
+is treated as better than that.
+
+### Interaction with clock trust
+
+Each rotated segment is dated (or left in `pending/`) the same way the very
+first session is -- see "Recording without a clock" above -- based on the
+clock's *current* sync state, not the state at process boot: once NTP has
+synchronized, every later segment is dated directly even on a run that
+booted offline. Only the segment that is actually live at the moment the
+clock synchronizes gets promoted out of `pending/`; an earlier segment
+rotated away before that moment stays undated, on purpose, for the same
+reason a `pending/` session from a boot that was never online stays undated
+(see above): its monotonic timeline has nothing to anchor it to UTC.
+
+`clock_timebase.jsonl` is a single, boot-relative journal (one clock, one
+set of step/sync events for the whole process), not a per-segment one -- it
+physically lives in the first session's directory. Every later segment gets
+its own copy of it (a snapshot taken when that segment closes), so each
+segment's directory stays self-contained for `align_recording.py` /
+`fix_session_time.py` without needing the boot session alongside it.
+
+## Scheduling
+
+`SCHEDULE_FILE` points at an optional YAML file describing a daily
+recording/uploading schedule — see `config/schedule.example.yaml` for the
+format. Unset by default: recording and uploading stay on continuously. In
+`docker-compose.yml`, enabling it means uncommenting both the `SCHEDULE_FILE`
+environment line and its matching `schedule.yaml` volume mount.
+
+The schedule's `start`/`end` times are evaluated in the container's own
+local time, which by default is UTC (no time zone configured) -- an
+unmodified `schedule.yaml` should be written in UTC. Uncommenting the
+`/etc/localtime` volume mount too gives the container the host's real local
+time instead, the same way this robot's other containers (e.g. `om1`)
+already get it, so the schedule can be written in local time too.
+
+**This only changes how the schedule's own start/end comparison is
+evaluated.** Session directory names and every recorded timestamp are
+always UTC regardless of the container's local time.
+
+A schedule file that fails to load or parse is treated the same as
+`SCHEDULE_FILE` being unset.
 
 ## Testing
 

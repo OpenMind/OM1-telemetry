@@ -1,4 +1,4 @@
-.PHONY: build run install-cyclonedds check-cyclonedds idl-gen test tidy lint
+.PHONY: build run install-cyclonedds check-cyclonedds install-draco idl-gen test tidy lint
 
 BIN       := om1-telemetry
 CMD       := ./cmd/main
@@ -43,6 +43,29 @@ check-cyclonedds: install-cyclonedds
 	}
 
 export CGO_LDFLAGS := -Wl,-rpath,$(CYCLONEDDS_INSTALL)/lib
+
+DRACO_VERSION := 1.5.7
+DRACO_DIR     := .draco
+DRACO_SRC     := $(shell pwd)/$(DRACO_DIR)/src
+DRACO_INSTALL := $(shell pwd)/$(DRACO_DIR)/install
+
+export PATH := $(DRACO_INSTALL)/bin:$(PATH)
+
+install-draco:
+	@if [ ! -x "$(DRACO_INSTALL)/bin/draco_encoder" ]; then \
+		set -e; \
+		echo "Building draco_encoder ($(DRACO_VERSION)) into $(DRACO_INSTALL)..."; \
+		rm -rf $(DRACO_SRC); \
+		git clone --branch $(DRACO_VERSION) --depth 1 \
+			https://github.com/google/draco.git $(DRACO_SRC); \
+		mkdir -p $(DRACO_SRC)/build; \
+		cd $(DRACO_SRC)/build && cmake -DCMAKE_BUILD_TYPE=Release .. && cmake --build . --target draco_encoder -j; \
+		mkdir -p $(DRACO_INSTALL)/bin; \
+		cp $(DRACO_SRC)/build/draco_encoder $(DRACO_INSTALL)/bin/; \
+		echo "draco_encoder installed to $(DRACO_INSTALL)/bin"; \
+	else \
+		echo "draco_encoder already installed in $(DRACO_INSTALL)/bin"; \
+	fi
 
 idl-gen: check-cyclonedds
 	@mkdir -p $(IDL_GEN_DIR)

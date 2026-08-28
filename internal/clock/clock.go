@@ -176,6 +176,21 @@ func NewWatcher(clk *Clock, path string, onTrusted func(Record)) *Watcher {
 	}
 }
 
+// Trusted reports whether the wall clock has synchronized at some point during this run.
+func (w *Watcher) Trusted() bool {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.trusted
+}
+
+// SyncState summarizes the watcher's current best knowledge of clock trust, in Sync()'s terms.
+func (w *Watcher) SyncState() SyncState {
+	if w.Trusted() {
+		return SyncYes
+	}
+	return SyncNo
+}
+
 func (w *Watcher) Run(ctx context.Context) {
 	f, err := os.OpenFile(w.path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
 	if err != nil {

@@ -15,27 +15,63 @@ import (
 	"om1-telemetry/internal/network"
 	"om1-telemetry/internal/odom"
 	"om1-telemetry/internal/pointcloud"
+	"om1-telemetry/internal/upload"
 	"om1-telemetry/internal/video"
 )
 
 type Config struct {
-	Collect          bool
-	RobotType        RobotType
-	EnableLidar      bool
-	EnablePointCloud bool
-	EnableDepth      bool
-	EnableOdom       bool
-	EnableLowstate   bool
-	SessionDir       string
-	Video            []VideoConfig
-	Audio            AudioConfig
-	Features         FeaturesConfig
-	Lidar            LidarConfig
-	PointCloud       PointCloudConfig
-	Depth            DepthConfig
-	Odom             OdomConfig
-	Lowstate         LowstateConfig
-	Network          NetworkConfig
+	Collect               bool
+	RobotType             RobotType
+	EnableLidar           bool
+	EnablePointCloud      bool
+	EnableDepth           bool
+	EnableOdom            bool
+	EnableLowstate        bool
+	SessionDir            string
+	Video                 []VideoConfig
+	Audio                 AudioConfig
+	Features              FeaturesConfig
+	Lidar                 LidarConfig
+	PointCloud            PointCloudConfig
+	Depth                 DepthConfig
+	Odom                  OdomConfig
+	Lowstate              LowstateConfig
+	Network               NetworkConfig
+	SessionRotateInterval time.Duration
+	Upload                UploadConfig
+	Retention             RetentionConfig
+}
+
+// RetentionConfig bounds local disk usage and the catch-up-upload/disk-cap sweep interval.
+type RetentionConfig struct {
+	MaxBytes      int64
+	SweepInterval time.Duration
+}
+
+// UploadConfig configures uploading finished session directories to the openmind-api.
+type UploadConfig struct {
+	Enabled            bool
+	BaseURL            string
+	APIKey             string
+	DeleteAfterUpload  bool
+	MultipartThreshold int64
+	PartSize           int64
+	Concurrency        int
+}
+
+// Ready reports whether upload is both requested and fully configured.
+func (c UploadConfig) Ready() bool {
+	return c.Enabled && c.BaseURL != "" && c.APIKey != ""
+}
+
+func (c UploadConfig) ClientConfig() upload.Config {
+	return upload.Config{
+		BaseURL:            c.BaseURL,
+		APIKey:             c.APIKey,
+		MultipartThreshold: c.MultipartThreshold,
+		PartSize:           c.PartSize,
+		Concurrency:        c.Concurrency,
+	}
 }
 
 type VideoConfig struct {
@@ -113,6 +149,11 @@ func RecordingsDir() string {
 	return envStr("RECORDINGS_DIR", "recordings")
 }
 
+// ScheduleFile is the path to an optional daily recording/uploading schedule (see internal/schedule).
+func ScheduleFile() string {
+	return envStr("SCHEDULE_FILE", "")
+}
+
 // Load builds the recorder configuration for a session directory the caller
 // has already created.
 //
@@ -144,8 +185,6 @@ func Load(sessionDir string) Config {
 			TimestampsFile: filepath.Join(sessionDir, "audio_timestamps.csv"),
 		},
 		Features: FeaturesConfig{
-			// Path to the video-processor's feature-log JSONL on a shared
-			// volume. Empty (default) disables ingestion.
 			SourcePath:     envStr("VIDEO_FEATURES_LOG", ""),
 			OutputFile:     filepath.Join(sessionDir, "video_features.jsonl"),
 			TimestampsFile: filepath.Join(sessionDir, "video_features_timestamps.csv"),
@@ -187,6 +226,20 @@ func Load(sessionDir string) Config {
 			PingTimeout:  envDuration("NET_PING_TIMEOUT", 2*time.Second),
 			PollInterval: envDuration("NET_POLL_INTERVAL", 5*time.Second),
 			DataFile:     filepath.Join(sessionDir, "network_status.csv"),
+		},
+		SessionRotateInterval: envDuration("SESSION_ROTATE_INTERVAL", 5*time.Minute),
+		Upload: UploadConfig{
+			Enabled:            envBool("UPLOAD_ENABLED", true),
+			BaseURL:            strings.TrimSuffix(envStr("OPENMIND_API_URL", ""), "/"),
+			APIKey:             envStr("OPENMIND_API_KEY", ""),
+			DeleteAfterUpload:  envBool("DELETE_AFTER_UPLOAD", false),
+			MultipartThreshold: envInt64("UPLOAD_MULTIPART_THRESHOLD_BYTES", upload.DefaultMultipartThreshold),
+			PartSize:           envInt64("UPLOAD_PART_SIZE_BYTES", upload.DefaultPartSize),
+			Concurrency:        envInt("UPLOAD_CONCURRENCY", upload.DefaultConcurrency),
+		},
+		Retention: RetentionConfig{
+			MaxBytes:      envInt64("RETENTION_MAX_BYTES", 100*1024*1024*1024),
+			SweepInterval: envDuration("RETENTION_SWEEP_INTERVAL", 5*time.Minute),
 		},
 	}
 }
@@ -313,6 +366,26 @@ func envUint32(key string, defaultValue uint32) uint32 {
 	if value := os.Getenv(key); value != "" {
 		if v, err := strconv.ParseUint(value, 10, 32); err == nil {
 			return uint32(v)
+		}
+	}
+	return defaultValue
+}
+
+func envInt64(key string, defaultValue int64) int64 {
+	if value := os.Getenv(key); value != "" {
+		if v, err := strconv.ParseInt(value, 10, 64); err == nil {
+			return v
+		}
+	}
+	return defaultValue
+}
+
+// envInt is like envInt64, but bitSize 0 tells ParseInt to reject a value
+// that doesn't fit in a native int, so the int64 result is always safe to convert.
+func envInt(key string, defaultValue int) int {
+	if value := os.Getenv(key); value != "" {
+		if v, err := strconv.ParseInt(value, 10, 0); err == nil {
+			return int(v)
 		}
 	}
 	return defaultValue

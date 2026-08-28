@@ -171,9 +171,9 @@ func TestJanitor_recoversSessionUsingItsJournal(t *testing.T) {
 	_, err := os.Stat(dir)
 	require.True(t, os.IsNotExist(err), "the recovered session should have moved out of pending/")
 
-	// Directory names are local time, as they have always been; the recovered
-	// instant is what matters and is asserted below.
-	trueStart := syncWall.Add(-2 * time.Hour).Local()
+	// Directory names are always UTC, regardless of the process's own local
+	// time zone -- see datedDir.
+	trueStart := syncWall.Add(-2 * time.Hour).UTC()
 	recovered := filepath.Join(root, trueStart.Format(dateLayout), trueStart.Format(sessionLayout))
 	data, err := os.ReadFile(filepath.Join(recovered, "lidar_scans.bin"))
 	require.NoError(t, err, "session should be dated two hours before the sync")
@@ -224,6 +224,17 @@ func TestJanitor_noPendingDirIsNotAnError(t *testing.T) {
 }
 
 // Two sessions promoted into the same second must not collide.
+func TestDatedDir_alwaysUsesUTCRegardlessOfInputLocation(t *testing.T) {
+	cdt := time.FixedZone("CDT", -5*60*60) // no tzdata dependency; any non-UTC offset proves the point
+
+	// 2026-07-14 23:30:00 CDT (UTC-5) is 2026-07-15 04:30:00 UTC -- a different calendar date entirely.
+	local := time.Date(2026, 7, 14, 23, 30, 0, 0, cdt)
+
+	got := datedDir("/recordings", local)
+	require.Equal(t, filepath.Join("/recordings", "2026-07-15", "2026-07-15_04-30-00"), got,
+		"the directory name must reflect UTC, not whatever Location the input Time carries")
+}
+
 func TestUniqueDir_avoidsCollision(t *testing.T) {
 	root := t.TempDir()
 	base := filepath.Join(root, "2026-07-14_07-30-00")
@@ -250,4 +261,140 @@ func TestRepointSymlink_isAtomicAndRepeatable(t *testing.T) {
 	target, err = os.Readlink(link)
 	require.NoError(t, err)
 	require.Equal(t, b, target)
+}
+
+func TestOpenNext_trustedClockOpensDistinctDirectories(t *testing.T) {
+	root := t.TempDir()
+	clk := clock.NewWithSync(clock.SyncYes)
+
+	first, err := Open(root, clk)
+	require.NoError(t, err)
+	time.Sleep(1100 * time.Millisecond) // dated dirs are second-granularity
+
+	second, err := OpenNext(root, clk, clock.SyncYes)
+	require.NoError(t, err)
+
+	require.NotEqual(t, first.RealDir(), second.RealDir())
+	require.True(t, datedPattern.MatchString(filepath.Base(second.RealDir())), second.RealDir())
+}
+
+func TestOpenNext_untrustedClockOpensDistinctPendingDirectories(t *testing.T) {
+	root := t.TempDir()
+	clk := clock.NewWithSync(clock.SyncNo)
+
+	first, err := Open(root, clk)
+	require.NoError(t, err)
+	require.True(t, first.Pending())
+
+	second, err := OpenNext(root, clk, clock.SyncNo)
+	require.NoError(t, err)
+	require.True(t, second.Pending())
+
+	require.NotEqual(t, first.RealDir(), second.RealDir())
+}
+
+func TestOpenNext_syncedAfterBootUsesDatedDirectory(t *testing.T) {
+	root := t.TempDir()
+	clk := clock.NewWithSync(clock.SyncNo)
+
+	pending, err := Open(root, clk)
+	require.NoError(t, err)
+	require.True(t, pending.Pending())
+
+	next, err := OpenNext(root, clk, clock.SyncYes)
+	require.NoError(t, err)
+	require.False(t, next.Pending())
+	require.True(t, datedPattern.MatchString(filepath.Base(next.RealDir())), next.RealDir())
+}
+
+func TestClose_recordsEndTime(t *testing.T) {
+	root := t.TempDir()
+	clk := clock.NewWithSync(clock.SyncYes)
+
+	s, err := Open(root, clk)
+	require.NoError(t, err)
+	time.Sleep(5 * time.Millisecond)
+
+	require.NoError(t, s.Close())
+
+	raw, err := os.ReadFile(filepath.Join(s.RealDir(), metaFileName))
+	require.NoError(t, err)
+	var m Meta
+	require.NoError(t, json.Unmarshal(raw, &m))
+
+	require.NotZero(t, m.SessionEndUnixNs)
+	require.Greater(t, m.SessionEndUnixNs, m.SessionStartUnixNs)
+	require.NotZero(t, m.SessionEndMonoNs)
+}
+
+// Guards against reusing the process's boot time to date a rotated-away segment.
+func TestPromote_datesFromThisSessionsOwnStart(t *testing.T) {
+	root := t.TempDir()
+	clk := clock.NewWithSync(clock.SyncNo)
+
+	first, err := Open(root, clk)
+	require.NoError(t, err)
+	require.True(t, first.Pending())
+
+	time.Sleep(50 * time.Millisecond)
+
+	second, err := OpenNext(root, clk, clock.SyncNo)
+	require.NoError(t, err)
+	require.True(t, second.Pending())
+	secondPending := second.RealDir()
+
+	require.NoError(t, second.Promote())
+	require.False(t, second.Pending())
+	require.NotEqual(t, secondPending, second.RealDir())
+
+	raw, err := os.ReadFile(filepath.Join(second.RealDir(), metaFileName))
+	require.NoError(t, err)
+	var m Meta
+	require.NoError(t, json.Unmarshal(raw, &m))
+	require.True(t, m.StartTimeCorrected)
+
+	require.Equal(t, second.startMonoNs, m.SessionStartMonoNs)
+	require.NotEqual(t, first.startMonoNs, second.startMonoNs)
+
+	gotStart := time.Unix(0, m.SessionStartUnixNs)
+	require.WithinDuration(t, time.Now(), gotStart, 2*time.Second)
+}
+
+func TestListClosed_returnsDatedDirsOldestFirst(t *testing.T) {
+	root := t.TempDir()
+	mkSessionDir(t, root, "2026-08-14", "2026-08-14_20-36-00")
+	mkSessionDir(t, root, "2026-08-17", "2026-08-17_09-00-00")
+	mkSessionDir(t, root, "2026-08-17", "2026-08-17_18-36-00")
+
+	got, err := ListClosed(root)
+	require.NoError(t, err)
+	require.Equal(t, []string{
+		filepath.Join(root, "2026-08-14", "2026-08-14_20-36-00"),
+		filepath.Join(root, "2026-08-17", "2026-08-17_09-00-00"),
+		filepath.Join(root, "2026-08-17", "2026-08-17_18-36-00"),
+	}, got)
+}
+
+func TestListClosed_skipsPendingAndCurrentLink(t *testing.T) {
+	root := t.TempDir()
+	mkSessionDir(t, root, "2026-08-17", "2026-08-17_18-36-00")
+	require.NoError(t, os.MkdirAll(filepath.Join(root, PendingDirName, "boot123_000000000042"), 0o755))
+	require.NoError(t, os.Symlink(
+		filepath.Join(root, PendingDirName, "boot123_000000000042"),
+		filepath.Join(root, CurrentLinkName)))
+
+	got, err := ListClosed(root)
+	require.NoError(t, err)
+	require.Equal(t, []string{filepath.Join(root, "2026-08-17", "2026-08-17_18-36-00")}, got)
+}
+
+func TestListClosed_missingRootIsEmptyNotError(t *testing.T) {
+	got, err := ListClosed(filepath.Join(t.TempDir(), "does-not-exist"))
+	require.NoError(t, err)
+	require.Empty(t, got)
+}
+
+func mkSessionDir(t *testing.T, root, date, name string) {
+	t.Helper()
+	require.NoError(t, os.MkdirAll(filepath.Join(root, date, name), 0o755))
 }

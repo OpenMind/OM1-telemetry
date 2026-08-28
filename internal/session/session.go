@@ -39,39 +39,54 @@ type Session struct {
 	root string
 	clk  *clock.Clock
 
+	startWallNs int64
+	startMonoNs int64
+	syncAtStart clock.SyncState
+
 	mu        sync.Mutex
 	robotType string
 	realDir   string // where the files actually are
 	dir       string // what recorders were handed; a symlink while pending
 	pending   bool
 	promoted  bool
+	closed    bool
+	endWallNs int64
+	endMonoNs int64
 }
 
 // Meta is the session's meta.json.
 type Meta struct {
-	SessionDir         string `json:"session_dir"`
-	SessionStartUnixNs int64  `json:"session_start_unix_ns"`
-	SessionStartMonoNs int64  `json:"session_start_mono_ns"`
-	BootID             string `json:"boot_id,omitempty"`
-	// RobotType names the profile this session was recorded with, so an
-	// analysis tool can look up the expected publish rates without being told.
+	SessionDir            string `json:"session_dir"`
+	SessionStartUnixNs    int64  `json:"session_start_unix_ns"`
+	SessionStartMonoNs    int64  `json:"session_start_mono_ns"`
+	BootID                string `json:"boot_id,omitempty"`
 	RobotType             string `json:"robot_type,omitempty"`
 	ClockSyncStateAtStart string `json:"clock_sync_state_at_start"`
 	ClockTrustedAtStart   bool   `json:"clock_trusted_at_start"`
-	// StartTimeCorrected is set when the session was promoted out of pending/,
-	// meaning SessionStartUnixNs was recomputed from the monotonic timeline.
-	StartTimeCorrected bool   `json:"start_time_corrected,omitempty"`
-	PromotedFrom       string `json:"promoted_from,omitempty"`
+	StartTimeCorrected    bool   `json:"start_time_corrected,omitempty"`
+	PromotedFrom          string `json:"promoted_from,omitempty"`
+	SessionEndUnixNs      int64  `json:"session_end_unix_ns,omitempty"`
+	SessionEndMonoNs      int64  `json:"session_end_mono_ns,omitempty"`
 }
 
 // Open creates the session directory. When the clock is trusted this is the
 // familiar root/YYYY-MM-DD/YYYY-MM-DD_HH-MM-SS and no symlink is involved --
 // identical to the behaviour before this package existed.
 func Open(root string, clk *clock.Clock) (*Session, error) {
-	s := &Session{root: root, clk: clk}
+	return open(root, clk, clk.StartSync())
+}
 
-	if clk.StartSync().Trusted() {
-		start := time.Unix(0, clk.StartWallNs())
+// OpenNext creates the next session directory when rotating to a fresh segment; sync is the clock's current state.
+func OpenNext(root string, clk *clock.Clock, sync clock.SyncState) (*Session, error) {
+	return open(root, clk, sync)
+}
+
+func open(root string, clk *clock.Clock, sync clock.SyncState) (*Session, error) {
+	wallNs, monoNs := clk.Now()
+	s := &Session{root: root, clk: clk, startWallNs: wallNs, startMonoNs: monoNs, syncAtStart: sync}
+
+	if sync.Trusted() {
+		start := time.Unix(0, wallNs)
 		s.realDir = datedDir(root, start)
 		s.dir = s.realDir
 		if err := os.MkdirAll(s.realDir, 0o755); err != nil {
@@ -83,19 +98,15 @@ func Open(root string, clk *clock.Clock) (*Session, error) {
 		return s, nil
 	}
 
-	// Untrusted: name the directory from things that are true anyway.
 	s.pending = true
-	name := fmt.Sprintf("%s_%012d", clk.ShortBootID(), clk.StartMonoNs()/int64(time.Millisecond))
-	s.realDir = filepath.Join(root, PendingDirName, name)
+	name := fmt.Sprintf("%s_%012d", clk.ShortBootID(), monoNs/int64(time.Millisecond))
+	s.realDir = uniqueDir(filepath.Join(root, PendingDirName, name))
 	if err := os.MkdirAll(s.realDir, 0o755); err != nil {
 		return nil, fmt.Errorf("create pending session dir: %w", err)
 	}
 
 	link := filepath.Join(root, CurrentLinkName)
 	if err := repointSymlink(link, s.realDir); err != nil {
-		// Without the symlink the recorders would hold a path that a later
-		// rename invalidates, so stay put in pending/ instead. Janitor renames
-		// it on the next start.
 		slog.Warn("session: cannot create current-session symlink; session will stay in pending/ until the next start",
 			"link", link, "err", err)
 		s.dir = s.realDir
@@ -151,9 +162,11 @@ func (s *Session) Promote() error {
 		return nil
 	}
 	from := s.realDir
+	startMonoNs := s.startMonoNs
 	s.mu.Unlock()
 
-	trueStart := time.Unix(0, s.clk.StartWallNsNow())
+	wallNow, monoNow := s.clk.Now()
+	trueStart := time.Unix(0, wallNow-(monoNow-startMonoNs))
 	to := datedDir(s.root, trueStart)
 
 	if err := os.MkdirAll(filepath.Dir(to), 0o755); err != nil {
@@ -172,8 +185,6 @@ func (s *Session) Promote() error {
 
 	if usingLink {
 		if err := repointSymlink(filepath.Join(s.root, CurrentLinkName), to); err != nil {
-			// The rename already happened; recorders holding open files are
-			// fine, but anything opening a new file now would fail. Loud.
 			slog.Error("session: promoted but could not repoint the current symlink",
 				"dir", to, "err", err)
 		}
@@ -192,12 +203,16 @@ func (s *Session) Promote() error {
 func (s *Session) writeMeta() error {
 	m := Meta{
 		SessionDir:            s.realDir,
-		SessionStartUnixNs:    s.clk.StartWallNs(),
-		SessionStartMonoNs:    s.clk.StartMonoNs(),
+		SessionStartUnixNs:    s.startWallNs,
+		SessionStartMonoNs:    s.startMonoNs,
 		BootID:                s.clk.BootID(),
-		ClockSyncStateAtStart: s.clk.StartSync().String(),
-		ClockTrustedAtStart:   s.clk.StartSync().Trusted(),
+		ClockSyncStateAtStart: s.syncAtStart.String(),
+		ClockTrustedAtStart:   s.syncAtStart.Trusted(),
 		RobotType:             s.robotType,
+	}
+	if s.closed {
+		m.SessionEndUnixNs = s.endWallNs
+		m.SessionEndMonoNs = s.endMonoNs
 	}
 	return writeMetaTo(s.Dir(), m)
 }
@@ -213,17 +228,39 @@ func (s *Session) SetRobotType(rt string) {
 	}
 }
 
+// StartUnixNs is the wall clock recorded when this session was opened.
+func (s *Session) StartUnixNs() int64 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.startWallNs
+}
+
+// Close marks the session finished and records the end time in meta.json.
+func (s *Session) Close() error {
+	wallNs, monoNs := s.clk.Now()
+	s.mu.Lock()
+	s.closed = true
+	s.endWallNs = wallNs
+	s.endMonoNs = monoNs
+	s.mu.Unlock()
+	return s.writeMeta()
+}
+
 func (s *Session) writeMetaCorrected(trueStart time.Time, from string) error {
 	m := Meta{
 		SessionDir:            s.RealDir(),
 		SessionStartUnixNs:    trueStart.UnixNano(),
-		SessionStartMonoNs:    s.clk.StartMonoNs(),
+		SessionStartMonoNs:    s.startMonoNs,
 		BootID:                s.clk.BootID(),
-		ClockSyncStateAtStart: s.clk.StartSync().String(),
-		ClockTrustedAtStart:   s.clk.StartSync().Trusted(),
+		ClockSyncStateAtStart: s.syncAtStart.String(),
+		ClockTrustedAtStart:   s.syncAtStart.Trusted(),
 		RobotType:             s.robotType,
 		StartTimeCorrected:    true,
 		PromotedFrom:          filepath.Base(from),
+	}
+	if s.closed {
+		m.SessionEndUnixNs = s.endWallNs
+		m.SessionEndMonoNs = s.endMonoNs
 	}
 	return writeMetaTo(s.Dir(), m)
 }
@@ -327,8 +364,6 @@ func recoverStart(dir string) (time.Time, bool) {
 		if rec.Kind == "start" && !haveStart {
 			startMono, haveStart = rec.MonoNs, true
 		}
-		// The first synchronized record is the anchor. Later ones would work
-		// equally well; the first is the closest to the data that needs dating.
 		if haveStart && rec.Synced && rec.UTCNs > 0 {
 			return time.Unix(0, rec.UTCNs-(rec.MonoNs-startMono)), true
 		}
@@ -349,7 +384,10 @@ func patchMetaStart(dir string, start time.Time, from string) error {
 	return writeMetaTo(dir, m)
 }
 
+// datedDir names a session directory from t's UTC date/time, regardless of t's own Location --
+// session directories must stay UTC even if the process's local time zone isn't.
 func datedDir(root string, t time.Time) string {
+	t = t.UTC()
 	return filepath.Join(root, t.Format(dateLayout), t.Format(sessionLayout))
 }
 
@@ -400,4 +438,37 @@ func SortedNames(dirs []string) []string {
 	out := append([]string(nil), dirs...)
 	sort.Strings(out)
 	return out
+}
+
+// ListClosed returns every dated session directory under root, oldest first.
+func ListClosed(root string) ([]string, error) {
+	dateEntries, err := os.ReadDir(root)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, err
+	}
+
+	var dirs []string
+	for _, de := range dateEntries {
+		if !de.IsDir() {
+			continue
+		}
+		if _, err := time.Parse(dateLayout, de.Name()); err != nil {
+			continue
+		}
+		dateDir := filepath.Join(root, de.Name())
+		sessionEntries, err := os.ReadDir(dateDir)
+		if err != nil {
+			continue
+		}
+		for _, se := range sessionEntries {
+			if se.IsDir() {
+				dirs = append(dirs, filepath.Join(dateDir, se.Name()))
+			}
+		}
+	}
+	sort.Strings(dirs)
+	return dirs, nil
 }

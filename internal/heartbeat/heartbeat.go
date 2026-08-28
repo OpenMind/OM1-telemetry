@@ -37,6 +37,11 @@ func (m *Monitor) Register(name string, expectedHz float64) {
 	})
 }
 
+// Unregister stops tracking name, so a deliberately stopped stream isn't flagged NOT WORKING.
+func (m *Monitor) Unregister(name string) {
+	m.streams.Delete(name)
+}
+
 func (m *Monitor) Tick(name string) {
 	if m == nil {
 		return

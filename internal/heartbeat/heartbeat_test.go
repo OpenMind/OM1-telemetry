@@ -36,6 +36,37 @@ func TestRegister_thenTick_incrementsCounter(t *testing.T) {
 	require.Equal(t, int64(7), v.(*state).ticks.Load())
 }
 
+func TestUnregister_removesStream(t *testing.T) {
+	mon := NewMonitor(30 * time.Second)
+	mon.Register("lidar", 10)
+
+	mon.Unregister("lidar")
+
+	_, ok := mon.streams.Load("lidar")
+	require.False(t, ok, "unregistered stream must not be stored")
+}
+
+func TestUnregister_unknownStream_isNoOp(t *testing.T) {
+	mon := NewMonitor(30 * time.Second)
+	require.NotPanics(t, func() { mon.Unregister("never-registered") })
+}
+
+func TestUnregister_thenRegister_resetsGracePeriod(t *testing.T) {
+	mon := NewMonitor(5 * time.Millisecond)
+	mon.Register("lidar", 10)
+	time.Sleep(20 * time.Millisecond)
+	mon.check() // would warn if left registered
+
+	mon.Unregister("lidar")
+	mon.Register("lidar", 10) // simulates a restart after stop
+
+	mon.check() // immediately after registering, still within grace period
+
+	v, ok := mon.streams.Load("lidar")
+	require.True(t, ok)
+	require.False(t, v.(*state).warned, "freshly re-registered stream should not warn immediately")
+}
+
 func TestTick_multipleStreams_independent(t *testing.T) {
 	mon := NewMonitor(30 * time.Second)
 	mon.Register("lidar", 10)

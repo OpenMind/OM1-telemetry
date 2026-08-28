@@ -1,0 +1,38 @@
+# Reference deployment for om1-telemetry. Copy .env.example to .env, fill
+# it in, then:
+#
+#   docker compose up -d --build
+#
+# See README.md for what each environment variable does.
+services:
+  om1-telemetry:
+    build: .
+    image: om1-telemetry
+    container_name: om1-telemetry
+    restart: unless-stopped
+    network_mode: host
+    # Long enough for an in-flight upload to finish before Docker force-kills it.
+    stop_grace_period: 600s
+    environment:
+      ROBOT_TYPE: ${ROBOT_TYPE}
+      OPENMIND_API_URL: ${OPENMIND_API_URL}
+      OPENMIND_API_KEY: ${OPENMIND_API_KEY}
+      # Uncomment together with the schedule.yaml volume mount below to run
+      # on a daily recording/uploading schedule (see README.md's
+      # "Scheduling" section) -- otherwise recording and uploading stay on
+      # continuously.
+      # SCHEDULE_FILE: /app/config/schedule.yaml
+    volumes:
+      # RECORDINGS_DIR is set in the Dockerfile to match this mount point.
+      - ${RECORDINGS_DIR_HOST:-./recordings}:/app/recordings:rw
+
+      # - ./config/schedule.yaml:/app/config/schedule.yaml:ro
+
+      # Uncomment on a systemd host to let the clock watcher see NTP sync
+      # status directly, instead of only inferring it from DDS/RTSP data.
+      # - /run/systemd/timesync:/run/systemd/timesync:ro
+
+      # Uncomment to give the container the host's real local time zone
+      # (needed if SCHEDULE_FILE's times should be local rather than UTC).
+      # Session directories and recorded timestamps stay UTC regardless.
+      # - /etc/localtime:/etc/localtime:ro

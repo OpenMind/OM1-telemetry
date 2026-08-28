@@ -95,6 +95,7 @@ func TestStop_idempotent(t *testing.T) {
 func TestRecord_createsOutputFileDirectory(t *testing.T) {
 	outputDir := filepath.Join(t.TempDir(), "nested", "session")
 	outputFile := filepath.Join(outputDir, "video.mp4")
+	scratchDir := filepath.Join(t.TempDir(), "scratch")
 
 	err := os.MkdirAll(outputDir, 0o755)
 	require.NoError(t, err, "could not create output dir")
@@ -102,14 +103,141 @@ func TestRecord_createsOutputFileDirectory(t *testing.T) {
 	stream := New(Config{
 		RTSPURL:    "rtsp://192.0.2.1:8554/unreachable",
 		OutputFile: outputFile,
+		ScratchDir: scratchDir,
 	})
 
 	stream.Start()
 	time.Sleep(50 * time.Millisecond)
 	stream.Stop()
 
+	require.DirExists(t, scratchDir, "record() must create its scratch dir before invoking ffmpeg")
 	_, err = os.Stat(outputDir)
 	require.False(t, os.IsNotExist(err), "output directory was unexpectedly removed")
+}
+
+func TestParseSegmentListLine_parsesFilenameAndStart(t *testing.T) {
+	file, start, ok := parseSegmentListLine("20260826T185832.mp4,12.500000,15.000000")
+	require.True(t, ok)
+	require.Equal(t, "20260826T185832.mp4", file)
+	require.InDelta(t, 12.5, start, 1e-9)
+}
+
+func TestParseSegmentListLine_rejectsMalformedLine(t *testing.T) {
+	_, _, ok := parseSegmentListLine("not,a,valid,,line")
+	require.False(t, ok, "a non-numeric start field must be rejected")
+
+	_, _, ok = parseSegmentListLine("onlyonefield")
+	require.False(t, ok, "a line missing the start field must be rejected")
+}
+
+func TestFinishSegment_relocatesFileIndexesItAndPrefixesWithStem(t *testing.T) {
+	scratchDir := t.TempDir()
+	sessionDir := t.TempDir()
+
+	scratchFile := filepath.Join(scratchDir, "20260826T185832.mp4")
+	require.NoError(t, os.WriteFile(scratchFile, []byte("fake mp4 data"), 0o644))
+
+	stream := New(Config{
+		RTSPURL:    "rtsp://192.0.2.1:8554/unreachable",
+		OutputFile: filepath.Join(t.TempDir(), "front_camera.mp4"),
+		ScratchDir: scratchDir,
+	})
+	processStart := time.Unix(1_800_000_000, 0)
+	stream.Rotate(processStart, filepath.Join(sessionDir, "front_camera_timestamps.csv"), "") // no frames file: skip async ffprobe
+
+	stream.finishSegment(scratchFile, 12.5, processStart, 5_000_000_000)
+
+	wantFinal := filepath.Join(sessionDir, "front_camera_20260826T185832.mp4")
+	require.FileExists(t, wantFinal, "the segment must be relocated with its camera stem prefixed")
+	require.NoFileExists(t, scratchFile, "the scratch copy must be gone after relocation")
+
+	data, err := os.ReadFile(filepath.Join(sessionDir, "front_camera_timestamps.csv"))
+	require.NoError(t, err)
+	content := string(data)
+	require.Contains(t, content, "recording_start_unix_ns,segment_file,mono_ns")
+	wantStartUnixNs := processStart.Add(12500 * time.Millisecond).UnixNano()
+	require.Contains(t, content, fmt.Sprintf("%d", wantStartUnixNs), "the indexed start time must include the segment's offset into the stream")
+	require.Contains(t, content, "front_camera_20260826T185832.mp4")
+}
+
+// Regression: ffmpeg's segment_list reports each segment's filename as a
+// bare basename (no directory), matching how it wrote the pattern -- not a
+// path scratchFile can be renamed from directly.
+func TestWatchSegments_joinsBareFilenameFromSegmentListWithScratchDir(t *testing.T) {
+	scratchDir := t.TempDir()
+	sessionDir := t.TempDir()
+
+	require.NoError(t, os.WriteFile(filepath.Join(scratchDir, "20260826T185832.mp4"), []byte("data"), 0o644))
+
+	stream := New(Config{
+		RTSPURL:    "rtsp://192.0.2.1:8554/unreachable",
+		OutputFile: filepath.Join(t.TempDir(), "front_camera.mp4"),
+		ScratchDir: scratchDir,
+	})
+	processStart := time.Unix(1_800_000_000, 0)
+	stream.Rotate(processStart, filepath.Join(sessionDir, "front_camera_timestamps.csv"), "")
+
+	stream.watchSegments(strings.NewReader("20260826T185832.mp4,0.000000,3.000000\n"), processStart, 0)
+
+	require.FileExists(t, filepath.Join(sessionDir, "front_camera_20260826T185832.mp4"),
+		"watchSegments must join the segment_list's bare filename with ScratchDir before relocating")
+}
+
+func TestRotate_installsNewTargetForSubsequentSegments(t *testing.T) {
+	scratchDir := t.TempDir()
+	firstDir := t.TempDir()
+	secondDir := t.TempDir()
+
+	stream := New(Config{
+		RTSPURL:        "rtsp://192.0.2.1:8554/unreachable",
+		OutputFile:     filepath.Join(t.TempDir(), "front_camera.mp4"),
+		TimestampsFile: filepath.Join(firstDir, "front_camera_timestamps.csv"),
+		ScratchDir:     scratchDir,
+	})
+	stream.ensureTarget() // simulate loop()'s startup, without needing a real ffmpeg process
+
+	seg1 := filepath.Join(scratchDir, "seg1.mp4")
+	require.NoError(t, os.WriteFile(seg1, []byte("a"), 0o644))
+	stream.finishSegment(seg1, 0, time.Now(), 0)
+	require.FileExists(t, filepath.Join(firstDir, "front_camera_seg1.mp4"))
+
+	stream.Rotate(time.Now(), filepath.Join(secondDir, "front_camera_timestamps.csv"), "")
+
+	seg2 := filepath.Join(scratchDir, "seg2.mp4")
+	require.NoError(t, os.WriteFile(seg2, []byte("b"), 0o644))
+	stream.finishSegment(seg2, 0, time.Now(), 0)
+	require.FileExists(t, filepath.Join(secondDir, "front_camera_seg2.mp4"), "after Rotate, new segments must land in the new session directory")
+}
+
+// Regression: targetFor must attribute by the segment's own timestamp even
+// when Rotate for the next session has already run.
+func TestTargetFor_attributesByOwnTimestampEvenWhenRotateRacesAhead(t *testing.T) {
+	scratchDir := t.TempDir()
+	sessionNDir := t.TempDir()
+	sessionN1Dir := t.TempDir()
+
+	sessionNStart := time.Unix(1_800_000_000, 0)
+	sessionN1Start := sessionNStart.Add(10 * time.Second)
+
+	stream := New(Config{
+		RTSPURL:        "rtsp://192.0.2.1:8554/unreachable",
+		OutputFile:     filepath.Join(t.TempDir(), "front_camera.mp4"),
+		TimestampsFile: filepath.Join(sessionNDir, "front_camera_timestamps.csv"),
+		SessionStart:   sessionNStart,
+		ScratchDir:     scratchDir,
+	})
+	stream.ensureTarget()
+
+	stream.Rotate(sessionN1Start, filepath.Join(sessionN1Dir, "front_camera_timestamps.csv"), "")
+
+	seg := filepath.Join(scratchDir, "seg.mp4")
+	require.NoError(t, os.WriteFile(seg, []byte("a"), 0o644))
+
+	stream.finishSegment(seg, 0, sessionNStart.Add(5*time.Second), 0)
+
+	require.FileExists(t, filepath.Join(sessionNDir, "front_camera_seg.mp4"),
+		"a segment that started during session N must land in session N's directory, even if Rotate for N+1 already ran")
+	require.NoFileExists(t, filepath.Join(sessionN1Dir, "front_camera_seg.mp4"))
 }
 
 func TestAppendSegmentEntry_emptyPath_isNoOp(t *testing.T) {
