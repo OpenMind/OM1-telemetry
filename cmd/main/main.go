@@ -25,6 +25,7 @@ import (
 	"om1-telemetry/internal/retention"
 	"om1-telemetry/internal/schedule"
 	"om1-telemetry/internal/session"
+	"om1-telemetry/internal/traces"
 	"om1-telemetry/internal/upload"
 	"om1-telemetry/internal/video"
 )
@@ -337,6 +338,9 @@ func registerHeartbeats(mon *heartbeat.Monitor, cfg config.Config, videoHeartbea
 	if cfg.Features.Enabled() {
 		mon.Register(features.HeartbeatName, 0) // 0 = liveness check only
 	}
+	if cfg.Traces.Enabled {
+		mon.Register(traces.HeartbeatName, 0) // 0 = liveness check only -- polls are regular, new records are not
+	}
 	for _, name := range videoHeartbeatNames {
 		mon.Register(name, 0)
 	}
@@ -364,6 +368,9 @@ func unregisterHeartbeats(mon *heartbeat.Monitor, cfg config.Config, videoHeartb
 	if cfg.Features.Enabled() {
 		mon.Unregister(features.HeartbeatName)
 	}
+	if cfg.Traces.Enabled {
+		mon.Unregister(traces.HeartbeatName)
+	}
 	for _, name := range videoHeartbeatNames {
 		mon.Unregister(name)
 	}
@@ -383,6 +390,7 @@ type persistentStreams struct {
 	lowstateStream   *lowstate.LowstateStream
 	videoStreams     []*video.VideoRTSPStream
 	audioStream      *audio.AudioRTSPStream
+	traceStream      *traces.TraceStream
 }
 
 func newPersistentStreams(cfg config.Config, mon *heartbeat.Monitor, recordingsDir string, sess *session.Session, videoHeartbeatNames []string) persistentStreams {
@@ -414,6 +422,11 @@ func newPersistentStreams(cfg config.Config, mon *heartbeat.Monitor, recordingsD
 		lowstateCfg := cfg.Lowstate.LowstateStreamConfig()
 		lowstateCfg.Monitor = mon
 		p.lowstateStream = lowstate.New(lowstateCfg)
+	}
+	if cfg.Traces.Enabled {
+		tracesCfg := cfg.Traces.TraceStreamConfig()
+		tracesCfg.Monitor = mon
+		p.traceStream = traces.New(tracesCfg)
 	}
 
 	p.videoStreams = make([]*video.VideoRTSPStream, 0, len(cfg.Video))
@@ -467,6 +480,9 @@ func (p *persistentStreams) start() {
 	if p.lowstateStream != nil {
 		p.lowstateStream.Start()
 	}
+	if p.traceStream != nil {
+		p.traceStream.Start()
+	}
 	for _, vs := range p.videoStreams {
 		vs.Start()
 	}
@@ -488,6 +504,9 @@ func (p *persistentStreams) stop() {
 	}
 	if p.lowstateStream != nil {
 		p.lowstateStream.Stop()
+	}
+	if p.traceStream != nil {
+		p.traceStream.Stop()
 	}
 	for _, vs := range p.videoStreams {
 		vs.Stop()
@@ -523,6 +542,11 @@ func (p *persistentStreams) rotate(cfg config.Config, sess *session.Session) {
 	if p.lowstateStream != nil {
 		if err := p.lowstateStream.Rotate(cfg.Lowstate.DataFile, cfg.Lowstate.TimestampsFile); err != nil {
 			slog.Error("lowstate: rotate failed", "err", err)
+		}
+	}
+	if p.traceStream != nil {
+		if err := p.traceStream.Rotate(cfg.Traces.OutputFile); err != nil {
+			slog.Error("traces: rotate failed", "err", err)
 		}
 	}
 	for i, vs := range p.videoStreams {

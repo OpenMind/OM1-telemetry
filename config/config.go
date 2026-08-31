@@ -15,6 +15,7 @@ import (
 	"om1-telemetry/internal/network"
 	"om1-telemetry/internal/odom"
 	"om1-telemetry/internal/pointcloud"
+	"om1-telemetry/internal/traces"
 	"om1-telemetry/internal/upload"
 	"om1-telemetry/internal/video"
 )
@@ -37,6 +38,7 @@ type Config struct {
 	Odom                  OdomConfig
 	Lowstate              LowstateConfig
 	Network               NetworkConfig
+	Traces                TracesConfig
 	SessionRotateInterval time.Duration
 	Upload                UploadConfig
 	Retention             RetentionConfig
@@ -142,6 +144,16 @@ type NetworkConfig struct {
 	DataFile     string
 }
 
+// TracesConfig configures polling a co-located OM1 process's Prometheus
+// trace-export endpoint (see internal/traces). Disabled unless Enabled is set --
+// most deployments don't have an OM1 process to poll.
+type TracesConfig struct {
+	Enabled      bool
+	URL          string
+	PollInterval time.Duration
+	OutputFile   string
+}
+
 // RecordingsDir is the root under which sessions are created. The session
 // package needs it before Load runs, because it decides the session directory
 // name -- which depends on whether the clock can be trusted yet.
@@ -226,6 +238,12 @@ func Load(sessionDir string) Config {
 			PingTimeout:  envDuration("NET_PING_TIMEOUT", 2*time.Second),
 			PollInterval: envDuration("NET_POLL_INTERVAL", 5*time.Second),
 			DataFile:     filepath.Join(sessionDir, "network_status.csv"),
+		},
+		Traces: TracesConfig{
+			Enabled:      envBool("TRACES_ENABLED", false),
+			URL:          envStr("TRACES_URL", "http://localhost:9090/traces/metrics"),
+			PollInterval: envDuration("TRACES_POLL_INTERVAL", 30*time.Second),
+			OutputFile:   filepath.Join(sessionDir, "traces.jsonl"),
 		},
 		SessionRotateInterval: envDuration("SESSION_ROTATE_INTERVAL", 5*time.Minute),
 		Upload: UploadConfig{
@@ -343,6 +361,14 @@ func (c NetworkConfig) NetworkStreamConfig() network.Config {
 		PingTimeout:  c.PingTimeout,
 		PollInterval: c.PollInterval,
 		DataFile:     c.DataFile,
+	}
+}
+
+func (c TracesConfig) TraceStreamConfig() traces.Config {
+	return traces.Config{
+		URL:          c.URL,
+		PollInterval: c.PollInterval,
+		OutputFile:   c.OutputFile,
 	}
 }
 

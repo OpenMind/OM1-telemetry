@@ -10,6 +10,7 @@ A Go application that synchronously records multi-modal sensor data:
 - **Depth** frames from a CycloneDDS topic (RVL-compressed, lossless)
 - **Odometry** messages from a CycloneDDS topic
 - **Lowstate** (IMU/joints/battery/etc.) from a CycloneDDS topic
+- **LLM traces** (prompt/response records) polled from a co-located OM1 process's Prometheus trace-export endpoint
 
 All streams are timestamped and organized into session directories for easy alignment and analysis.
 
@@ -139,6 +140,9 @@ Any of the following override the selected profile / defaults:
 - `ODOM_DDS_TOPIC` - DDS topic for odometry data (default: `rt/odom`)
 - `LOWSTATE_DDS_DOMAIN` - CycloneDDS domain ID for lowstate (default: `0`)
 - `LOWSTATE_DDS_TOPIC` - DDS topic for lowstate data (default: `rt/lowstate`)
+- `TRACES_ENABLED` - Poll a co-located OM1 process's Prometheus trace-export endpoint and record its LLM traces (default: `false` — most deployments have no OM1 process to poll; see "LLM trace export" below)
+- `TRACES_URL` - OM1's trace-export endpoint (default: `http://localhost:9090/traces/metrics`)
+- `TRACES_POLL_INTERVAL` - How often to poll `TRACES_URL` (default: `30s`)
 - `RECORDINGS_DIR` - Base directory for recordings (default: `recordings`)
 - `SESSION_ROTATE_INTERVAL` - Close the current session and open a fresh one on this cadence, so each segment can be uploaded without waiting for the whole run to end (default: `5m`; `0` disables rotation — one session for the life of the process, as before this feature existed)
 - `UPLOAD_ENABLED` - Upload each rotated-away session to the openmind-api (default: `true`; actual uploading additionally requires `OPENMIND_API_URL` and `OPENMIND_API_KEY` — see "Cloud upload" below)
@@ -248,7 +252,8 @@ recordings/
         ├── depth_frames.bin           # RVL-compressed depth frames (lossless)
         ├── depth_timestamps.csv       # unix_ns,seq,byte_offset,byte_length,method,width,height,encoding,mono_ns
         ├── odom_frames.bin            # Raw odometry messages
-        └── odom_timestamps.csv        # Timestamps: unix_ns,seq,byte_offset,mono_ns
+        ├── odom_timestamps.csv        # Timestamps: unix_ns,seq,byte_offset,mono_ns
+        └── traces.jsonl                # LLM trace records polled from OM1 (if TRACES_ENABLED set)
 ```
 
 Every timestamps CSV carries a **`mono_ns`** column alongside its wall-clock
@@ -473,6 +478,31 @@ physically lives in the first session's directory. Every later segment gets
 its own copy of it (a snapshot taken when that segment closes), so each
 segment's directory stays self-contained for `align_recording.py` /
 `fix_session_time.py` without needing the boot session alongside it.
+
+## LLM trace export
+
+Set `TRACES_ENABLED=true` to poll a co-located [OM1](https://github.com/OpenMind/OM1)
+process's Prometheus trace-export endpoint (`use_tracer.prometheus_export.enabled`
+in OM1's config) and record each LLM interaction trace into the current
+session's `traces.jsonl` -- picked up by the normal upload pipeline like
+every other stream, with no extra bucket-path configuration needed.
+
+This is a persistent stream: it keeps one poll loop and one dedup cursor
+(the newest trace timestamp already written) running for the life of the
+process, only swapping which session's `traces.jsonl` it writes to on
+rotation -- so OM1 re-serving its whole buffer on every poll never produces
+duplicate lines, even across a session rotation.
+
+OM1's exporter only buffers its most recent 200 trace records; poll more
+often than that window fills at your deployment's trace rate
+(`TRACES_POLL_INTERVAL`, default `30s`) or older records will be evicted on
+the OM1 side before this recorder ever sees them.
+
+`TRACES_URL` must point at OM1's trace-export endpoint specifically
+(`/traces/metrics`), **not** its main `/metrics` endpoint -- the two are
+deliberately separate on the OM1 side, since trace records carry full
+prompt/response text as unbounded label values that a real Prometheus
+scrape target shouldn't ingest.
 
 ## Scheduling
 
