@@ -83,7 +83,7 @@ func jsonlToJSONArray(src, dst string) (err error) {
 	}()
 
 	w := bufio.NewWriter(out)
-	if _, err := w.WriteString("["); err != nil {
+	if _, err := w.WriteString("[\n"); err != nil {
 		return err
 	}
 
@@ -98,8 +98,10 @@ func jsonlToJSONArray(src, dst string) (err error) {
 		if !json.Valid(line) {
 			return fmt.Errorf("%s: invalid json line: %s", src, line)
 		}
+		// Each element keeps its own line -- a record-per-line array reads and
+		// diffs like the source .jsonl, instead of one unbroken line.
 		if !first {
-			if _, err := w.WriteString(","); err != nil {
+			if _, err := w.WriteString(",\n"); err != nil {
 				return err
 			}
 		}
@@ -111,7 +113,12 @@ func jsonlToJSONArray(src, dst string) (err error) {
 	if err := sc.Err(); err != nil {
 		return fmt.Errorf("%s: %w", src, err)
 	}
-	if _, err := w.WriteString("]"); err != nil {
+	if first {
+		// No elements: keep the array compact rather than "[\n\n]".
+		if _, err := w.WriteString("]"); err != nil {
+			return err
+		}
+	} else if _, err := w.WriteString("\n]"); err != nil {
 		return err
 	}
 	return w.Flush()
