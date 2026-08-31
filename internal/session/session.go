@@ -440,7 +440,11 @@ func SortedNames(dirs []string) []string {
 	return out
 }
 
-// ListClosed returns every dated session directory under root, oldest first.
+// ListClosed returns every dated session directory under root, oldest
+// first -- including the one currently being recorded to. Despite the
+// name, it does not check meta.json's session_end field or otherwise
+// verify a directory is actually closed; callers (retention's sweep) are
+// responsible for excluding the live session themselves.
 func ListClosed(root string) ([]string, error) {
 	dateEntries, err := os.ReadDir(root)
 	if err != nil {
