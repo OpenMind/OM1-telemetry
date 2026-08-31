@@ -152,6 +152,7 @@ type TracesConfig struct {
 	URL          string
 	PollInterval time.Duration
 	OutputFile   string
+	CursorFile   string
 }
 
 // RecordingsDir is the root under which sessions are created. The session
@@ -244,6 +245,10 @@ func Load(sessionDir string) Config {
 			URL:          envStr("TRACES_URL", "http://localhost:9090/traces/metrics"),
 			PollInterval: envDuration("TRACES_POLL_INTERVAL", 30*time.Second),
 			OutputFile:   filepath.Join(sessionDir, "traces.jsonl"),
+			// Outside sessionDir deliberately: this must survive both session
+			// rotation and a full process restart, not just live for one
+			// session's lifetime -- see traces.Config.CursorFile.
+			CursorFile: filepath.Join(RecordingsDir(), ".traces_cursor"),
 		},
 		SessionRotateInterval: envDuration("SESSION_ROTATE_INTERVAL", 5*time.Minute),
 		Upload: UploadConfig{
@@ -369,6 +374,7 @@ func (c TracesConfig) TraceStreamConfig() traces.Config {
 		URL:          c.URL,
 		PollInterval: c.PollInterval,
 		OutputFile:   c.OutputFile,
+		CursorFile:   c.CursorFile,
 	}
 }
 

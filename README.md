@@ -491,7 +491,10 @@ This is a persistent stream: it keeps one poll loop and one dedup cursor
 (the newest trace timestamp already written) running for the life of the
 process, only swapping which session's `traces.jsonl` it writes to on
 rotation -- so OM1 re-serving its whole buffer on every poll never produces
-duplicate lines, even across a session rotation.
+duplicate lines, even across a session rotation. The cursor is also
+persisted to `RECORDINGS_DIR/.traces_cursor`, so a full process restart
+resumes from it too, instead of re-ingesting OM1's whole buffered backlog
+into whatever session happens to be open at that moment.
 
 OM1's exporter only buffers its most recent 200 trace records; poll more
 often than that window fills at your deployment's trace rate

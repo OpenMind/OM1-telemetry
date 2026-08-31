@@ -19,8 +19,10 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"path/filepath"
 	"sort"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -50,6 +52,13 @@ type Config struct {
 
 	OutputFile string
 
+	// CursorFile persists the dedup cursor (the newest record timestamp
+	// written so far) across process restarts -- not per-session, so it
+	// must sit outside the rotating session directories. See loadCursor's
+	// doc comment for why this matters. Optional: an empty value just means
+	// no restart-survival, matching the stream's original behavior.
+	CursorFile string
+
 	Monitor *heartbeat.Monitor
 }
 
@@ -58,7 +67,10 @@ type Config struct {
 // without restarting the poll loop, so the in-memory dedup cursor (which
 // record timestamps have already been written) survives session rotation --
 // letting OM1's exporter re-serve its whole buffer on every poll without
-// producing duplicate lines.
+// producing duplicate lines. The cursor is also persisted to CursorFile, so
+// a full process restart resumes from it too, instead of re-ingesting
+// OM1's whole buffered backlog into whatever session happens to be open at
+// that moment (see loadCursor).
 type TraceStream struct {
 	cfg     Config
 	running atomic.Bool
@@ -128,6 +140,7 @@ func (s *TraceStream) loop(ctx context.Context) {
 		slog.Error("traces: cannot open output file; stream disabled", "err", err)
 		return
 	}
+	s.loadCursor()
 
 	slog.Info("traces recorder started", "url", s.cfg.URL, "interval", s.cfg.PollInterval)
 
@@ -203,6 +216,53 @@ func (s *TraceStream) poll(ctx context.Context) {
 	s.lastSeenMu.Lock()
 	s.lastSeen = newest
 	s.lastSeenMu.Unlock()
+	s.saveCursor(newest)
+}
+
+// loadCursor restores the dedup cursor from CursorFile, if set and present.
+//
+// Without this, a full process restart (not just a session rotation, which
+// Rotate already handles) resets the in-memory cursor to zero. OM1's
+// exporter keeps serving its whole buffer (up to 200 records) regardless of
+// what already got written -- so a freshly-started process would treat
+// everything still in that buffer as new and write it all into whichever
+// session happens to be open at that moment, mixing in records that are
+// chronologically well outside that session's own time window.
+func (s *TraceStream) loadCursor() {
+	if s.cfg.CursorFile == "" {
+		return
+	}
+	raw, err := os.ReadFile(s.cfg.CursorFile)
+	if err != nil {
+		return
+	}
+	ts, err := time.Parse(time.RFC3339Nano, strings.TrimSpace(string(raw)))
+	if err != nil {
+		slog.Warn("traces: cannot parse persisted cursor; starting from empty", "err", err)
+		return
+	}
+	s.lastSeenMu.Lock()
+	s.lastSeen = ts
+	s.lastSeenMu.Unlock()
+}
+
+// saveCursor persists the dedup cursor so loadCursor can restore it after a
+// restart. Best-effort: a failure here just means the next restart falls
+// back to re-ingesting whatever OM1 still has buffered, same as before this
+// existed -- not worth aborting the poll loop over.
+func (s *TraceStream) saveCursor(ts time.Time) {
+	if s.cfg.CursorFile == "" {
+		return
+	}
+	if dir := filepath.Dir(s.cfg.CursorFile); dir != "" && dir != "." {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			slog.Warn("traces: cannot create cursor file directory", "err", err)
+			return
+		}
+	}
+	if err := os.WriteFile(s.cfg.CursorFile, []byte(ts.Format(time.RFC3339Nano)), 0o644); err != nil {
+		slog.Warn("traces: cannot persist cursor", "err", err)
+	}
 }
 
 // line is the JSON shape written to OutputFile, matching OM1's own

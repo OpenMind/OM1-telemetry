@@ -202,6 +202,45 @@ func TestRotate_preservesDedupCursor(t *testing.T) {
 	require.Empty(t, fileLines(t, secondFile), "a record already written before Rotate must not reappear in the new file")
 }
 
+// Reproduces the real bug: a process restart (a fresh TraceStream, not just
+// Rotate on the same one) used to reset the in-memory cursor to zero, so a
+// still-buffered OM1 backlog would all look new again and get dumped into
+// whatever session happened to be open at that moment -- even records that
+// were already written, chronologically outside that session's window,
+// minutes to hours earlier. CursorFile is what closes that gap.
+func TestCursorFile_survivesProcessRestart(t *testing.T) {
+	rec := [5]string{"0", "2026-08-31T17:41:36.000000000Z", "1", "hello", "[]"}
+	server := serveText(t, func() string { return exposition(rec) })
+
+	cursorFile := filepath.Join(t.TempDir(), "cursor")
+	firstOutput := filepath.Join(t.TempDir(), "traces.jsonl")
+
+	first := New(Config{
+		URL: server.URL, PollInterval: 20 * time.Millisecond,
+		OutputFile: firstOutput, CursorFile: cursorFile,
+	})
+	first.Start()
+	waitFor(t, 2*time.Second, func() bool { return len(fileLines(t, firstOutput)) == 1 })
+	first.Stop()
+
+	// A brand-new TraceStream, as a fresh process restart would construct --
+	// no in-memory state carried over, only CursorFile on disk.
+	secondOutput := filepath.Join(t.TempDir(), "traces.jsonl")
+	second := New(Config{
+		URL: server.URL, PollInterval: 20 * time.Millisecond,
+		OutputFile: secondOutput, CursorFile: cursorFile,
+	})
+	second.Start()
+	defer second.Stop()
+
+	// OM1 keeps serving the same record the first process already wrote;
+	// the second process must recognize it as already-seen via the
+	// persisted cursor and never write it into its own (new) session file.
+	time.Sleep(150 * time.Millisecond)
+	require.Empty(t, fileLines(t, secondOutput),
+		"a record already written by a prior process must not be re-written after a restart")
+}
+
 func TestPoll_skipsUnparseableTimestamp(t *testing.T) {
 	body := "# HELP om1_trace_info test\n# TYPE om1_trace_info gauge\n" +
 		`om1_trace_info{seq="0",ts="not-a-timestamp",generation="1",llm_input="x",llm_output="[]"} 1` + "\n"
