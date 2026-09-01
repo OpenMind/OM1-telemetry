@@ -326,9 +326,8 @@ loop:
 	}
 }
 
-// registerHeartbeats registers every stream's heartbeat check. The five
-// DDS-backed streams register a reconnect callback via streams, resolved
-// lazily since the stream objects don't exist yet at the first call site.
+// registerHeartbeats registers every stream's heartbeat check, wiring the
+// five DDS-backed streams up with a reconnect callback.
 func registerHeartbeats(mon *heartbeat.Monitor, cfg config.Config, videoHeartbeatNames []string, streams func() *persistentStreams) {
 	if cfg.EnableLidar {
 		mon.RegisterRecoverable(lidar.HeartbeatName, 10, func() {

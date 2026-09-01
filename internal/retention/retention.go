@@ -26,20 +26,7 @@ const uploadMarkerName = ".uploaded"
 const uploadTimeout = 10 * time.Minute
 
 // minSessionAge is a second, time-based line of defense protecting the
-// currently-recording session, alongside the dir == currentDir check every
-// sweep caller applies. session.ListClosed does not itself verify a
-// directory is closed -- it lists every dated directory, including one
-// just created by session.OpenNext -- so the only thing stopping the sweep
-// from grabbing a session mid-recording is comparing it against the
-// in-memory "current" pointer, which is not updated atomically with the
-// directory's creation on disk (a handful of statements run in between).
-// A sweep tick landing in that gap would see a brand-new, virtually empty
-// directory as neither current nor uploaded, and upload it -- after which
-// the server reports the session complete, so the real end-of-session
-// upload silently no-ops and most files are never sent. Any directory
-// younger than minSessionAge (by its own recorded start time) is skipped
-// regardless of the current-dir check, which is a generous margin around
-// a race window that's really microseconds wide.
+// currently-recording session, alongside the dir == currentDir check.
 const minSessionAge = 30 * time.Second
 
 // tooYoungToSweep reports whether dir's own recorded start time is within

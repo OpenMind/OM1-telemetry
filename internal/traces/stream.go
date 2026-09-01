@@ -1,15 +1,5 @@
 // Package traces polls a co-located OM1 process's Prometheus trace-export
-// endpoint (see OM1's internal/tracer/traceexport) and appends any records
-// not seen yet to the session directory as traces.jsonl -- picked up by the
-// existing session upload pipeline like every other stream's output.
-//
-// OM1 broadcasts trace records as om1_trace_info, an "info" metric (value
-// always 1, full record in labels) on a private registry served at
-// GET /traces/metrics -- deliberately not OM1's main /metrics endpoint,
-// since it carries unbounded free-text label values a real Prometheus
-// shouldn't store permanently. This package is that endpoint's one intended
-// consumer: it scrapes it the same way Prometheus itself would (using the
-// same exposition-format parser), not by any bespoke protocol.
+// endpoint and appends any new records to the session directory as traces.jsonl.
 package traces
 
 import (
@@ -52,25 +42,14 @@ type Config struct {
 
 	OutputFile string
 
-	// CursorFile persists the dedup cursor (the newest record timestamp
-	// written so far) across process restarts -- not per-session, so it
-	// must sit outside the rotating session directories. See loadCursor's
-	// doc comment for why this matters. Optional: an empty value just means
-	// no restart-survival, matching the stream's original behavior.
+	// CursorFile persists the dedup cursor across process restarts. Optional.
 	CursorFile string
 
 	Monitor *heartbeat.Monitor
 }
 
 // TraceStream polls Config.URL and appends new records to the current
-// output file. It is a persistent stream: Rotate swaps the output file
-// without restarting the poll loop, so the in-memory dedup cursor (which
-// record timestamps have already been written) survives session rotation --
-// letting OM1's exporter re-serve its whole buffer on every poll without
-// producing duplicate lines. The cursor is also persisted to CursorFile, so
-// a full process restart resumes from it too, instead of re-ingesting
-// OM1's whole buffered backlog into whatever session happens to be open at
-// that moment (see loadCursor).
+// output file, deduplicating by timestamp across polls, rotations, and restarts.
 type TraceStream struct {
 	cfg     Config
 	running atomic.Bool

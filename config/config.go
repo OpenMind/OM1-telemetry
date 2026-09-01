@@ -145,8 +145,7 @@ type NetworkConfig struct {
 }
 
 // TracesConfig configures polling a co-located OM1 process's Prometheus
-// trace-export endpoint (see internal/traces). Disabled unless Enabled is set --
-// most deployments don't have an OM1 process to poll.
+// trace-export endpoint (see internal/traces).
 type TracesConfig struct {
 	Enabled      bool
 	URL          string
