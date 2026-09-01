@@ -241,7 +241,7 @@ func Load(sessionDir string) Config {
 		},
 		Traces: TracesConfig{
 			Enabled:      envBool("TRACES_ENABLED", false),
-			URL:          envStr("TRACES_URL", "http://localhost:9090/traces/metrics"),
+			URL:          envStr("TRACES_URL", "http://localhost:9090/metrics"),
 			PollInterval: envDuration("TRACES_POLL_INTERVAL", 30*time.Second),
 			OutputFile:   filepath.Join(sessionDir, "traces.jsonl"),
 			CursorFile: filepath.Join(RecordingsDir(), ".traces_cursor"),

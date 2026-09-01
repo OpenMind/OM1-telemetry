@@ -35,7 +35,7 @@ const traceMetricFamily = "om1_trace_info"
 const httpTimeout = 10 * time.Second
 
 type Config struct {
-	// URL is OM1's trace-export endpoint, e.g. http://localhost:9090/traces/metrics.
+	// URL is OM1's metrics endpoint, e.g. http://localhost:9090/metrics.
 	URL string
 
 	PollInterval time.Duration

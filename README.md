@@ -168,7 +168,7 @@ Any of the following override the selected profile / defaults:
 - `LOWSTATE_DDS_DOMAIN` - CycloneDDS domain ID for lowstate (default: `0`)
 - `LOWSTATE_DDS_TOPIC` - DDS topic for lowstate data (default: `rt/lowstate`)
 - `TRACES_ENABLED` - Poll a co-located OM1 process's Prometheus trace-export endpoint and record its LLM traces (default: `false` — most deployments have no OM1 process to poll; see "LLM trace export" below)
-- `TRACES_URL` - OM1's trace-export endpoint (default: `http://localhost:9090/traces/metrics`)
+- `TRACES_URL` - OM1's metrics endpoint (default: `http://localhost:9090/metrics`)
 - `TRACES_POLL_INTERVAL` - How often to poll `TRACES_URL` (default: `30s`)
 - `RECORDINGS_DIR` - Base directory for recordings (default: `recordings`)
 - `SESSION_ROTATE_INTERVAL` - Close the current session and open a fresh one on this cadence, so each segment can be uploaded without waiting for the whole run to end (default: `5m`; `0` disables rotation — one session for the life of the process, as before this feature existed)
@@ -528,11 +528,10 @@ often than that window fills at your deployment's trace rate
 (`TRACES_POLL_INTERVAL`, default `30s`) or older records will be evicted on
 the OM1 side before this recorder ever sees them.
 
-`TRACES_URL` must point at OM1's trace-export endpoint specifically
-(`/traces/metrics`), **not** its main `/metrics` endpoint -- the two are
-deliberately separate on the OM1 side, since trace records carry full
-prompt/response text as unbounded label values that a real Prometheus
-scrape target shouldn't ingest.
+`TRACES_URL` points at OM1's main `/metrics` endpoint -- `om1_trace_info`
+is broadcast there alongside every other metric, so this poller (like OM1's
+own fleet-wide Prometheus, if one scrapes the same endpoint) will also see
+full prompt/response text as unbounded label values on that metric.
 
 ## Scheduling
 
