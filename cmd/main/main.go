@@ -64,7 +64,20 @@ func main() {
 	}
 
 	mon := heartbeat.NewMonitor(30 * time.Second)
-	registerHeartbeats(mon, cfg, videoHeartbeatNames)
+
+	// rs is assigned below (and reassigned on every rotation/schedule
+	// resume); streamsFn is only ever called later, from the heartbeat
+	// monitor's own goroutine, by which point rs is always set -- so it's
+	// safe to close over it here, before its first assignment.
+	var rs *recorderSet
+	streamsFn := func() *persistentStreams {
+		if rs == nil {
+			return nil
+		}
+		return &rs.persistent
+	}
+
+	registerHeartbeats(mon, cfg, videoHeartbeatNames, streamsFn)
 
 	hbCtx, hbCancel := context.WithCancel(context.Background())
 	go mon.Run(hbCtx)
@@ -121,7 +134,7 @@ func main() {
 	sweepCtx, sweepCancel := context.WithCancel(context.Background())
 	go retention.RunSweeps(sweepCtx, uploader, recordingsDir, bootTimebasePath, currentDirFn, cfg.Retention, ctl)
 
-	rs := startRecorders(cfg, mon, recordingsDir, sess, videoHeartbeatNames)
+	rs = startRecorders(cfg, mon, recordingsDir, sess, videoHeartbeatNames)
 
 	videoURLs := make([]string, 0, len(cfg.Video))
 	for _, vc := range cfg.Video {
@@ -209,7 +222,7 @@ func main() {
 		currentMu.Unlock()
 
 		sess, cfg = next, nextCfg
-		registerHeartbeats(mon, cfg, videoHeartbeatNames)
+		registerHeartbeats(mon, cfg, videoHeartbeatNames, streamsFn)
 		rs = startRecorders(cfg, mon, recordingsDir, sess, videoHeartbeatNames)
 		ctl.SetRecording(true)
 		slog.Info("recording resumed by schedule", "session", sess.RealDir())
@@ -277,7 +290,7 @@ loop:
 			currentMu.Unlock()
 
 			sess, cfg = next, nextCfg
-			registerHeartbeats(mon, cfg, videoHeartbeatNames)
+			registerHeartbeats(mon, cfg, videoHeartbeatNames, streamsFn)
 
 			persistent := rs.persistent
 			rs = startEphemeral(cfg, mon)
@@ -317,21 +330,49 @@ loop:
 	}
 }
 
-func registerHeartbeats(mon *heartbeat.Monitor, cfg config.Config, videoHeartbeatNames []string) {
+// registerHeartbeats registers every stream's heartbeat check. streams
+// resolves to the persistent-stream set currently in use -- called lazily by
+// the heartbeat monitor, never at registration time, so it's safe to pass a
+// closure over a variable that isn't assigned yet (see main's rs). The five
+// DDS-backed streams register with a reconnect callback: plain DDS discovery
+// does not always recover on its own after the publisher restarts, so the
+// heartbeat monitor recreates the subscription itself once it notices the
+// stream has gone quiet (see heartbeat.Monitor.RegisterRecoverable).
+func registerHeartbeats(mon *heartbeat.Monitor, cfg config.Config, videoHeartbeatNames []string, streams func() *persistentStreams) {
 	if cfg.EnableLidar {
-		mon.Register(lidar.HeartbeatName, 10) // ~10 Hz nominal
+		mon.RegisterRecoverable(lidar.HeartbeatName, 10, func() { // ~10 Hz nominal
+			if p := streams(); p != nil && p.lidarStream != nil {
+				p.lidarStream.Reconnect()
+			}
+		})
 	}
 	if cfg.EnablePointCloud {
-		mon.Register(pointcloud.HeartbeatName, 10) // ~10 Hz nominal
+		mon.RegisterRecoverable(pointcloud.HeartbeatName, 10, func() { // ~10 Hz nominal
+			if p := streams(); p != nil && p.pointCloudStream != nil {
+				p.pointCloudStream.Reconnect()
+			}
+		})
 	}
 	if cfg.EnableDepth {
-		mon.Register(depth.HeartbeatName, 10) // measured 14.9 Hz on a G1; floor at 10
+		mon.RegisterRecoverable(depth.HeartbeatName, 10, func() { // measured 14.9 Hz on a G1; floor at 10
+			if p := streams(); p != nil && p.depthStream != nil {
+				p.depthStream.Reconnect()
+			}
+		})
 	}
 	if cfg.EnableOdom {
-		mon.Register(odom.HeartbeatName, 30) // Go2 ~150, G1 ~495; 30 = safe floor
+		mon.RegisterRecoverable(odom.HeartbeatName, 30, func() { // Go2 ~150, G1 ~495; 30 = safe floor
+			if p := streams(); p != nil && p.odomStream != nil {
+				p.odomStream.Reconnect()
+			}
+		})
 	}
 	if cfg.EnableLowstate {
-		mon.Register(lowstate.HeartbeatName, 400) // Go2 ~500, G1 ~1053; 400 = safe floor
+		mon.RegisterRecoverable(lowstate.HeartbeatName, 400, func() { // Go2 ~500, G1 ~1053; 400 = safe floor
+			if p := streams(); p != nil && p.lowstateStream != nil {
+				p.lowstateStream.Reconnect()
+			}
+		})
 	}
 	mon.Register(network.HeartbeatName, 0) // 0 = liveness check only
 	mon.Register(audio.HeartbeatName, 0)   // 0 = liveness check only

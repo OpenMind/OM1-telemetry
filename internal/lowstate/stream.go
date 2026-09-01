@@ -34,6 +34,10 @@ type LowstateStream struct {
 	cancel  context.CancelFunc
 	wg      sync.WaitGroup
 
+	// reconnect asks a running record() to tear down and recreate its DDS
+	// subscription. Buffered so a request never blocks; see Reconnect.
+	reconnect chan struct{}
+
 	filesMu sync.Mutex
 	files   *outputFiles
 }
@@ -48,7 +52,7 @@ type outputFiles struct {
 }
 
 func New(cfg Config) *LowstateStream {
-	return &LowstateStream{cfg: cfg}
+	return &LowstateStream{cfg: cfg, reconnect: make(chan struct{}, 1)}
 }
 
 func (l *LowstateStream) Start() {
@@ -89,6 +93,19 @@ func (l *LowstateStream) Rotate(dataFile, timestampsFile string) error {
 		closeOutputFiles(old, "lowstate")
 	}
 	return nil
+}
+
+// Reconnect tears down and recreates the DDS subscription without touching
+// output files. Plain DDS discovery does not always self-heal after the
+// publisher restarts (see heartbeat.Monitor's RegisterRecoverable doc
+// comment for why); this forces a fresh discovery attempt on demand.
+// Non-blocking -- a request that arrives while one is already pending is
+// dropped, since it would have the same effect.
+func (l *LowstateStream) Reconnect() {
+	select {
+	case l.reconnect <- struct{}{}:
+	default:
+	}
 }
 
 func (l *LowstateStream) loop(ctx context.Context) {
@@ -145,6 +162,9 @@ func (l *LowstateStream) record(ctx context.Context) error {
 		case <-ctx.Done():
 			l.flush()
 			return nil
+		case <-l.reconnect:
+			l.flush()
+			return fmt.Errorf("reconnect requested")
 		case <-syncTicker.C:
 			l.flush()
 		case sample, ok := <-receiver:

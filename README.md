@@ -88,6 +88,33 @@ The profile has it enabled because this fleet's G1 has a D435i fitted
 (measured 14.9 Hz, 480x270 `16UC1`, RVL-compressed to ~34% of raw, lossless).
 On a G1 without one, set `ENABLE_DEPTH=false`.
 
+#### DDS readers reconnect on their own after a sensor restart
+
+`lidar`, `pointcloud`, `depth`, `odom`, and `lowstate` each hold one
+long-lived DDS reader for the life of the process -- a session rotation only
+swaps their output files (see `persistentStreams` in `cmd/main/main.go`), it
+never resubscribes.
+
+Plain DDS discovery does not always recover cleanly if the underlying sensor
+or its driver process restarts (a physical power-cycle, say): a writer
+announces itself with a burst of discovery packets right at startup and then
+falls back to a much slower steady-state interval, so a reader that's been
+sitting idle for a while can simply miss that burst and never learn the new
+writer exists -- nothing retries that specific handshake afterward. A reader
+created fresh (a full process restart, or a brand-new subscriber from a tool
+like `ros2 topic hz`) sends its own discovery burst immediately and tends to
+match right away, which is what makes this failure mode easy to miss until a
+stream has been silently empty for hours.
+
+Each of the five streams above is registered with
+`heartbeat.Monitor.RegisterRecoverable` instead of plain `Register`: once a
+stream is found broken (the same "recorder NOT WORKING" condition that gets
+logged), the monitor calls that stream's `Reconnect()` once per check
+interval until it recovers. `Reconnect()` tears down and recreates just that
+stream's DDS participant/reader -- forcing a fresh discovery burst -- without
+touching output files, so no manual restart should be needed after a sensor
+bounces.
+
 #### The G1's down camera is the RealSense RGB view
 
 There is no third USB camera on a G1 -- only `OM1FRONTCAM` and `OM1REARCAM`.

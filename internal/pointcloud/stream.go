@@ -41,6 +41,10 @@ type PointCloudStream struct {
 	// needs no lock of its own.
 	encoder *zstd.Encoder
 
+	// reconnect asks a running record() to tear down and recreate its DDS
+	// subscription. Buffered so a request never blocks; see Reconnect.
+	reconnect chan struct{}
+
 	filesMu sync.Mutex
 	files   *outputFiles
 }
@@ -55,7 +59,7 @@ type outputFiles struct {
 }
 
 func New(cfg Config) *PointCloudStream {
-	return &PointCloudStream{cfg: cfg}
+	return &PointCloudStream{cfg: cfg, reconnect: make(chan struct{}, 1)}
 }
 
 func (c *PointCloudStream) Start() {
@@ -102,6 +106,19 @@ func (c *PointCloudStream) Rotate(dataFile, timestampsFile string) error {
 		closeOutputFiles(old, "pointcloud")
 	}
 	return nil
+}
+
+// Reconnect tears down and recreates the DDS subscription without touching
+// output files or the encoder. Plain DDS discovery does not always self-heal
+// after the publisher restarts (see heartbeat.Monitor's RegisterRecoverable
+// doc comment for why); this forces a fresh discovery attempt on demand.
+// Non-blocking -- a request that arrives while one is already pending is
+// dropped, since it would have the same effect.
+func (c *PointCloudStream) Reconnect() {
+	select {
+	case c.reconnect <- struct{}{}:
+	default:
+	}
 }
 
 func (c *PointCloudStream) loop(ctx context.Context) {
@@ -172,6 +189,9 @@ func (c *PointCloudStream) record(ctx context.Context) error {
 		case <-ctx.Done():
 			c.flush()
 			return nil
+		case <-c.reconnect:
+			c.flush()
+			return fmt.Errorf("reconnect requested")
 		case <-syncTicker.C:
 			c.flush()
 		case sample, ok := <-receiver:

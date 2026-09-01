@@ -22,6 +22,11 @@ type state struct {
 	lastTime   time.Time
 	registered time.Time
 	warned     bool
+
+	// reconnect, if set, is called (in its own goroutine) every time a check
+	// finds the stream still broken -- see RegisterRecoverable.
+	reconnect    func()
+	reconnecting atomic.Bool
 }
 
 func NewMonitor(checkInterval time.Duration) *Monitor {
@@ -29,11 +34,32 @@ func NewMonitor(checkInterval time.Duration) *Monitor {
 }
 
 func (m *Monitor) Register(name string, expectedHz float64) {
+	m.register(name, expectedHz, nil)
+}
+
+// RegisterRecoverable is like Register, but reconnect is called once per
+// check interval for as long as the stream stays broken.
+//
+// Plain DDS discovery is not self-healing in every case: a writer that
+// restarts (e.g. a sensor power-cycling) announces itself with a burst of
+// discovery packets and then falls back to a slow steady-state interval: if
+// that initial burst is lost, a reader that has been sitting idle for a
+// while -- rather than actively rebroadcasting its own interest -- can miss
+// it and never match, indefinitely. reconnect should tear down and recreate
+// the stream's DDS subscription so it sends a fresh discovery burst of its
+// own, giving the handshake another chance. A reconnect already in flight is
+// never duplicated.
+func (m *Monitor) RegisterRecoverable(name string, expectedHz float64, reconnect func()) {
+	m.register(name, expectedHz, reconnect)
+}
+
+func (m *Monitor) register(name string, expectedHz float64, reconnect func()) {
 	now := time.Now()
 	m.streams.Store(name, &state{
 		expectedHz: expectedHz,
 		lastTime:   now,
 		registered: now,
+		reconnect:  reconnect,
 	})
 }
 
@@ -115,6 +141,14 @@ func (m *Monitor) check() {
 				"stream", name,
 				"actual_hz", strconv.FormatFloat(rate, 'f', 1, 64))
 			s.warned = false
+		}
+
+		if bad && s.reconnect != nil && s.reconnecting.CompareAndSwap(false, true) {
+			reconnect := s.reconnect
+			go func() {
+				defer s.reconnecting.Store(false)
+				reconnect()
+			}()
 		}
 
 		s.lastTicks = current
