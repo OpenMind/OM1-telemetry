@@ -22,10 +22,8 @@ func testConfig(t *testing.T, url string) Config {
 	}
 }
 
-// exposition builds a minimal om1_trace_info text-exposition-format body,
-// exactly as OM1's exporter (a real prometheus client_golang GaugeVec) would
-// serialize it -- escaped quotes/newlines included, to exercise the parser
-// the same way it would see a real scrape.
+// exposition builds a minimal om1_trace_info exposition-format body, as
+// OM1's real exporter would serialize it.
 func exposition(records ...[5]string) string {
 	var b strings.Builder
 	b.WriteString("# HELP om1_trace_info test\n# TYPE om1_trace_info gauge\n")
@@ -132,8 +130,6 @@ func TestPoll_writesNewRecordsOnce(t *testing.T) {
 
 	waitFor(t, 2*time.Second, func() bool { return len(fileLines(t, cfg.OutputFile)) == 1 })
 
-	// The same record is served on every subsequent poll (OM1 keeps it
-	// buffered until evicted); it must not be re-written.
 	time.Sleep(150 * time.Millisecond)
 	require.Len(t, fileLines(t, cfg.OutputFile), 1, "an already-seen record must not be duplicated across polls")
 	require.Contains(t, fileLines(t, cfg.OutputFile)[0], `"llm_input":"hello there"`)
@@ -167,7 +163,6 @@ func TestPoll_appendsNewRecordsAcrossPolls(t *testing.T) {
 }
 
 func TestPoll_handlesEscapedQuotesAndNewlines(t *testing.T) {
-	// Mirrors how a real client_golang exposition encoder escapes label values.
 	rec := [5]string{"0", "2026-08-31T17:41:36.000000000Z", "1", `line one\nline two \"quoted\"`, "[]"}
 	server := serveText(t, func() string { return exposition(rec) })
 
@@ -196,18 +191,12 @@ func TestRotate_preservesDedupCursor(t *testing.T) {
 	secondFile := filepath.Join(t.TempDir(), "traces2.jsonl")
 	require.NoError(t, stream.Rotate(secondFile))
 
-	// OM1 keeps serving the same buffered record; it was already consumed
-	// before the rotation, so the new file must stay empty.
 	time.Sleep(150 * time.Millisecond)
 	require.Empty(t, fileLines(t, secondFile), "a record already written before Rotate must not reappear in the new file")
 }
 
-// Reproduces the real bug: a process restart (a fresh TraceStream, not just
-// Rotate on the same one) used to reset the in-memory cursor to zero, so a
-// still-buffered OM1 backlog would all look new again and get dumped into
-// whatever session happened to be open at that moment -- even records that
-// were already written, chronologically outside that session's window,
-// minutes to hours earlier. CursorFile is what closes that gap.
+// Reproduces the real bug: a fresh process's cursor started at zero and
+// re-ingested OM1's whole buffered backlog into whatever session was open.
 func TestCursorFile_survivesProcessRestart(t *testing.T) {
 	rec := [5]string{"0", "2026-08-31T17:41:36.000000000Z", "1", "hello", "[]"}
 	server := serveText(t, func() string { return exposition(rec) })
@@ -223,8 +212,6 @@ func TestCursorFile_survivesProcessRestart(t *testing.T) {
 	waitFor(t, 2*time.Second, func() bool { return len(fileLines(t, firstOutput)) == 1 })
 	first.Stop()
 
-	// A brand-new TraceStream, as a fresh process restart would construct --
-	// no in-memory state carried over, only CursorFile on disk.
 	secondOutput := filepath.Join(t.TempDir(), "traces.jsonl")
 	second := New(Config{
 		URL: server.URL, PollInterval: 20 * time.Millisecond,
@@ -233,9 +220,6 @@ func TestCursorFile_survivesProcessRestart(t *testing.T) {
 	second.Start()
 	defer second.Stop()
 
-	// OM1 keeps serving the same record the first process already wrote;
-	// the second process must recognize it as already-seen via the
-	// persisted cursor and never write it into its own (new) session file.
 	time.Sleep(150 * time.Millisecond)
 	require.Empty(t, fileLines(t, secondOutput),
 		"a record already written by a prior process must not be re-written after a restart")
@@ -256,7 +240,7 @@ func TestPoll_skipsUnparseableTimestamp(t *testing.T) {
 }
 
 func TestPoll_serverUnreachable_doesNotPanic(t *testing.T) {
-	cfg := testConfig(t, "http://127.0.0.1:1") // nothing listens here
+	cfg := testConfig(t, "http://127.0.0.1:1")
 	stream := New(cfg)
 	require.NotPanics(t, func() {
 		stream.Start()

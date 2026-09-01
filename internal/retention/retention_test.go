@@ -251,26 +251,18 @@ func TestSweep_uploadsOldestUnmarkedFirstAndSkipsProtectedAndAlreadyUploaded(t *
 }
 
 // Reproduces the race this protection closes: a session directory that
-// exists on disk (session.OpenNext already created it and wrote meta.json)
-// but that the caller hasn't yet reported as "current" -- the exact gap
-// between OpenNext returning and cmd/main's current pointer being updated.
-// Without the age check, ListClosed would surface it and the sweep would
-// upload whatever the handful of streams had flushed in the first second,
-// then mark it uploaded -- so the real end-of-session upload later silently
-// no-ops against a server that already thinks the session is complete.
+// exists on disk but hasn't yet been reported as "current" must not upload.
 func TestSweep_neverUploadsAVeryYoungDirEvenIfNotReportedCurrent(t *testing.T) {
 	api, apiURL := newMinimalFakeAPI(t)
 	client := upload.New(upload.Config{BaseURL: apiURL, APIKey: "k"})
 
 	root := t.TempDir()
 	justOpened := filepath.Join(root, "2026-08-31", "2026-08-31_21-22-33")
-	startedNs := time.Now().Add(-1 * time.Second).UnixNano() // opened a moment ago, well inside minSessionAge
+	startedNs := time.Now().Add(-1 * time.Second).UnixNano()
 	writeFile(t, justOpened, "meta.json", []byte(fmt.Sprintf(`{"session_start_unix_ns":%d}`, startedNs)))
 
 	bootTimebasePath := filepath.Join(root, "does-not-exist.jsonl")
 
-	// currentDir is deliberately NOT justOpened -- simulating the moment
-	// before cmd/main's "current" pointer has caught up to it.
 	Sweep(control.New(), client, root, bootTimebasePath, "", 0)
 
 	require.False(t, IsUploaded(justOpened),

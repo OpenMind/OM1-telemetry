@@ -39,16 +39,6 @@ func (m *Monitor) Register(name string, expectedHz float64) {
 
 // RegisterRecoverable is like Register, but reconnect is called once per
 // check interval for as long as the stream stays broken.
-//
-// Plain DDS discovery is not self-healing in every case: a writer that
-// restarts (e.g. a sensor power-cycling) announces itself with a burst of
-// discovery packets and then falls back to a slow steady-state interval: if
-// that initial burst is lost, a reader that has been sitting idle for a
-// while -- rather than actively rebroadcasting its own interest -- can miss
-// it and never match, indefinitely. reconnect should tear down and recreate
-// the stream's DDS subscription so it sends a fresh discovery burst of its
-// own, giving the handshake another chance. A reconnect already in flight is
-// never duplicated.
 func (m *Monitor) RegisterRecoverable(name string, expectedHz float64, reconnect func()) {
 	m.register(name, expectedHz, reconnect)
 }

@@ -43,10 +43,7 @@ const uploadTimeout = 10 * time.Minute
 const minSessionAge = 30 * time.Second
 
 // tooYoungToSweep reports whether dir's own recorded start time is within
-// minSessionAge of now -- see minSessionAge's doc comment. A directory whose
-// start time can't be read (missing/corrupt meta.json) is not protected by
-// this check; that's an existing edge case the current-dir check alone
-// already had to live with.
+// minSessionAge of now.
 func tooYoungToSweep(dir string) bool {
 	start := ReadStartedAt(dir)
 	if start.IsZero() {

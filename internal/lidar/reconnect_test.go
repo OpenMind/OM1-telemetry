@@ -47,15 +47,8 @@ func waitForLines(t *testing.T, path string, want int, timeout time.Duration, ms
 	}
 }
 
-// Reconnect exists for exactly one real-world scenario: the physical sensor
-// (or its driver process) restarts, the reader that was already running
-// misses the writer's post-restart discovery burst, and -- unlike a brand
-// new reader, which would match immediately -- it never recovers on its
-// own. This test doesn't reproduce a lost discovery packet (not practical
-// over real loopback DDS), but it does prove the mechanical half of the
-// fix: Reconnect() tears the subscription down and rebuilds it without
-// losing the stream's ability to receive -- so whatever heartbeat.Monitor
-// decides to call it on gets a working reader back.
+// Proves Reconnect() tears the subscription down and rebuilds it without
+// losing the stream's ability to receive.
 func TestReconnect_stillReceivesAfterRecreatingSubscription(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping DDS loopback test in short mode")
@@ -87,19 +80,11 @@ func TestReconnect_stillReceivesAfterRecreatingSubscription(t *testing.T) {
 	defer stream.Stop()
 
 	require.NoError(t, ddstest.PublishScan(writer, 8, 0))
-	waitForLines(t, tsFile, 1, 2*time.Second) // +1 for the CSV header
+	waitForLines(t, tsFile, 1, 2*time.Second)
 
 	stream.Reconnect()
-	// Give record() time to observe the request and tear down the old
-	// participant/reader before the recreated one starts discovery.
 	time.Sleep(300 * time.Millisecond)
 
-	// The recreated reader still has to complete DDS discovery with the
-	// (already-running) writer before a sample lands, and a single publish
-	// racing that handshake could be missed entirely (VOLATILE durability
-	// delivers only to readers already matched at publish time) -- so
-	// publish repeatedly, like the real writer's continuous stream would,
-	// until the new subscription has clearly caught up.
 	deadline := time.After(5 * time.Second)
 	for countDataLines(t, tsFile) < 2 {
 		require.NoError(t, ddstest.PublishScan(writer, 8, 1))

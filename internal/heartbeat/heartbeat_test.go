@@ -145,9 +145,7 @@ func TestCheck_noWarnWhenTicksArrive(t *testing.T) {
 }
 
 // Reproduces the real gap this closes: a DDS reader that never received the
-// writer's post-restart discovery burst just sits there silently forever --
-// nothing in plain DDS retries that handshake. RegisterRecoverable's
-// reconnect callback is what has to notice and force a retry.
+// writer's post-restart discovery burst just sits there silently forever.
 func TestRegisterRecoverable_callsReconnectWhenBroken(t *testing.T) {
 	mon := NewMonitor(5 * time.Millisecond)
 	called := make(chan struct{}, 1)
@@ -158,7 +156,7 @@ func TestRegisterRecoverable_callsReconnectWhenBroken(t *testing.T) {
 		}
 	})
 
-	time.Sleep(20 * time.Millisecond) // past the 2x-interval grace period
+	time.Sleep(20 * time.Millisecond)
 	mon.check()
 
 	select {
@@ -191,9 +189,7 @@ func TestRegisterRecoverable_doesNotCallReconnectWhileHealthy(t *testing.T) {
 	}
 }
 
-// A reconnect can legitimately take longer than one check interval (it tears
-// down and recreates a real DDS participant); check() must not pile up a new
-// goroutine calling reconnect again on top of one still running.
+// check() must not pile up a new reconnect goroutine on top of one still running.
 func TestRegisterRecoverable_doesNotOverlapReconnects(t *testing.T) {
 	mon := NewMonitor(5 * time.Millisecond)
 	var calls atomic.Int32
@@ -204,8 +200,8 @@ func TestRegisterRecoverable_doesNotOverlapReconnects(t *testing.T) {
 	})
 
 	time.Sleep(20 * time.Millisecond)
-	mon.check() // starts a reconnect that blocks on release
-	mon.check() // must see one already in flight and skip
+	mon.check()
+	mon.check()
 
 	time.Sleep(20 * time.Millisecond)
 	require.Equal(t, int32(1), calls.Load(), "a reconnect already in flight must not be duplicated")

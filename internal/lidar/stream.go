@@ -97,11 +97,7 @@ func (l *LidarStream) Rotate(dataFile, timestampsFile string) error {
 }
 
 // Reconnect tears down and recreates the DDS subscription without touching
-// output files or the dedup/rotation state. Plain DDS discovery does not
-// always self-heal after the publisher restarts (see heartbeat.Monitor's
-// RegisterRecoverable doc comment for why); this forces a fresh discovery
-// attempt on demand. Non-blocking -- a request that arrives while one is
-// already pending is dropped, since it would have the same effect.
+// output files. Non-blocking; see heartbeat.Monitor.RegisterRecoverable.
 func (l *LidarStream) Reconnect() {
 	select {
 	case l.reconnect <- struct{}{}:

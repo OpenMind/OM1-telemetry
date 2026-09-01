@@ -173,11 +173,8 @@ func (s *TraceStream) ensureFileOpen() error {
 	return nil
 }
 
-// poll fetches and parses one batch from OM1's trace-export endpoint and
-// appends any records newer than the dedup cursor. Errors (network, parse)
-// are logged and left for the next tick -- OM1's exporter buffers the last
-// 200 records, so a poller that's behind by less than that window catches up
-// without losing anything.
+// poll fetches one batch and appends any records newer than the dedup
+// cursor. Errors are logged and retried on the next tick.
 func (s *TraceStream) poll(ctx context.Context) {
 	records, err := s.fetch(ctx)
 	if err != nil {
@@ -219,15 +216,8 @@ func (s *TraceStream) poll(ctx context.Context) {
 	s.saveCursor(newest)
 }
 
-// loadCursor restores the dedup cursor from CursorFile, if set and present.
-//
-// Without this, a full process restart (not just a session rotation, which
-// Rotate already handles) resets the in-memory cursor to zero. OM1's
-// exporter keeps serving its whole buffer (up to 200 records) regardless of
-// what already got written -- so a freshly-started process would treat
-// everything still in that buffer as new and write it all into whichever
-// session happens to be open at that moment, mixing in records that are
-// chronologically well outside that session's own time window.
+// loadCursor restores the dedup cursor from CursorFile, if set and present,
+// so a full process restart doesn't re-ingest OM1's whole buffered backlog.
 func (s *TraceStream) loadCursor() {
 	if s.cfg.CursorFile == "" {
 		return
@@ -247,9 +237,7 @@ func (s *TraceStream) loadCursor() {
 }
 
 // saveCursor persists the dedup cursor so loadCursor can restore it after a
-// restart. Best-effort: a failure here just means the next restart falls
-// back to re-ingesting whatever OM1 still has buffered, same as before this
-// existed -- not worth aborting the poll loop over.
+// restart. Best-effort: failures are only logged.
 func (s *TraceStream) saveCursor(ts time.Time) {
 	if s.cfg.CursorFile == "" {
 		return
@@ -308,9 +296,6 @@ func (s *TraceStream) fetch(ctx context.Context) ([]record, error) {
 		return nil, fmt.Errorf("unexpected status %s", resp.Status)
 	}
 
-	// om1_trace_info is a plain ASCII, underscore-separated Prometheus name
-	// (client_golang's classic exposition format), not a UTF-8 name -- so
-	// LegacyValidation, not the module-wide default of UTF8Validation.
 	parser := expfmt.NewTextParser(model.LegacyValidation)
 	families, err := parser.TextToMetricFamilies(resp.Body)
 	if err != nil {
