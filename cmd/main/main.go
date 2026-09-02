@@ -191,7 +191,10 @@ func main() {
 		retention.SnapshotTimebase(bootTimebasePath, finished.RealDir())
 		ctl.SetRecording(false)
 		slog.Info("recording paused by schedule", "session", finished.RealDir())
-		retention.UploadFinishedSessionAsync(&uploadWG, uploader, ctl, recordingsDir, bootTimebasePath, finished, uploadDelete)
+		persistent := rs.persistent
+		finishedStart := time.Unix(0, finished.StartUnixNs())
+		retention.UploadFinishedSessionAsync(&uploadWG, uploader, ctl, recordingsDir, bootTimebasePath, finished, uploadDelete,
+			func(ctx context.Context) { persistent.awaitSegments(ctx, finishedStart) })
 	}
 
 	// resumeRecording is the schedule's open-half: same as a rotation's open-half.
@@ -285,7 +288,9 @@ loop:
 
 			slog.Info("session rotated", "session", sess.RealDir())
 
-			retention.UploadFinishedSessionAsync(&uploadWG, uploader, ctl, recordingsDir, bootTimebasePath, finished, uploadDelete)
+			finishedStart := time.Unix(0, finished.StartUnixNs())
+			retention.UploadFinishedSessionAsync(&uploadWG, uploader, ctl, recordingsDir, bootTimebasePath, finished, uploadDelete,
+				func(ctx context.Context) { persistent.awaitSegments(ctx, finishedStart) })
 		}
 	}
 
@@ -302,7 +307,9 @@ loop:
 
 		if uploader != nil && ctl.Uploading() {
 			opts := retention.UploadOptions(bootTimebasePath, sess.RealDir())
-			retention.UploadSession(ctl, uploader, sess.RealDir(), retention.APISessionDir(recordingsDir, sess.RealDir()), time.Unix(0, sess.StartUnixNs()), uploadDelete, opts)
+			// No awaitReady needed: rs.Stop() above already drains ffmpeg's
+			// final segment (and its relocation) before returning.
+			retention.UploadSession(ctl, uploader, sess.RealDir(), retention.APISessionDir(recordingsDir, sess.RealDir()), time.Unix(0, sess.StartUnixNs()), uploadDelete, opts, nil)
 		}
 	}
 	uploadWG.Wait()
@@ -534,6 +541,31 @@ func (p *persistentStreams) rotate(cfg config.Config, sess *session.Session) {
 	audioOut := realPath(cfg.Audio.OutputFile, sessionRealDir)
 	audioTs := realPath(cfg.Audio.TimestampsFile, sessionRealDir)
 	p.audioStream.Rotate(sessionStart, audioTs, framesFileFor(audioOut, "_packets.csv"))
+}
+
+// awaitSegments blocks until every video stream and the audio stream have
+// relocated the segment belonging to the session that started at
+// sessionStart, or ctx ends. Meant to run right before that session gets
+// uploaded: video/audio only relocate a segment once ffmpeg reports it
+// closed, which happens a full segment_time (== the rotation interval)
+// after the segment began -- i.e. at roughly the same moment as the next
+// rotation, not this one. Uploading on rotation without this wait races
+// that and silently ships the session without its video/audio.
+func (p *persistentStreams) awaitSegments(ctx context.Context, sessionStart time.Time) {
+	var wg sync.WaitGroup
+	for _, vs := range p.videoStreams {
+		wg.Add(1)
+		go func(vs *video.VideoRTSPStream) {
+			defer wg.Done()
+			vs.WaitSegment(ctx, sessionStart)
+		}(vs)
+	}
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		p.audioStream.WaitSegment(ctx, sessionStart)
+	}()
+	wg.Wait()
 }
 
 // realPath rewrites path to sit in realDir instead of whatever directory it

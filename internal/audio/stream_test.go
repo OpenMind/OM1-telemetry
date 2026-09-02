@@ -1,6 +1,7 @@
 package audio
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -196,6 +197,96 @@ func TestTargetFor_attributesByOwnTimestampEvenWhenRotateRacesAhead(t *testing.T
 	require.FileExists(t, filepath.Join(sessionNDir, "audio_seg.ogg"),
 		"a segment that started during session N must land in session N's directory, even if Rotate for N+1 already ran")
 	require.NoFileExists(t, filepath.Join(sessionN1Dir, "audio_seg.ogg"))
+}
+
+// Regression: an uploader triggered right on rotation must be able to wait
+// for the session's own segment to land instead of racing finishSegment.
+func TestWaitSegment_blocksUntilFinishSegmentRelocatesThatSessionsSegment(t *testing.T) {
+	scratchDir := t.TempDir()
+	sessionDir := t.TempDir()
+	sessionStart := time.Unix(1_800_000_000, 0)
+
+	stream := New(Config{
+		RTSPURL:        "rtsp://192.0.2.1:8554/unreachable",
+		OutputFile:     filepath.Join(t.TempDir(), "audio.ogg"),
+		TimestampsFile: filepath.Join(sessionDir, "audio_timestamps.csv"),
+		SessionStart:   sessionStart,
+		ScratchDir:     scratchDir,
+	})
+	stream.ensureTarget()
+
+	waited := make(chan bool, 1)
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		waited <- stream.WaitSegment(ctx, sessionStart)
+	}()
+
+	select {
+	case <-waited:
+		t.Fatal("WaitSegment returned before finishSegment relocated anything")
+	case <-time.After(20 * time.Millisecond):
+	}
+
+	seg := filepath.Join(scratchDir, "seg.ogg")
+	require.NoError(t, os.WriteFile(seg, []byte("a"), 0o644))
+	stream.finishSegment(seg, 0, sessionStart, 0)
+
+	require.True(t, <-waited, "WaitSegment must return true once finishSegment relocates the session's segment")
+}
+
+// A target that never receives a segment (RTSP never delivered data for
+// that session) must not hang WaitSegment past its context.
+func TestWaitSegment_returnsFalseWhenContextEndsFirst(t *testing.T) {
+	sessionStart := time.Unix(1_800_000_000, 0)
+	stream := New(Config{
+		RTSPURL:      "rtsp://192.0.2.1:8554/unreachable",
+		OutputFile:   filepath.Join(t.TempDir(), "audio.ogg"),
+		SessionStart: sessionStart,
+		ScratchDir:   t.TempDir(),
+	})
+	stream.ensureTarget()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
+	defer cancel()
+	require.False(t, stream.WaitSegment(ctx, sessionStart))
+}
+
+// A relocation failure must still unblock waiters rather than leaving them
+// to time out every time.
+func TestWaitSegment_returnsTrueImmediatelyAfterRelocationFailure(t *testing.T) {
+	sessionDir := t.TempDir()
+	sessionStart := time.Unix(1_800_000_000, 0)
+	stream := New(Config{
+		RTSPURL:        "rtsp://192.0.2.1:8554/unreachable",
+		OutputFile:     filepath.Join(t.TempDir(), "audio.ogg"),
+		TimestampsFile: filepath.Join(sessionDir, "audio_timestamps.csv"),
+		SessionStart:   sessionStart,
+		ScratchDir:     t.TempDir(),
+	})
+	stream.ensureTarget()
+
+	// scratchFile does not exist, so os.Rename inside finishSegment fails.
+	stream.finishSegment(filepath.Join(t.TempDir(), "missing.ogg"), 0, sessionStart, 0)
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	require.True(t, stream.WaitSegment(ctx, sessionStart),
+		"a relocation failure must still mark the target ready so callers don't wait out the full timeout")
+}
+
+// No target was ever installed for this sessionStart.
+func TestWaitSegment_returnsFalseForUnknownSessionStart(t *testing.T) {
+	stream := New(Config{
+		RTSPURL:    "rtsp://192.0.2.1:8554/unreachable",
+		OutputFile: filepath.Join(t.TempDir(), "audio.ogg"),
+		ScratchDir: t.TempDir(),
+	})
+	stream.ensureTarget()
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	require.False(t, stream.WaitSegment(ctx, time.Unix(1_900_000_000, 0)))
 }
 
 func TestAppendSegmentEntry_emptyPath_isNoOp(t *testing.T) {

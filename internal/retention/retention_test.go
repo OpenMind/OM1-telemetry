@@ -273,7 +273,7 @@ func TestUploadSession_concurrentCallsForSameDirOnlyUploadOnce(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			UploadSession(ctl, client, dir, "api/dir", time.Time{}, false, upload.Options{})
+			UploadSession(ctl, client, dir, "api/dir", time.Time{}, false, upload.Options{}, nil)
 		}()
 	}
 
@@ -284,6 +284,49 @@ func TestUploadSession_concurrentCallsForSameDirOnlyUploadOnce(t *testing.T) {
 	wg.Wait()
 	require.EqualValues(t, 1, calls.Load(),
 		"the second concurrent UploadSession call for the same dir must be skipped entirely, not just deduplicated after the fact")
+}
+
+// Regression: video/audio only relocate their segment into dir a full
+// segment_time after the session itself rotates, so an upload triggered
+// right on rotation must wait for awaitReady before listing dir's files --
+// otherwise it silently ships the session without them. This proves
+// awaitReady runs to completion, and any files it adds are visible, before
+// the upload's network calls start.
+func TestUploadSession_awaitReadyCompletesBeforeUploadStarts(t *testing.T) {
+	api, apiURL := newMinimalFakeAPI(t)
+	client := upload.New(upload.Config{BaseURL: apiURL, APIKey: "k"})
+
+	dir := t.TempDir()
+	writeFile(t, dir, "meta.json", []byte(`{}`))
+
+	release := make(chan struct{})
+	var awaitReadyDone atomic.Bool
+	awaitReady := func(ctx context.Context) {
+		<-release
+		writeFile(t, dir, "front_camera_raw_seg.mp4", []byte("video"))
+		awaitReadyDone.Store(true)
+	}
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		UploadSession(control.New(), client, dir, "api/dir", time.Time{}, false, upload.Options{}, awaitReady)
+	}()
+
+	sessionCreated := func() bool {
+		api.mu.Lock()
+		defer api.mu.Unlock()
+		return api.createCalls["api/dir"] > 0
+	}
+	require.Never(t, sessionCreated, 50*time.Millisecond, 5*time.Millisecond,
+		"the session must not be created -- which is when regularFiles snapshots dir -- until awaitReady returns")
+
+	close(release)
+	<-done
+
+	require.True(t, awaitReadyDone.Load())
+	require.True(t, sessionCreated())
+	require.True(t, IsUploaded(dir), "the session, including the file awaitReady added, must be reported as fully uploaded")
 }
 
 // Cap enforcement must not block on a stuck catch-up upload.

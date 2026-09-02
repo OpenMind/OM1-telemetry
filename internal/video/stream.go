@@ -70,6 +70,18 @@ type segmentTarget struct {
 	sessionStart   time.Time
 	timestampsFile string
 	framesWrite    *recordutil.FrameCSVWriter
+
+	// ready closes once this target has received (or, on relocation
+	// failure, definitively won't receive) its first segment -- see
+	// WaitSegment.
+	ready     chan struct{}
+	readyOnce sync.Once
+}
+
+// markReady unblocks any WaitSegment callers for this target. Safe to call
+// more than once (a target may receive several segments, or none).
+func (t *segmentTarget) markReady() {
+	t.readyOnce.Do(func() { close(t.ready) })
 }
 
 func New(cfg Config) *VideoRTSPStream {
@@ -133,7 +145,7 @@ func newSegmentTarget(sessionStart time.Time, timestampsFile, framesFile string)
 	if framesFile != "" {
 		fw = recordutil.NewFrameCSVWriter(framesFile)
 	}
-	return &segmentTarget{sessionStart: sessionStart, timestampsFile: timestampsFile, framesWrite: fw}
+	return &segmentTarget{sessionStart: sessionStart, timestampsFile: timestampsFile, framesWrite: fw, ready: make(chan struct{})}
 }
 
 // targetFor returns the target whose session started most recently at or
@@ -151,6 +163,38 @@ func (v *VideoRTSPStream) targetFor(startWallClock time.Time) *segmentTarget {
 		}
 	}
 	return best
+}
+
+// WaitSegment blocks until the target for sessionStart (installed by an
+// earlier Rotate/ensureTarget call with that exact value) has relocated its
+// first segment, or ctx ends. Reports whether a segment actually arrived;
+// false also covers "no such target" and "ctx ended first".
+//
+// This exists because a video/audio segment closes (and only then becomes
+// visible to a directory listing) a full segment_time after it began -- the
+// same duration as a session rotation interval -- so its close notification
+// lands at roughly the same instant as the *next* rotation, well after the
+// session it belongs to has already closed. A caller uploading that session
+// immediately on rotation would otherwise race this and upload without it.
+func (v *VideoRTSPStream) WaitSegment(ctx context.Context, sessionStart time.Time) bool {
+	v.targetMu.Lock()
+	var target *segmentTarget
+	for _, t := range v.targets {
+		if t.sessionStart.Equal(sessionStart) {
+			target = t
+			break
+		}
+	}
+	v.targetMu.Unlock()
+	if target == nil {
+		return false
+	}
+	select {
+	case <-target.ready:
+		return true
+	case <-ctx.Done():
+		return false
+	}
 }
 
 func (v *VideoRTSPStream) loop(ctx context.Context) {
@@ -301,6 +345,7 @@ func (v *VideoRTSPStream) finishSegment(scratchFile string, startSeconds float64
 
 	if err := os.Rename(scratchFile, finalFile); err != nil {
 		slog.Error("video: could not relocate segment", "camera", v.cfg.HeartbeatName, "err", err)
+		target.markReady()
 		return
 	}
 
@@ -309,6 +354,7 @@ func (v *VideoRTSPStream) finishSegment(scratchFile string, startSeconds float64
 			"file", target.timestampsFile, "err", err)
 	}
 	slog.Info("video segment closed", "camera", v.cfg.HeartbeatName, "file", finalFile)
+	target.markReady()
 
 	if target.framesWrite == nil {
 		return
