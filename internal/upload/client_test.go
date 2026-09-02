@@ -24,7 +24,7 @@ type fakeAPI struct {
 
 	sessions      map[string]*fakeSession
 	nextID        int
-	preComplete   string // session_dir that should short-circuit as already complete
+	preComplete   string // session_dir the server reports as already "complete" on creation
 	failRequests  map[string]int
 	multipartData map[string][]byte // uploadID -> reassembled bytes
 
@@ -105,20 +105,16 @@ func (a *fakeAPI) createSession(w http.ResponseWriter, r *http.Request) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 
+	status := "uploading"
 	if body.SessionDir == a.preComplete {
-		w.WriteHeader(http.StatusOK)
-		_ = json.NewEncoder(w).Encode(map[string]any{
-			"session_id": "already-done",
-			"status":     "complete",
-		})
-		return
+		status = "complete"
 	}
 
 	a.nextID++
 	id := fmt.Sprintf("sess-%d", a.nextID)
 	sess := &fakeSession{
 		id: id, sessionDir: body.SessionDir, startedAt: body.StartedAt,
-		status: "uploading", prefix: "cust/key/" + id + "/",
+		status: status, prefix: "cust/key/" + id + "/",
 		uploaded: map[string][]byte{},
 	}
 	a.sessions[id] = sess
@@ -337,12 +333,14 @@ func TestUploadSession_uploadsFilesConcurrently(t *testing.T) {
 	require.LessOrEqual(t, api.maxRunning, 4, "concurrency should be bounded by Config.Concurrency")
 }
 
-func TestUploadSession_alreadyCompleteShortCircuits(t *testing.T) {
+// Regression: the client used to skip uploading whenever createSession
+// reported the session already "complete", which could silently drop files.
+func TestUploadSession_uploadsEvenWhenServerReportsAlreadyComplete(t *testing.T) {
 	api, apiSrv, _ := newFakeAPI(t)
 	api.preComplete = "recordings/done"
 
 	dir := t.TempDir()
-	writeFile(t, dir, "meta.json", []byte(`{}`))
+	writeFile(t, dir, "meta.json", []byte(`{"ok":true}`))
 
 	c := New(Config{BaseURL: apiSrv.URL, APIKey: "test-key"})
 	err := c.UploadSession(context.Background(), dir, "recordings/done", time.Now(), Options{})
@@ -350,7 +348,11 @@ func TestUploadSession_alreadyCompleteShortCircuits(t *testing.T) {
 
 	api.mu.Lock()
 	defer api.mu.Unlock()
-	require.Empty(t, api.sessions, "should not have created a new session for one already complete")
+	require.Len(t, api.sessions, 1)
+	for _, sess := range api.sessions {
+		require.Equal(t, []byte(`{"ok":true}`), sess.uploaded["meta.json"],
+			"local files must still be uploaded even when the server claims the session is already complete")
+	}
 }
 
 func TestUploadSession_skipsDotfiles(t *testing.T) {
