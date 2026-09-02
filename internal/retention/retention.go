@@ -143,7 +143,14 @@ func SnapshotTimebase(bootPath, sessionDir string) {
 // dir is claimed for the duration of the upload, so a concurrent call for
 // the same dir (another upload path, or retention's cap enforcement) skips
 // it instead of racing.
-func UploadSession(ctl *control.State, client *upload.Client, dir, sessionDir string, startedAt time.Time, deleteAfter bool, opts upload.Options) {
+//
+// awaitReady, if non-nil, is called first (bounded by the same upload
+// timeout) so a caller can block until still-relocating streams -- notably
+// video/audio, whose segment only closes well after the session itself
+// rotates -- have settled before dir's contents get listed for upload. A nil
+// awaitReady uploads whatever is in dir immediately, which is fine for a
+// catch-up sweep over sessions that have been closed for a while.
+func UploadSession(ctl *control.State, client *upload.Client, dir, sessionDir string, startedAt time.Time, deleteAfter bool, opts upload.Options, awaitReady func(context.Context)) {
 	if !ctl.TryClaimDir(dir) {
 		slog.Info("retention: skipping upload, already in flight", "dir", dir)
 		return
@@ -152,6 +159,10 @@ func UploadSession(ctl *control.State, client *upload.Client, dir, sessionDir st
 
 	ctx, cancel := context.WithTimeout(context.Background(), uploadTimeout)
 	defer cancel()
+
+	if awaitReady != nil {
+		awaitReady(ctx)
+	}
 
 	if err := client.UploadSession(ctx, dir, sessionDir, startedAt, opts); err != nil {
 		slog.Error("session upload failed; files kept locally for retry", "dir", dir, "err", err)
@@ -168,7 +179,9 @@ func UploadSession(ctl *control.State, client *upload.Client, dir, sessionDir st
 }
 
 // UploadFinishedSessionAsync kicks off finished's upload in the background if uploading is enabled.
-func UploadFinishedSessionAsync(wg *sync.WaitGroup, uploader *upload.Client, ctl *control.State, recordingsDir, bootTimebasePath string, finished *session.Session, uploadDelete bool) {
+//
+// awaitReady is passed straight through to UploadSession -- see its doc.
+func UploadFinishedSessionAsync(wg *sync.WaitGroup, uploader *upload.Client, ctl *control.State, recordingsDir, bootTimebasePath string, finished *session.Session, uploadDelete bool, awaitReady func(context.Context)) {
 	if uploader == nil || !ctl.Uploading() {
 		return
 	}
@@ -176,7 +189,7 @@ func UploadFinishedSessionAsync(wg *sync.WaitGroup, uploader *upload.Client, ctl
 	wg.Add(1)
 	go func(dir, apiDir string, startedAt time.Time, opts upload.Options) {
 		defer wg.Done()
-		UploadSession(ctl, uploader, dir, apiDir, startedAt, uploadDelete, opts)
+		UploadSession(ctl, uploader, dir, apiDir, startedAt, uploadDelete, opts, awaitReady)
 	}(finished.RealDir(), APISessionDir(recordingsDir, finished.RealDir()), time.Unix(0, finished.StartUnixNs()), opts)
 }
 
@@ -206,7 +219,7 @@ func CatchUpUploads(ctl *control.State, uploader *upload.Client, dirs []string, 
 			continue
 		}
 		opts := UploadOptions(bootTimebasePath, dir)
-		UploadSession(ctl, uploader, dir, APISessionDir(recordingsDir, dir), ReadStartedAt(dir), false, opts)
+		UploadSession(ctl, uploader, dir, APISessionDir(recordingsDir, dir), ReadStartedAt(dir), false, opts, nil)
 	}
 }
 

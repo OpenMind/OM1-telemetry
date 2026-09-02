@@ -68,6 +68,18 @@ type segmentTarget struct {
 	sessionStart   time.Time
 	timestampsFile string
 	framesWrite    *recordutil.FrameCSVWriter
+
+	// ready closes once this target has received (or, on relocation
+	// failure, definitively won't receive) its first segment -- see
+	// WaitSegment.
+	ready     chan struct{}
+	readyOnce sync.Once
+}
+
+// markReady unblocks any WaitSegment callers for this target. Safe to call
+// more than once (a target may receive several segments, or none).
+func (t *segmentTarget) markReady() {
+	t.readyOnce.Do(func() { close(t.ready) })
 }
 
 func New(cfg Config) *AudioRTSPStream {
@@ -127,7 +139,7 @@ func newSegmentTarget(sessionStart time.Time, timestampsFile, framesFile string)
 	if framesFile != "" {
 		fw = recordutil.NewFrameCSVWriter(framesFile)
 	}
-	return &segmentTarget{sessionStart: sessionStart, timestampsFile: timestampsFile, framesWrite: fw}
+	return &segmentTarget{sessionStart: sessionStart, timestampsFile: timestampsFile, framesWrite: fw, ready: make(chan struct{})}
 }
 
 // targetFor returns the target whose session started most recently at or
@@ -145,6 +157,38 @@ func (a *AudioRTSPStream) targetFor(startWallClock time.Time) *segmentTarget {
 		}
 	}
 	return best
+}
+
+// WaitSegment blocks until the target for sessionStart (installed by an
+// earlier Rotate/ensureTarget call with that exact value) has relocated its
+// first segment, or ctx ends. Reports whether a segment actually arrived;
+// false also covers "no such target" and "ctx ended first".
+//
+// This exists because a video/audio segment closes (and only then becomes
+// visible to a directory listing) a full segment_time after it began -- the
+// same duration as a session rotation interval -- so its close notification
+// lands at roughly the same instant as the *next* rotation, well after the
+// session it belongs to has already closed. A caller uploading that session
+// immediately on rotation would otherwise race this and upload without it.
+func (a *AudioRTSPStream) WaitSegment(ctx context.Context, sessionStart time.Time) bool {
+	a.targetMu.Lock()
+	var target *segmentTarget
+	for _, t := range a.targets {
+		if t.sessionStart.Equal(sessionStart) {
+			target = t
+			break
+		}
+	}
+	a.targetMu.Unlock()
+	if target == nil {
+		return false
+	}
+	select {
+	case <-target.ready:
+		return true
+	case <-ctx.Done():
+		return false
+	}
 }
 
 func (a *AudioRTSPStream) loop(ctx context.Context) {
@@ -303,6 +347,7 @@ func (a *AudioRTSPStream) finishSegment(scratchFile string, duration time.Durati
 
 	if err := os.Rename(scratchFile, finalFile); err != nil {
 		slog.Error("audio: could not relocate segment", "err", err)
+		target.markReady()
 		return
 	}
 
@@ -311,6 +356,7 @@ func (a *AudioRTSPStream) finishSegment(scratchFile string, duration time.Durati
 			"file", target.timestampsFile, "err", err)
 	}
 	slog.Info("audio segment closed", "file", finalFile)
+	target.markReady()
 
 	if target.framesWrite == nil {
 		return
