@@ -18,6 +18,15 @@ const HeartbeatName = "lowstate"
 
 const syncInterval = 2 * time.Second
 
+// staleTimeout bounds how long record() waits for a sample before treating
+// the DDS subscription as dead and forcing a resubscribe. Lowstate's
+// slowest expected rate is hundreds of Hz, so 10s of total silence is
+// unambiguous: the receiver channel blocks forever on a wedged subscription
+// with no error of its own, so nothing else would ever notice and reconnect.
+// A var, not a const, so tests can shorten it instead of running for 10
+// real seconds.
+var staleTimeout = 10 * time.Second
+
 type Config struct {
 	RobotType      string
 	DDSDomainID    uint32
@@ -140,11 +149,16 @@ func (l *LowstateStream) record(ctx context.Context) error {
 	syncTicker := time.NewTicker(syncInterval)
 	defer syncTicker.Stop()
 
+	staleTimer := time.NewTimer(staleTimeout)
+	defer staleTimer.Stop()
+
 	for {
 		select {
 		case <-ctx.Done():
 			l.flush()
 			return nil
+		case <-staleTimer.C:
+			return fmt.Errorf("no samples received in %s", staleTimeout)
 		case <-syncTicker.C:
 			l.flush()
 		case sample, ok := <-receiver:
@@ -152,6 +166,14 @@ func (l *LowstateStream) record(ctx context.Context) error {
 				l.flush()
 				return fmt.Errorf("dds subscriber channel closed")
 			}
+
+			if !staleTimer.Stop() {
+				select {
+				case <-staleTimer.C:
+				default:
+				}
+			}
+			staleTimer.Reset(staleTimeout)
 
 			unixNs := sample.unixNs
 			if unixNs == 0 {

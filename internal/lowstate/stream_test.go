@@ -1,7 +1,10 @@
 package lowstate
 
 import (
+	"bytes"
+	"log/slog"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -130,4 +133,36 @@ func TestRotate_beforeStart_stillOpensFiles(t *testing.T) {
 
 	require.FileExists(t, newData)
 	require.FileExists(t, newTS)
+}
+
+// TestRecord_resubscribesAfterProlongedSilence guards the bug where a wedged
+// DDS subscription (subscribed successfully, but the publisher side stopped
+// delivering samples) left the receiver channel blocked forever: no error,
+// no data, and nothing to make the stream try again. Every closed session
+// during the real outage this reproduces ended up with an empty data file.
+func TestRecord_resubscribesAfterProlongedSilence(t *testing.T) {
+	old := staleTimeout
+	staleTimeout = 50 * time.Millisecond
+	defer func() { staleTimeout = old }()
+
+	var buf bytes.Buffer
+	prevLogger := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
+	defer slog.SetDefault(prevLogger)
+
+	stream := New(Config{
+		RobotType:      "go2",
+		DDSDomainID:    0,
+		DDSTopic:       "rt/lowstate/unreachable", // subscribes fine; no publisher ever sends a sample
+		TimestampsFile: filepath.Join(t.TempDir(), "timestamps.csv"),
+		DataFile:       filepath.Join(t.TempDir(), "data.bin"),
+	})
+
+	stream.Start()
+	defer stream.Stop()
+
+	require.Eventually(t, func() bool {
+		return strings.Count(buf.String(), "lowstate recorder started") >= 2
+	}, 3*time.Second, 10*time.Millisecond,
+		"a stale subscription with zero samples must force a resubscribe, not sit blocked forever")
 }
