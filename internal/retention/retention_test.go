@@ -332,12 +332,8 @@ func TestUploadSession_concurrentCallsForSameDirOnlyUploadOnce(t *testing.T) {
 		"the second concurrent UploadSession call for the same dir must be skipped entirely, not just deduplicated after the fact")
 }
 
-// Regression: video/audio only relocate their segment into dir a full
-// segment_time after the session itself rotates, so an upload triggered
-// right on rotation must wait for awaitReady before listing dir's files --
-// otherwise it silently ships the session without them. This proves
-// awaitReady runs to completion, and any files it adds are visible, before
-// the upload's network calls start.
+// Proves awaitReady runs to completion, and any files it adds are visible,
+// before UploadSession's network calls start.
 func TestUploadSession_awaitReadyCompletesBeforeUploadStarts(t *testing.T) {
 	api, apiURL := newMinimalFakeAPI(t)
 	client := upload.New(upload.Config{BaseURL: apiURL, APIKey: "k"})

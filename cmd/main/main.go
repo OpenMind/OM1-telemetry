@@ -598,14 +598,8 @@ func (p *persistentStreams) rotate(cfg config.Config, sess *session.Session) {
 	p.audioStream.Rotate(sessionStart, audioTs, framesFileFor(audioOut, "_packets.csv"))
 }
 
-// awaitSegments blocks until every video stream and the audio stream have
-// relocated the segment belonging to the session that started at
-// sessionStart, or ctx ends. Meant to run right before that session gets
-// uploaded: video/audio only relocate a segment once ffmpeg reports it
-// closed, which happens a full segment_time (== the rotation interval)
-// after the segment began -- i.e. at roughly the same moment as the next
-// rotation, not this one. Uploading on rotation without this wait races
-// that and silently ships the session without its video/audio.
+// awaitSegments waits for every video/audio stream to relocate
+// sessionStart's segment before upload -- ffmpeg closes segments a full rotation interval late, so this must run first.
 func (p *persistentStreams) awaitSegments(ctx context.Context, sessionStart time.Time) {
 	var wg sync.WaitGroup
 	for _, vs := range p.videoStreams {

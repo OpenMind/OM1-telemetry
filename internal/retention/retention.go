@@ -138,18 +138,8 @@ func SnapshotTimebase(bootPath, sessionDir string) {
 	}
 }
 
-// UploadSession uploads one finished session directory; on failure the files are kept locally for a later retry.
-//
-// dir is claimed for the duration of the upload, so a concurrent call for
-// the same dir (another upload path, or retention's cap enforcement) skips
-// it instead of racing.
-//
-// awaitReady, if non-nil, is called first (bounded by the same upload
-// timeout) so a caller can block until still-relocating streams -- notably
-// video/audio, whose segment only closes well after the session itself
-// rotates -- have settled before dir's contents get listed for upload. A nil
-// awaitReady uploads whatever is in dir immediately, which is fine for a
-// catch-up sweep over sessions that have been closed for a while.
+// UploadSession uploads one finished session directory (kept locally for
+// retry on failure); awaitReady, if non-nil, blocks first so still-relocating streams can settle before dir's contents are listed.
 func UploadSession(ctl *control.State, client *upload.Client, dir, sessionDir string, startedAt time.Time, deleteAfter bool, opts upload.Options, awaitReady func(context.Context)) {
 	if !ctl.TryClaimDir(dir) {
 		slog.Info("retention: skipping upload, already in flight", "dir", dir)
@@ -178,9 +168,8 @@ func UploadSession(ctl *control.State, client *upload.Client, dir, sessionDir st
 	}
 }
 
-// UploadFinishedSessionAsync kicks off finished's upload in the background if uploading is enabled.
-//
-// awaitReady is passed straight through to UploadSession -- see its doc.
+// UploadFinishedSessionAsync kicks off finished's upload in the background
+// if uploading is enabled; awaitReady is passed straight through to UploadSession.
 func UploadFinishedSessionAsync(wg *sync.WaitGroup, uploader *upload.Client, ctl *control.State, recordingsDir, bootTimebasePath string, finished *session.Session, uploadDelete bool, awaitReady func(context.Context)) {
 	if uploader == nil || !ctl.Uploading() {
 		return
