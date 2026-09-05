@@ -440,7 +440,8 @@ func SortedNames(dirs []string) []string {
 	return out
 }
 
-// ListClosed returns every dated session directory under root, oldest first.
+// ListClosed returns every dated session directory under root, oldest
+// first. It does not verify a directory is actually closed.
 func ListClosed(root string) ([]string, error) {
 	dateEntries, err := os.ReadDir(root)
 	if err != nil {

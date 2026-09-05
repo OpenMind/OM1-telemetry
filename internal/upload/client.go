@@ -77,7 +77,6 @@ type presignedPOST struct {
 type sessionResp struct {
 	SessionID string         `json:"session_id"`
 	S3Prefix  string         `json:"s3_prefix"`
-	Status    string         `json:"status"`
 	Upload    *presignedPOST `json:"upload"`
 }
 
@@ -106,9 +105,6 @@ func (c *Client) UploadSession(ctx context.Context, localDir, sessionDir string,
 	sess, err := c.createSession(ctx, sessionDir, startedAt)
 	if err != nil {
 		return fmt.Errorf("upload: create session: %w", err)
-	}
-	if sess.Status == "complete" {
-		return nil
 	}
 
 	if err := c.uploadFiles(ctx, sess, localDir, files); err != nil {

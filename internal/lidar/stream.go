@@ -35,6 +35,10 @@ type LidarStream struct {
 	cancel  context.CancelFunc
 	wg      sync.WaitGroup
 
+	// reconnect asks a running record() to tear down and recreate its DDS
+	// subscription. Buffered so a request never blocks; see Reconnect.
+	reconnect chan struct{}
+
 	filesMu sync.Mutex
 	files   *outputFiles
 }
@@ -49,7 +53,7 @@ type outputFiles struct {
 }
 
 func New(cfg Config) *LidarStream {
-	return &LidarStream{cfg: cfg}
+	return &LidarStream{cfg: cfg, reconnect: make(chan struct{}, 1)}
 }
 
 func (l *LidarStream) Start() {
@@ -90,6 +94,15 @@ func (l *LidarStream) Rotate(dataFile, timestampsFile string) error {
 		closeOutputFiles(old, "lidar")
 	}
 	return nil
+}
+
+// Reconnect tears down and recreates the DDS subscription without touching
+// output files. Non-blocking; see heartbeat.Monitor.RegisterRecoverable.
+func (l *LidarStream) Reconnect() {
+	select {
+	case l.reconnect <- struct{}{}:
+	default:
+	}
 }
 
 func (l *LidarStream) loop(ctx context.Context) {
@@ -146,6 +159,9 @@ func (l *LidarStream) record(ctx context.Context) error {
 		case <-ctx.Done():
 			l.flush()
 			return nil
+		case <-l.reconnect:
+			l.flush()
+			return fmt.Errorf("reconnect requested")
 		case <-syncTicker.C:
 			l.flush()
 		case sample, ok := <-receiver:

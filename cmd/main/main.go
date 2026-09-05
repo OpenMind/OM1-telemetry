@@ -25,6 +25,7 @@ import (
 	"om1-telemetry/internal/retention"
 	"om1-telemetry/internal/schedule"
 	"om1-telemetry/internal/session"
+	"om1-telemetry/internal/traces"
 	"om1-telemetry/internal/upload"
 	"om1-telemetry/internal/video"
 )
@@ -63,7 +64,16 @@ func main() {
 	}
 
 	mon := heartbeat.NewMonitor(30 * time.Second)
-	registerHeartbeats(mon, cfg, videoHeartbeatNames)
+
+	var rs *recorderSet
+	streamsFn := func() *persistentStreams {
+		if rs == nil {
+			return nil
+		}
+		return &rs.persistent
+	}
+
+	registerHeartbeats(mon, cfg, videoHeartbeatNames, streamsFn)
 
 	hbCtx, hbCancel := context.WithCancel(context.Background())
 	go mon.Run(hbCtx)
@@ -120,7 +130,7 @@ func main() {
 	sweepCtx, sweepCancel := context.WithCancel(context.Background())
 	go retention.RunSweeps(sweepCtx, uploader, recordingsDir, bootTimebasePath, currentDirFn, cfg.Retention, ctl)
 
-	rs := startRecorders(cfg, mon, recordingsDir, sess, videoHeartbeatNames)
+	rs = startRecorders(cfg, mon, recordingsDir, sess, videoHeartbeatNames)
 
 	videoURLs := make([]string, 0, len(cfg.Video))
 	for _, vc := range cfg.Video {
@@ -191,7 +201,10 @@ func main() {
 		retention.SnapshotTimebase(bootTimebasePath, finished.RealDir())
 		ctl.SetRecording(false)
 		slog.Info("recording paused by schedule", "session", finished.RealDir())
-		retention.UploadFinishedSessionAsync(&uploadWG, uploader, ctl, recordingsDir, bootTimebasePath, finished, uploadDelete)
+		persistent := rs.persistent
+		finishedStart := time.Unix(0, finished.StartUnixNs())
+		retention.UploadFinishedSessionAsync(&uploadWG, uploader, ctl, recordingsDir, bootTimebasePath, finished, uploadDelete,
+			func(ctx context.Context) { persistent.awaitSegments(ctx, finishedStart) })
 	}
 
 	// resumeRecording is the schedule's open-half: same as a rotation's open-half.
@@ -208,7 +221,7 @@ func main() {
 		currentMu.Unlock()
 
 		sess, cfg = next, nextCfg
-		registerHeartbeats(mon, cfg, videoHeartbeatNames)
+		registerHeartbeats(mon, cfg, videoHeartbeatNames, streamsFn)
 		rs = startRecorders(cfg, mon, recordingsDir, sess, videoHeartbeatNames)
 		ctl.SetRecording(true)
 		slog.Info("recording resumed by schedule", "session", sess.RealDir())
@@ -276,7 +289,7 @@ loop:
 			currentMu.Unlock()
 
 			sess, cfg = next, nextCfg
-			registerHeartbeats(mon, cfg, videoHeartbeatNames)
+			registerHeartbeats(mon, cfg, videoHeartbeatNames, streamsFn)
 
 			persistent := rs.persistent
 			rs = startEphemeral(cfg, mon)
@@ -285,7 +298,9 @@ loop:
 
 			slog.Info("session rotated", "session", sess.RealDir())
 
-			retention.UploadFinishedSessionAsync(&uploadWG, uploader, ctl, recordingsDir, bootTimebasePath, finished, uploadDelete)
+			finishedStart := time.Unix(0, finished.StartUnixNs())
+			retention.UploadFinishedSessionAsync(&uploadWG, uploader, ctl, recordingsDir, bootTimebasePath, finished, uploadDelete,
+				func(ctx context.Context) { persistent.awaitSegments(ctx, finishedStart) })
 		}
 	}
 
@@ -302,7 +317,9 @@ loop:
 
 		if uploader != nil && ctl.Uploading() {
 			opts := retention.UploadOptions(bootTimebasePath, sess.RealDir())
-			retention.UploadSession(ctl, uploader, sess.RealDir(), retention.APISessionDir(recordingsDir, sess.RealDir()), time.Unix(0, sess.StartUnixNs()), uploadDelete, opts)
+			// No awaitReady needed: rs.Stop() above already drains ffmpeg's
+			// final segment (and its relocation) before returning.
+			retention.UploadSession(ctl, uploader, sess.RealDir(), retention.APISessionDir(recordingsDir, sess.RealDir()), time.Unix(0, sess.StartUnixNs()), uploadDelete, opts, nil)
 		}
 	}
 	uploadWG.Wait()
@@ -316,26 +333,51 @@ loop:
 	}
 }
 
-func registerHeartbeats(mon *heartbeat.Monitor, cfg config.Config, videoHeartbeatNames []string) {
+// registerHeartbeats registers every stream's heartbeat check, wiring the
+// five DDS-backed streams up with a reconnect callback.
+func registerHeartbeats(mon *heartbeat.Monitor, cfg config.Config, videoHeartbeatNames []string, streams func() *persistentStreams) {
 	if cfg.EnableLidar {
-		mon.Register(lidar.HeartbeatName, 10) // ~10 Hz nominal
+		mon.RegisterRecoverable(lidar.HeartbeatName, 10, func() {
+			if p := streams(); p != nil && p.lidarStream != nil {
+				p.lidarStream.Reconnect()
+			}
+		})
 	}
 	if cfg.EnablePointCloud {
-		mon.Register(pointcloud.HeartbeatName, 10) // ~10 Hz nominal
+		mon.RegisterRecoverable(pointcloud.HeartbeatName, 10, func() {
+			if p := streams(); p != nil && p.pointCloudStream != nil {
+				p.pointCloudStream.Reconnect()
+			}
+		})
 	}
 	if cfg.EnableDepth {
-		mon.Register(depth.HeartbeatName, 10) // measured 14.9 Hz on a G1; floor at 10
+		mon.RegisterRecoverable(depth.HeartbeatName, 10, func() {
+			if p := streams(); p != nil && p.depthStream != nil {
+				p.depthStream.Reconnect()
+			}
+		})
 	}
 	if cfg.EnableOdom {
-		mon.Register(odom.HeartbeatName, 30) // Go2 ~150, G1 ~495; 30 = safe floor
+		mon.RegisterRecoverable(odom.HeartbeatName, 30, func() {
+			if p := streams(); p != nil && p.odomStream != nil {
+				p.odomStream.Reconnect()
+			}
+		})
 	}
 	if cfg.EnableLowstate {
-		mon.Register(lowstate.HeartbeatName, 400) // Go2 ~500, G1 ~1053; 400 = safe floor
+		mon.RegisterRecoverable(lowstate.HeartbeatName, 400, func() {
+			if p := streams(); p != nil && p.lowstateStream != nil {
+				p.lowstateStream.Reconnect()
+			}
+		})
 	}
 	mon.Register(network.HeartbeatName, 0) // 0 = liveness check only
 	mon.Register(audio.HeartbeatName, 0)   // 0 = liveness check only
 	if cfg.Features.Enabled() {
 		mon.Register(features.HeartbeatName, 0) // 0 = liveness check only
+	}
+	if cfg.Traces.Enabled {
+		mon.Register(traces.HeartbeatName, 0)
 	}
 	for _, name := range videoHeartbeatNames {
 		mon.Register(name, 0)
@@ -364,6 +406,9 @@ func unregisterHeartbeats(mon *heartbeat.Monitor, cfg config.Config, videoHeartb
 	if cfg.Features.Enabled() {
 		mon.Unregister(features.HeartbeatName)
 	}
+	if cfg.Traces.Enabled {
+		mon.Unregister(traces.HeartbeatName)
+	}
 	for _, name := range videoHeartbeatNames {
 		mon.Unregister(name)
 	}
@@ -383,6 +428,7 @@ type persistentStreams struct {
 	lowstateStream   *lowstate.LowstateStream
 	videoStreams     []*video.VideoRTSPStream
 	audioStream      *audio.AudioRTSPStream
+	traceStream      *traces.TraceStream
 }
 
 func newPersistentStreams(cfg config.Config, mon *heartbeat.Monitor, recordingsDir string, sess *session.Session, videoHeartbeatNames []string) persistentStreams {
@@ -414,6 +460,11 @@ func newPersistentStreams(cfg config.Config, mon *heartbeat.Monitor, recordingsD
 		lowstateCfg := cfg.Lowstate.LowstateStreamConfig()
 		lowstateCfg.Monitor = mon
 		p.lowstateStream = lowstate.New(lowstateCfg)
+	}
+	if cfg.Traces.Enabled {
+		tracesCfg := cfg.Traces.TraceStreamConfig()
+		tracesCfg.Monitor = mon
+		p.traceStream = traces.New(tracesCfg)
 	}
 
 	p.videoStreams = make([]*video.VideoRTSPStream, 0, len(cfg.Video))
@@ -467,6 +518,9 @@ func (p *persistentStreams) start() {
 	if p.lowstateStream != nil {
 		p.lowstateStream.Start()
 	}
+	if p.traceStream != nil {
+		p.traceStream.Start()
+	}
 	for _, vs := range p.videoStreams {
 		vs.Start()
 	}
@@ -488,6 +542,9 @@ func (p *persistentStreams) stop() {
 	}
 	if p.lowstateStream != nil {
 		p.lowstateStream.Stop()
+	}
+	if p.traceStream != nil {
+		p.traceStream.Stop()
 	}
 	for _, vs := range p.videoStreams {
 		vs.Stop()
@@ -525,6 +582,11 @@ func (p *persistentStreams) rotate(cfg config.Config, sess *session.Session) {
 			slog.Error("lowstate: rotate failed", "err", err)
 		}
 	}
+	if p.traceStream != nil {
+		if err := p.traceStream.Rotate(cfg.Traces.OutputFile); err != nil {
+			slog.Error("traces: rotate failed", "err", err)
+		}
+	}
 	for i, vs := range p.videoStreams {
 		vc := cfg.Video[i]
 		out := realPath(vc.OutputFile, sessionRealDir)
@@ -534,6 +596,25 @@ func (p *persistentStreams) rotate(cfg config.Config, sess *session.Session) {
 	audioOut := realPath(cfg.Audio.OutputFile, sessionRealDir)
 	audioTs := realPath(cfg.Audio.TimestampsFile, sessionRealDir)
 	p.audioStream.Rotate(sessionStart, audioTs, framesFileFor(audioOut, "_packets.csv"))
+}
+
+// awaitSegments waits for every video/audio stream to relocate
+// sessionStart's segment before upload -- ffmpeg closes segments a full rotation interval late, so this must run first.
+func (p *persistentStreams) awaitSegments(ctx context.Context, sessionStart time.Time) {
+	var wg sync.WaitGroup
+	for _, vs := range p.videoStreams {
+		wg.Add(1)
+		go func(vs *video.VideoRTSPStream) {
+			defer wg.Done()
+			vs.WaitSegment(ctx, sessionStart)
+		}(vs)
+	}
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		p.audioStream.WaitSegment(ctx, sessionStart)
+	}()
+	wg.Wait()
 }
 
 // realPath rewrites path to sit in realDir instead of whatever directory it

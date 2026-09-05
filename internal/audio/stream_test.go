@@ -1,6 +1,7 @@
 package audio
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -74,18 +75,19 @@ func TestStop_idempotent(t *testing.T) {
 }
 
 func TestParseSegmentListLine_parsesFilenameAndStart(t *testing.T) {
-	file, start, ok := parseSegmentListLine("20260826T185832.ogg,12.500000,15.000000")
+	file, start, end, ok := parseSegmentListLine("20260826T185832.ogg,12.500000,15.000000")
 	require.True(t, ok)
 	require.Equal(t, "20260826T185832.ogg", file)
 	require.InDelta(t, 12.5, start, 1e-9)
+	require.InDelta(t, 15.0, end, 1e-9)
 }
 
 func TestParseSegmentListLine_rejectsMalformedLine(t *testing.T) {
-	_, _, ok := parseSegmentListLine("not,a,valid,,line")
+	_, _, _, ok := parseSegmentListLine("not,a,valid,,line")
 	require.False(t, ok, "a non-numeric start field must be rejected")
 
-	_, _, ok = parseSegmentListLine("onlyonefield")
-	require.False(t, ok, "a line missing the start field must be rejected")
+	_, _, _, ok = parseSegmentListLine("onlyonefield")
+	require.False(t, ok, "a line missing the start/end fields must be rejected")
 }
 
 func TestFinishSegment_relocatesFileIndexesItAndPrefixesWithStem(t *testing.T) {
@@ -103,7 +105,8 @@ func TestFinishSegment_relocatesFileIndexesItAndPrefixesWithStem(t *testing.T) {
 	processStart := time.Unix(1_800_000_000, 0)
 	stream.Rotate(processStart, filepath.Join(sessionDir, "audio_timestamps.csv"), "") // no frames file: skip async ffprobe
 
-	stream.finishSegment(scratchFile, 12.5, processStart, 5_000_000_000)
+	segmentStart := processStart.Add(12500 * time.Millisecond)
+	stream.finishSegment(scratchFile, 0, segmentStart, 5_000_000_000)
 
 	wantFinal := filepath.Join(sessionDir, "audio_20260826T185832.ogg")
 	require.FileExists(t, wantFinal, "the segment must be relocated with its stem prefixed")
@@ -113,8 +116,7 @@ func TestFinishSegment_relocatesFileIndexesItAndPrefixesWithStem(t *testing.T) {
 	require.NoError(t, err)
 	content := string(data)
 	require.Contains(t, content, "recording_start_unix_ns,segment_file,mono_ns")
-	wantStartUnixNs := processStart.Add(12500 * time.Millisecond).UnixNano()
-	require.Contains(t, content, fmt.Sprintf("%d", wantStartUnixNs), "the indexed start time must include the segment's offset into the stream")
+	require.Contains(t, content, fmt.Sprintf("%d", segmentStart.UnixNano()), "the indexed start time must match the segment's own start")
 	require.Contains(t, content, "audio_20260826T185832.ogg")
 }
 
@@ -132,10 +134,9 @@ func TestWatchSegments_joinsBareFilenameFromSegmentListWithScratchDir(t *testing
 		OutputFile: filepath.Join(t.TempDir(), "audio.ogg"),
 		ScratchDir: scratchDir,
 	})
-	processStart := time.Unix(1_800_000_000, 0)
-	stream.Rotate(processStart, filepath.Join(sessionDir, "audio_timestamps.csv"), "")
+	stream.Rotate(time.Now(), filepath.Join(sessionDir, "audio_timestamps.csv"), "")
 
-	stream.watchSegments(strings.NewReader("20260826T185832.ogg,0.000000,3.000000\n"), processStart, 0)
+	stream.watchSegments(strings.NewReader("20260826T185832.ogg,0.000000,3.000000\n"))
 
 	require.FileExists(t, filepath.Join(sessionDir, "audio_20260826T185832.ogg"),
 		"watchSegments must join the segment_list's bare filename with ScratchDir before relocating")
@@ -196,6 +197,130 @@ func TestTargetFor_attributesByOwnTimestampEvenWhenRotateRacesAhead(t *testing.T
 	require.FileExists(t, filepath.Join(sessionNDir, "audio_seg.ogg"),
 		"a segment that started during session N must land in session N's directory, even if Rotate for N+1 already ran")
 	require.NoFileExists(t, filepath.Join(sessionN1Dir, "audio_seg.ogg"))
+}
+
+// Regression: a segment starting just after a rotation boundary must land
+// in the new session even after a long-running process's clock has drifted.
+func TestFinishSegment_notMisledByAccumulatedProcessDrift(t *testing.T) {
+	scratchDir := t.TempDir()
+	sessionNDir := t.TempDir()
+	sessionN1Dir := t.TempDir()
+
+	sessionNStart := time.Unix(1_800_000_000, 0)
+	sessionN1Start := sessionNStart.Add(5 * time.Minute)
+
+	stream := New(Config{
+		RTSPURL:        "rtsp://192.0.2.1:8554/unreachable",
+		OutputFile:     filepath.Join(t.TempDir(), "audio.ogg"),
+		TimestampsFile: filepath.Join(sessionNDir, "audio_timestamps.csv"),
+		SessionStart:   sessionNStart,
+		ScratchDir:     scratchDir,
+	})
+	stream.ensureTarget()
+	stream.Rotate(sessionN1Start, filepath.Join(sessionN1Dir, "audio_timestamps.csv"), "")
+
+	segmentDuration := 5 * time.Minute
+	trueSegmentStart := sessionN1Start.Add(1 * time.Second)
+	observedClose := trueSegmentStart.Add(segmentDuration)
+
+	seg := filepath.Join(scratchDir, "seg.ogg")
+	require.NoError(t, os.WriteFile(seg, []byte("a"), 0o644))
+
+	stream.finishSegment(seg, segmentDuration, observedClose, 0)
+
+	require.FileExists(t, filepath.Join(sessionN1Dir, "audio_seg.ogg"),
+		"a segment observed to close one full span after starting just past the rotation boundary must land in the new session")
+	require.NoFileExists(t, filepath.Join(sessionNDir, "audio_seg.ogg"))
+}
+
+// Regression: an uploader triggered right on rotation must be able to wait
+// for the session's own segment to land instead of racing finishSegment.
+func TestWaitSegment_blocksUntilFinishSegmentRelocatesThatSessionsSegment(t *testing.T) {
+	scratchDir := t.TempDir()
+	sessionDir := t.TempDir()
+	sessionStart := time.Unix(1_800_000_000, 0)
+
+	stream := New(Config{
+		RTSPURL:        "rtsp://192.0.2.1:8554/unreachable",
+		OutputFile:     filepath.Join(t.TempDir(), "audio.ogg"),
+		TimestampsFile: filepath.Join(sessionDir, "audio_timestamps.csv"),
+		SessionStart:   sessionStart,
+		ScratchDir:     scratchDir,
+	})
+	stream.ensureTarget()
+
+	waited := make(chan bool, 1)
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		waited <- stream.WaitSegment(ctx, sessionStart)
+	}()
+
+	select {
+	case <-waited:
+		t.Fatal("WaitSegment returned before finishSegment relocated anything")
+	case <-time.After(20 * time.Millisecond):
+	}
+
+	seg := filepath.Join(scratchDir, "seg.ogg")
+	require.NoError(t, os.WriteFile(seg, []byte("a"), 0o644))
+	stream.finishSegment(seg, 0, sessionStart, 0)
+
+	require.True(t, <-waited, "WaitSegment must return true once finishSegment relocates the session's segment")
+}
+
+// A target that never receives a segment (RTSP never delivered data for
+// that session) must not hang WaitSegment past its context.
+func TestWaitSegment_returnsFalseWhenContextEndsFirst(t *testing.T) {
+	sessionStart := time.Unix(1_800_000_000, 0)
+	stream := New(Config{
+		RTSPURL:      "rtsp://192.0.2.1:8554/unreachable",
+		OutputFile:   filepath.Join(t.TempDir(), "audio.ogg"),
+		SessionStart: sessionStart,
+		ScratchDir:   t.TempDir(),
+	})
+	stream.ensureTarget()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
+	defer cancel()
+	require.False(t, stream.WaitSegment(ctx, sessionStart))
+}
+
+// A relocation failure must still unblock waiters rather than leaving them
+// to time out every time.
+func TestWaitSegment_returnsTrueImmediatelyAfterRelocationFailure(t *testing.T) {
+	sessionDir := t.TempDir()
+	sessionStart := time.Unix(1_800_000_000, 0)
+	stream := New(Config{
+		RTSPURL:        "rtsp://192.0.2.1:8554/unreachable",
+		OutputFile:     filepath.Join(t.TempDir(), "audio.ogg"),
+		TimestampsFile: filepath.Join(sessionDir, "audio_timestamps.csv"),
+		SessionStart:   sessionStart,
+		ScratchDir:     t.TempDir(),
+	})
+	stream.ensureTarget()
+
+	// scratchFile does not exist, so os.Rename inside finishSegment fails.
+	stream.finishSegment(filepath.Join(t.TempDir(), "missing.ogg"), 0, sessionStart, 0)
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	require.True(t, stream.WaitSegment(ctx, sessionStart),
+		"a relocation failure must still mark the target ready so callers don't wait out the full timeout")
+}
+
+// No target was ever installed for this sessionStart.
+func TestWaitSegment_returnsFalseForUnknownSessionStart(t *testing.T) {
+	stream := New(Config{
+		RTSPURL:    "rtsp://192.0.2.1:8554/unreachable",
+		OutputFile: filepath.Join(t.TempDir(), "audio.ogg"),
+		ScratchDir: t.TempDir(),
+	})
+	stream.ensureTarget()
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	require.False(t, stream.WaitSegment(ctx, time.Unix(1_900_000_000, 0)))
 }
 
 func TestAppendSegmentEntry_emptyPath_isNoOp(t *testing.T) {

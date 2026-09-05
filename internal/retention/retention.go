@@ -25,6 +25,20 @@ const uploadMarkerName = ".uploaded"
 // uploadTimeout bounds one session's upload, whether kicked off by rotation, schedule, or shutdown.
 const uploadTimeout = 10 * time.Minute
 
+// minSessionAge is a second, time-based line of defense protecting the
+// currently-recording session, alongside the dir == currentDir check.
+const minSessionAge = 30 * time.Second
+
+// tooYoungToSweep reports whether dir's own recorded start time is within
+// minSessionAge of now.
+func tooYoungToSweep(dir string) bool {
+	start := ReadStartedAt(dir)
+	if start.IsZero() {
+		return false
+	}
+	return time.Since(start) < minSessionAge
+}
+
 // IsUploaded reports whether dir was already fully uploaded.
 func IsUploaded(dir string) bool {
 	_, err := os.Stat(filepath.Join(dir, uploadMarkerName))
@@ -124,12 +138,9 @@ func SnapshotTimebase(bootPath, sessionDir string) {
 	}
 }
 
-// UploadSession uploads one finished session directory; on failure the files are kept locally for a later retry.
-//
-// dir is claimed for the duration of the upload, so a concurrent call for
-// the same dir (another upload path, or retention's cap enforcement) skips
-// it instead of racing.
-func UploadSession(ctl *control.State, client *upload.Client, dir, sessionDir string, startedAt time.Time, deleteAfter bool, opts upload.Options) {
+// UploadSession uploads one finished session directory (kept locally for
+// retry on failure); awaitReady, if non-nil, blocks first so still-relocating streams can settle before dir's contents are listed.
+func UploadSession(ctl *control.State, client *upload.Client, dir, sessionDir string, startedAt time.Time, deleteAfter bool, opts upload.Options, awaitReady func(context.Context)) {
 	if !ctl.TryClaimDir(dir) {
 		slog.Info("retention: skipping upload, already in flight", "dir", dir)
 		return
@@ -138,6 +149,10 @@ func UploadSession(ctl *control.State, client *upload.Client, dir, sessionDir st
 
 	ctx, cancel := context.WithTimeout(context.Background(), uploadTimeout)
 	defer cancel()
+
+	if awaitReady != nil {
+		awaitReady(ctx)
+	}
 
 	if err := client.UploadSession(ctx, dir, sessionDir, startedAt, opts); err != nil {
 		slog.Error("session upload failed; files kept locally for retry", "dir", dir, "err", err)
@@ -153,8 +168,9 @@ func UploadSession(ctl *control.State, client *upload.Client, dir, sessionDir st
 	}
 }
 
-// UploadFinishedSessionAsync kicks off finished's upload in the background if uploading is enabled.
-func UploadFinishedSessionAsync(wg *sync.WaitGroup, uploader *upload.Client, ctl *control.State, recordingsDir, bootTimebasePath string, finished *session.Session, uploadDelete bool) {
+// UploadFinishedSessionAsync kicks off finished's upload in the background
+// if uploading is enabled; awaitReady is passed straight through to UploadSession.
+func UploadFinishedSessionAsync(wg *sync.WaitGroup, uploader *upload.Client, ctl *control.State, recordingsDir, bootTimebasePath string, finished *session.Session, uploadDelete bool, awaitReady func(context.Context)) {
 	if uploader == nil || !ctl.Uploading() {
 		return
 	}
@@ -162,7 +178,7 @@ func UploadFinishedSessionAsync(wg *sync.WaitGroup, uploader *upload.Client, ctl
 	wg.Add(1)
 	go func(dir, apiDir string, startedAt time.Time, opts upload.Options) {
 		defer wg.Done()
-		UploadSession(ctl, uploader, dir, apiDir, startedAt, uploadDelete, opts)
+		UploadSession(ctl, uploader, dir, apiDir, startedAt, uploadDelete, opts, awaitReady)
 	}(finished.RealDir(), APISessionDir(recordingsDir, finished.RealDir()), time.Unix(0, finished.StartUnixNs()), opts)
 }
 
@@ -175,7 +191,7 @@ func Sweep(ctl *control.State, uploader *upload.Client, recordingsDir, bootTimeb
 	}
 
 	protected := func(dir string) bool {
-		return dir == currentDir || BootSessionDir(bootTimebasePath, dir)
+		return dir == currentDir || BootSessionDir(bootTimebasePath, dir) || tooYoungToSweep(dir)
 	}
 
 	CatchUpUploads(ctl, uploader, dirs, protected, recordingsDir, bootTimebasePath)
@@ -192,7 +208,7 @@ func CatchUpUploads(ctl *control.State, uploader *upload.Client, dirs []string, 
 			continue
 		}
 		opts := UploadOptions(bootTimebasePath, dir)
-		UploadSession(ctl, uploader, dir, APISessionDir(recordingsDir, dir), ReadStartedAt(dir), false, opts)
+		UploadSession(ctl, uploader, dir, APISessionDir(recordingsDir, dir), ReadStartedAt(dir), false, opts, nil)
 	}
 }
 
@@ -279,7 +295,7 @@ func RunSweeps(ctx context.Context, uploader *upload.Client, recordingsDir, boot
 		}
 		cd := currentDir()
 		return dirs, func(dir string) bool {
-			return dir == cd || BootSessionDir(bootTimebasePath, dir)
+			return dir == cd || BootSessionDir(bootTimebasePath, dir) || tooYoungToSweep(dir)
 		}, true
 	}
 

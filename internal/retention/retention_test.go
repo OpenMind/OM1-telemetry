@@ -3,6 +3,7 @@ package retention
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -249,6 +250,51 @@ func TestSweep_uploadsOldestUnmarkedFirstAndSkipsProtectedAndAlreadyUploaded(t *
 	require.Zero(t, api.createCalls[APISessionDir(root, live)])
 }
 
+// Reproduces the race this protection closes: a session directory that
+// exists on disk but hasn't yet been reported as "current" must not upload.
+func TestSweep_neverUploadsAVeryYoungDirEvenIfNotReportedCurrent(t *testing.T) {
+	api, apiURL := newMinimalFakeAPI(t)
+	client := upload.New(upload.Config{BaseURL: apiURL, APIKey: "k"})
+
+	root := t.TempDir()
+	justOpened := filepath.Join(root, "2026-08-31", "2026-08-31_21-22-33")
+	startedNs := time.Now().Add(-1 * time.Second).UnixNano()
+	writeFile(t, justOpened, "meta.json", []byte(fmt.Sprintf(`{"session_start_unix_ns":%d}`, startedNs)))
+
+	bootTimebasePath := filepath.Join(root, "does-not-exist.jsonl")
+
+	Sweep(control.New(), client, root, bootTimebasePath, "", 0)
+
+	require.False(t, IsUploaded(justOpened),
+		"a directory younger than minSessionAge must never be uploaded, even when it isn't reported as the current session")
+
+	api.mu.Lock()
+	defer api.mu.Unlock()
+	require.Zero(t, api.createCalls[APISessionDir(root, justOpened)])
+}
+
+// The age check must not block legitimate catch-up uploads -- only ones
+// still inside the race window.
+func TestSweep_uploadsADirOlderThanMinSessionAge(t *testing.T) {
+	api, apiURL := newMinimalFakeAPI(t)
+	client := upload.New(upload.Config{BaseURL: apiURL, APIKey: "k"})
+
+	root := t.TempDir()
+	old := filepath.Join(root, "2026-08-31", "2026-08-31_21-22-33")
+	startedNs := time.Now().Add(-2 * minSessionAge).UnixNano()
+	writeFile(t, old, "meta.json", []byte(fmt.Sprintf(`{"session_start_unix_ns":%d}`, startedNs)))
+
+	bootTimebasePath := filepath.Join(root, "does-not-exist.jsonl")
+
+	Sweep(control.New(), client, root, bootTimebasePath, "", 0)
+
+	require.True(t, IsUploaded(old), "a directory well past minSessionAge must upload normally")
+
+	api.mu.Lock()
+	defer api.mu.Unlock()
+	require.Equal(t, 1, api.createCalls[APISessionDir(root, old)])
+}
+
 // Rotation's async upload and a concurrent catch-up sweep must never both
 // upload the same directory at once.
 func TestUploadSession_concurrentCallsForSameDirOnlyUploadOnce(t *testing.T) {
@@ -273,7 +319,7 @@ func TestUploadSession_concurrentCallsForSameDirOnlyUploadOnce(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			UploadSession(ctl, client, dir, "api/dir", time.Time{}, false, upload.Options{})
+			UploadSession(ctl, client, dir, "api/dir", time.Time{}, false, upload.Options{}, nil)
 		}()
 	}
 
@@ -284,6 +330,45 @@ func TestUploadSession_concurrentCallsForSameDirOnlyUploadOnce(t *testing.T) {
 	wg.Wait()
 	require.EqualValues(t, 1, calls.Load(),
 		"the second concurrent UploadSession call for the same dir must be skipped entirely, not just deduplicated after the fact")
+}
+
+// Proves awaitReady runs to completion, and any files it adds are visible,
+// before UploadSession's network calls start.
+func TestUploadSession_awaitReadyCompletesBeforeUploadStarts(t *testing.T) {
+	api, apiURL := newMinimalFakeAPI(t)
+	client := upload.New(upload.Config{BaseURL: apiURL, APIKey: "k"})
+
+	dir := t.TempDir()
+	writeFile(t, dir, "meta.json", []byte(`{}`))
+
+	release := make(chan struct{})
+	var awaitReadyDone atomic.Bool
+	awaitReady := func(ctx context.Context) {
+		<-release
+		writeFile(t, dir, "front_camera_raw_seg.mp4", []byte("video"))
+		awaitReadyDone.Store(true)
+	}
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		UploadSession(control.New(), client, dir, "api/dir", time.Time{}, false, upload.Options{}, awaitReady)
+	}()
+
+	sessionCreated := func() bool {
+		api.mu.Lock()
+		defer api.mu.Unlock()
+		return api.createCalls["api/dir"] > 0
+	}
+	require.Never(t, sessionCreated, 50*time.Millisecond, 5*time.Millisecond,
+		"the session must not be created -- which is when regularFiles snapshots dir -- until awaitReady returns")
+
+	close(release)
+	<-done
+
+	require.True(t, awaitReadyDone.Load())
+	require.True(t, sessionCreated())
+	require.True(t, IsUploaded(dir), "the session, including the file awaitReady added, must be reported as fully uploaded")
 }
 
 // Cap enforcement must not block on a stuck catch-up upload.

@@ -2,6 +2,7 @@ package heartbeat
 
 import (
 	"context"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -141,4 +142,68 @@ func TestCheck_noWarnWhenTicksArrive(t *testing.T) {
 
 	v, _ := mon.streams.Load("lidar")
 	require.False(t, v.(*state).warned, "should not warn when stream is ticking at expected rate")
+}
+
+// Reproduces the real gap this closes: a DDS reader that never received the
+// writer's post-restart discovery burst just sits there silently forever.
+func TestRegisterRecoverable_callsReconnectWhenBroken(t *testing.T) {
+	mon := NewMonitor(5 * time.Millisecond)
+	called := make(chan struct{}, 1)
+	mon.RegisterRecoverable("pointcloud", 10, func() {
+		select {
+		case called <- struct{}{}:
+		default:
+		}
+	})
+
+	time.Sleep(20 * time.Millisecond)
+	mon.check()
+
+	select {
+	case <-called:
+	case <-time.After(2 * time.Second):
+		t.Fatal("reconnect was not called for a stream that never received a message")
+	}
+}
+
+func TestRegisterRecoverable_doesNotCallReconnectWhileHealthy(t *testing.T) {
+	mon := NewMonitor(5 * time.Millisecond)
+	called := make(chan struct{}, 1)
+	mon.RegisterRecoverable("lidar", 10, func() {
+		select {
+		case called <- struct{}{}:
+		default:
+		}
+	})
+
+	for range 100 {
+		mon.Tick("lidar")
+	}
+	time.Sleep(20 * time.Millisecond)
+	mon.check()
+
+	select {
+	case <-called:
+		t.Fatal("reconnect must not be called for a healthy stream")
+	case <-time.After(50 * time.Millisecond):
+	}
+}
+
+// check() must not pile up a new reconnect goroutine on top of one still running.
+func TestRegisterRecoverable_doesNotOverlapReconnects(t *testing.T) {
+	mon := NewMonitor(5 * time.Millisecond)
+	var calls atomic.Int32
+	release := make(chan struct{})
+	mon.RegisterRecoverable("odom", 30, func() {
+		calls.Add(1)
+		<-release
+	})
+
+	time.Sleep(20 * time.Millisecond)
+	mon.check()
+	mon.check()
+
+	time.Sleep(20 * time.Millisecond)
+	require.Equal(t, int32(1), calls.Load(), "a reconnect already in flight must not be duplicated")
+	close(release)
 }

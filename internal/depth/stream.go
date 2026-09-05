@@ -35,6 +35,10 @@ type DepthStream struct {
 	cancel  context.CancelFunc
 	wg      sync.WaitGroup
 
+	// reconnect asks a running record() to tear down and recreate its DDS
+	// subscription. Buffered so a request never blocks; see Reconnect.
+	reconnect chan struct{}
+
 	filesMu sync.Mutex
 	files   *outputFiles
 }
@@ -49,7 +53,7 @@ type outputFiles struct {
 }
 
 func New(cfg Config) *DepthStream {
-	return &DepthStream{cfg: cfg}
+	return &DepthStream{cfg: cfg, reconnect: make(chan struct{}, 1)}
 }
 
 func (d *DepthStream) Start() {
@@ -90,6 +94,15 @@ func (d *DepthStream) Rotate(dataFile, timestampsFile string) error {
 		closeOutputFiles(old, "depth")
 	}
 	return nil
+}
+
+// Reconnect tears down and recreates the DDS subscription without touching
+// output files. Non-blocking; see heartbeat.Monitor.RegisterRecoverable.
+func (d *DepthStream) Reconnect() {
+	select {
+	case d.reconnect <- struct{}{}:
+	default:
+	}
 }
 
 func (d *DepthStream) loop(ctx context.Context) {
@@ -146,6 +159,9 @@ func (d *DepthStream) record(ctx context.Context) error {
 		case <-ctx.Done():
 			d.flush()
 			return nil
+		case <-d.reconnect:
+			d.flush()
+			return fmt.Errorf("reconnect requested")
 		case <-syncTicker.C:
 			d.flush()
 		case sample, ok := <-receiver:
