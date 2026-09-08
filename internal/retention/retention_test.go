@@ -16,6 +16,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"om1-telemetry/config"
+	"om1-telemetry/internal/clock"
 	"om1-telemetry/internal/control"
 	"om1-telemetry/internal/upload"
 )
@@ -293,6 +294,47 @@ func TestSweep_uploadsADirOlderThanMinSessionAge(t *testing.T) {
 	api.mu.Lock()
 	defer api.mu.Unlock()
 	require.Equal(t, 1, api.createCalls[APISessionDir(root, old)])
+}
+
+// A failed upload-on-rotation attempt for the boot session's own directory
+// must still be retried by later catch-up sweeps -- otherwise one lost race
+// against a slow API strands that directory's camera/lidar/odom files for as
+// long as the process keeps running, since nothing else ever asks it to
+// upload again. The still-growing clock journal itself must never be
+// touched: not uploaded (UploadOptions.PreserveJSONL keeps it off the
+// request), and not deleted by cap enforcement either.
+func TestSweep_retriesBootSessionDirOnUploadButNeverDeletesIt(t *testing.T) {
+	api, apiURL := newMinimalFakeAPI(t)
+	client := upload.New(upload.Config{BaseURL: apiURL, APIKey: "k"})
+
+	root := t.TempDir()
+	bootDir := filepath.Join(root, "2026-08-14", "2026-08-14_00-00-00")
+	startedNs := time.Now().Add(-2 * minSessionAge).UnixNano()
+	writeFile(t, bootDir, "meta.json", []byte(fmt.Sprintf(`{"session_start_unix_ns":%d}`, startedNs)))
+	writeFile(t, bootDir, "lidar_scans.bin", make([]byte, 200))
+	bootTimebasePath := filepath.Join(bootDir, clock.TimebaseName)
+	require.NoError(t, os.WriteFile(bootTimebasePath, []byte(`{"kind":"start"}`+"\n"), 0o644))
+
+	// A first attempt (e.g. on rotation) already failed, exactly as it would
+	// after a "context deadline exceeded" from the API -- so the directory is
+	// closed but not yet marked uploaded, same as any other stalled session.
+
+	Sweep(control.New(), client, root, bootTimebasePath, "", 0)
+
+	require.True(t, IsUploaded(bootDir),
+		"a catch-up sweep must retry the boot session's own directory, not strand it behind one failed attempt")
+	api.mu.Lock()
+	require.Equal(t, 1, api.createCalls[APISessionDir(root, bootDir)])
+	api.mu.Unlock()
+	require.FileExists(t, bootTimebasePath, "the live clock journal must never be swept away, uploaded or not")
+
+	// Now force cap enforcement to want to reclaim space: the boot dir is the
+	// only, and now uploaded, directory on disk, so it would normally be first
+	// in line -- but it must still be spared because its journal is live.
+	Sweep(control.New(), client, root, bootTimebasePath, "", 10)
+
+	require.DirExists(t, bootDir, "cap enforcement must never delete the boot session directory while its journal is live")
+	require.FileExists(t, bootTimebasePath)
 }
 
 // Rotation's async upload and a concurrent catch-up sweep must never both

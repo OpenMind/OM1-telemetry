@@ -190,12 +190,20 @@ func Sweep(ctl *control.State, uploader *upload.Client, recordingsDir, bootTimeb
 		return
 	}
 
-	protected := func(dir string) bool {
+	// The boot session's own directory must never be deleted out from under its
+	// still-growing clock journal, but it must still be retried on the upload
+	// path: UploadOptions already excludes that live journal from the upload
+	// (see PreserveJSONL), so retrying only re-sends the rest of the directory
+	// -- camera clips, lidar, odom, etc. -- which finished long ago. Excluding
+	// the whole directory from CatchUpUploads would instead strand it forever
+	// behind one failed rotation-time attempt, for as long as the process runs.
+	uploadProtected := func(dir string) bool { return dir == currentDir || tooYoungToSweep(dir) }
+	deleteProtected := func(dir string) bool {
 		return dir == currentDir || BootSessionDir(bootTimebasePath, dir) || tooYoungToSweep(dir)
 	}
 
-	CatchUpUploads(ctl, uploader, dirs, protected, recordingsDir, bootTimebasePath)
-	EnforceRetentionCap(ctl, recordingsDir, dirs, protected, maxBytes)
+	CatchUpUploads(ctl, uploader, dirs, uploadProtected, recordingsDir, bootTimebasePath)
+	EnforceRetentionCap(ctl, recordingsDir, dirs, deleteProtected, maxBytes)
 }
 
 // CatchUpUploads retries every closed, not-yet-uploaded, non-protected directory in dirs, oldest first.
@@ -287,16 +295,21 @@ func RunSweeps(ctx context.Context, uploader *upload.Client, recordingsDir, boot
 		interval = 5 * time.Minute
 	}
 
-	listClosed := func() (dirs []string, protected func(string) bool, ok bool) {
+	// See the comment in Sweep: uploads may still target the boot session's own
+	// directory (its live clock journal is excluded per-file via
+	// UploadOptions), but deletion must not touch that directory at all.
+	listClosed := func() (dirs []string, uploadProtected, deleteProtected func(string) bool, ok bool) {
 		dirs, err := session.ListClosed(recordingsDir)
 		if err != nil {
 			slog.Warn("retention: cannot list session directories", "dir", recordingsDir, "err", err)
-			return nil, nil, false
+			return nil, nil, nil, false
 		}
 		cd := currentDir()
-		return dirs, func(dir string) bool {
+		uploadProtected = func(dir string) bool { return dir == cd || tooYoungToSweep(dir) }
+		deleteProtected = func(dir string) bool {
 			return dir == cd || BootSessionDir(bootTimebasePath, dir) || tooYoungToSweep(dir)
-		}, true
+		}
+		return dirs, uploadProtected, deleteProtected, true
 	}
 
 	var wg sync.WaitGroup
@@ -312,8 +325,8 @@ func RunSweeps(ctx context.Context, uploader *upload.Client, recordingsDir, boot
 				case <-ctx.Done():
 					return
 				case <-ticker.C:
-					if dirs, protected, ok := listClosed(); ok {
-						EnforceRetentionCap(ctl, recordingsDir, dirs, protected, cfg.MaxBytes)
+					if dirs, _, deleteProtected, ok := listClosed(); ok {
+						EnforceRetentionCap(ctl, recordingsDir, dirs, deleteProtected, cfg.MaxBytes)
 					}
 				}
 			}
@@ -330,8 +343,8 @@ func RunSweeps(ctx context.Context, uploader *upload.Client, recordingsDir, boot
 				if !ctl.Uploading() {
 					return
 				}
-				if dirs, protected, ok := listClosed(); ok {
-					CatchUpUploads(ctl, uploader, dirs, protected, recordingsDir, bootTimebasePath)
+				if dirs, uploadProtected, _, ok := listClosed(); ok {
+					CatchUpUploads(ctl, uploader, dirs, uploadProtected, recordingsDir, bootTimebasePath)
 				}
 			}
 			for {
