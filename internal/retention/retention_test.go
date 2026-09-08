@@ -15,6 +15,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"om1-telemetry/config"
+	"om1-telemetry/internal/clock"
 	"om1-telemetry/internal/control"
 	"om1-telemetry/internal/upload"
 )
@@ -247,6 +248,34 @@ func TestSweep_uploadsOldestUnmarkedFirstAndSkipsProtectedAndAlreadyUploaded(t *
 	require.Zero(t, api.createCalls[APISessionDir(root, alreadyDone)],
 		"a session already marked uploaded must not be re-uploaded")
 	require.Zero(t, api.createCalls[APISessionDir(root, live)])
+}
+
+// A failed upload for the boot session's own directory must still be
+// retried by later sweeps, without ever touching its live clock journal.
+func TestSweep_retriesBootSessionDirOnUploadButNeverDeletesIt(t *testing.T) {
+	api, apiURL := newMinimalFakeAPI(t)
+	client := upload.New(upload.Config{BaseURL: apiURL, APIKey: "k"})
+
+	root := t.TempDir()
+	bootDir := filepath.Join(root, "2026-08-14", "2026-08-14_00-00-00")
+	writeFile(t, bootDir, "meta.json", []byte(`{}`))
+	writeFile(t, bootDir, "lidar_scans.bin", make([]byte, 200))
+	bootTimebasePath := filepath.Join(bootDir, clock.TimebaseName)
+	require.NoError(t, os.WriteFile(bootTimebasePath, []byte(`{"kind":"start"}`+"\n"), 0o644))
+
+	Sweep(control.New(), client, root, bootTimebasePath, "", 0)
+
+	require.True(t, IsUploaded(bootDir),
+		"a catch-up sweep must retry the boot session's own directory, not strand it behind one failed attempt")
+	api.mu.Lock()
+	require.Equal(t, 1, api.createCalls[APISessionDir(root, bootDir)])
+	api.mu.Unlock()
+	require.FileExists(t, bootTimebasePath, "the live clock journal must never be swept away, uploaded or not")
+
+	Sweep(control.New(), client, root, bootTimebasePath, "", 10)
+
+	require.DirExists(t, bootDir, "cap enforcement must never delete the boot session directory while its journal is live")
+	require.FileExists(t, bootTimebasePath)
 }
 
 // Rotation's async upload and a concurrent catch-up sweep must never both
