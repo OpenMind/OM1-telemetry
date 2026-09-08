@@ -250,13 +250,8 @@ func TestSweep_uploadsOldestUnmarkedFirstAndSkipsProtectedAndAlreadyUploaded(t *
 	require.Zero(t, api.createCalls[APISessionDir(root, live)])
 }
 
-// A failed upload-on-rotation attempt for the boot session's own directory
-// must still be retried by later catch-up sweeps -- otherwise one lost race
-// against a slow API strands that directory's camera/lidar/odom files for as
-// long as the process keeps running, since nothing else ever asks it to
-// upload again. The still-growing clock journal itself must never be
-// touched: not uploaded (UploadOptions.PreserveJSONL keeps it off the
-// request), and not deleted by cap enforcement either.
+// A failed upload for the boot session's own directory must still be
+// retried by later sweeps, without ever touching its live clock journal.
 func TestSweep_retriesBootSessionDirOnUploadButNeverDeletesIt(t *testing.T) {
 	api, apiURL := newMinimalFakeAPI(t)
 	client := upload.New(upload.Config{BaseURL: apiURL, APIKey: "k"})
@@ -268,10 +263,6 @@ func TestSweep_retriesBootSessionDirOnUploadButNeverDeletesIt(t *testing.T) {
 	bootTimebasePath := filepath.Join(bootDir, clock.TimebaseName)
 	require.NoError(t, os.WriteFile(bootTimebasePath, []byte(`{"kind":"start"}`+"\n"), 0o644))
 
-	// A first attempt (e.g. on rotation) already failed, exactly as it would
-	// after a "context deadline exceeded" from the API -- so the directory is
-	// closed but not yet marked uploaded, same as any other stalled session.
-
 	Sweep(control.New(), client, root, bootTimebasePath, "", 0)
 
 	require.True(t, IsUploaded(bootDir),
@@ -281,9 +272,6 @@ func TestSweep_retriesBootSessionDirOnUploadButNeverDeletesIt(t *testing.T) {
 	api.mu.Unlock()
 	require.FileExists(t, bootTimebasePath, "the live clock journal must never be swept away, uploaded or not")
 
-	// Now force cap enforcement to want to reclaim space: the boot dir is the
-	// only, and now uploaded, directory on disk, so it would normally be first
-	// in line -- but it must still be spared because its journal is live.
 	Sweep(control.New(), client, root, bootTimebasePath, "", 10)
 
 	require.DirExists(t, bootDir, "cap enforcement must never delete the boot session directory while its journal is live")

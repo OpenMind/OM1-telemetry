@@ -174,13 +174,6 @@ func Sweep(ctl *control.State, uploader *upload.Client, recordingsDir, bootTimeb
 		return
 	}
 
-	// The boot session's own directory must never be deleted out from under its
-	// still-growing clock journal, but it must still be retried on the upload
-	// path: UploadOptions already excludes that live journal from the upload
-	// (see PreserveJSONL), so retrying only re-sends the rest of the directory
-	// -- camera clips, lidar, odom, etc. -- which finished long ago. Excluding
-	// the whole directory from CatchUpUploads would instead strand it forever
-	// behind one failed rotation-time attempt, for as long as the process runs.
 	uploadProtected := func(dir string) bool { return dir == currentDir }
 	deleteProtected := func(dir string) bool { return dir == currentDir || BootSessionDir(bootTimebasePath, dir) }
 
@@ -277,9 +270,6 @@ func RunSweeps(ctx context.Context, uploader *upload.Client, recordingsDir, boot
 		interval = 5 * time.Minute
 	}
 
-	// See the comment in Sweep: uploads may still target the boot session's own
-	// directory (its live clock journal is excluded per-file via
-	// UploadOptions), but deletion must not touch that directory at all.
 	listClosed := func() (dirs []string, uploadProtected, deleteProtected func(string) bool, ok bool) {
 		dirs, err := session.ListClosed(recordingsDir)
 		if err != nil {
