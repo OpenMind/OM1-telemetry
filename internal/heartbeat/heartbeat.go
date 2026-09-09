@@ -35,6 +35,10 @@ type state struct {
 	// reset the moment it recovers. Drives the stuck-handler escalation.
 	consecutiveBad int
 	escalated      bool
+
+	// everWorked latches true on the first tick ever; only a stream that
+	// worked and got stuck is eligible to escalate.
+	everWorked bool
 }
 
 func NewMonitor(checkInterval time.Duration) *Monitor {
@@ -58,14 +62,23 @@ func (m *Monitor) RegisterRecoverable(name string, expectedHz float64, reconnect
 	m.register(name, expectedHz, reconnect)
 }
 
+// register (re)creates name's tracking state, carrying consecutiveBad and
+// escalated over from any existing entry so periodic re-registration can't reset them.
 func (m *Monitor) register(name string, expectedHz float64, reconnect func()) {
 	now := time.Now()
-	m.streams.Store(name, &state{
+	s := &state{
 		expectedHz: expectedHz,
 		lastTime:   now,
 		registered: now,
 		reconnect:  reconnect,
-	})
+	}
+	if prev, ok := m.streams.Load(name); ok {
+		p := prev.(*state)
+		s.consecutiveBad = p.consecutiveBad
+		s.escalated = p.escalated
+		s.everWorked = p.everWorked
+	}
+	m.streams.Store(name, s)
 }
 
 // Unregister stops tracking name, so a deliberately stopped stream isn't flagged NOT WORKING.
@@ -103,6 +116,9 @@ func (m *Monitor) check() {
 		s := v.(*state)
 
 		current := s.ticks.Load()
+		if current > 0 {
+			s.everWorked = true
+		}
 		delta := current - s.lastTicks
 		elapsed := now.Sub(s.lastTime).Seconds()
 		var rate float64
@@ -156,7 +172,7 @@ func (m *Monitor) check() {
 			}()
 		}
 
-		if bad && s.reconnect != nil {
+		if bad && s.reconnect != nil && s.everWorked {
 			s.consecutiveBad++
 			if m.stuckThreshold > 0 && s.consecutiveBad >= m.stuckThreshold && !s.escalated {
 				s.escalated = true

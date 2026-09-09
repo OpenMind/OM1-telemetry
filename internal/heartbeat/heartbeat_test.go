@@ -209,11 +209,12 @@ func TestRegisterRecoverable_doesNotOverlapReconnects(t *testing.T) {
 }
 
 // Reader-level reconnects can loop forever without ever restoring data if
-// the real fault is upstream of the reader, so a stream stuck past the
-// threshold must escalate exactly once, not on every remaining bad check.
+// the real fault is upstream of the reader, so a stream that worked and
+// then got stuck must escalate exactly once, not on every remaining bad check.
 func TestSetStuckThreshold_escalatesOnceAtThreshold(t *testing.T) {
 	mon := NewMonitor(5 * time.Millisecond)
 	mon.RegisterRecoverable("pointcloud", 10, func() {})
+	mon.Tick("pointcloud") // it worked once, then got stuck
 
 	var stuckCalls int
 	var lastStream string
@@ -223,6 +224,9 @@ func TestSetStuckThreshold_escalatesOnceAtThreshold(t *testing.T) {
 	})
 
 	time.Sleep(20 * time.Millisecond)
+	mon.check() // consumes the initial tick; establishes the baseline
+	require.Zero(t, stuckCalls)
+
 	mon.check()
 	require.Zero(t, stuckCalls, "must not escalate before reaching the threshold")
 
@@ -234,6 +238,24 @@ func TestSetStuckThreshold_escalatesOnceAtThreshold(t *testing.T) {
 	require.Equal(t, 1, stuckCalls, "must not escalate again while still broken")
 }
 
+// A stream with no hardware ever attached (e.g. no camera connected) never
+// ticks at all; restarting it can never help, so it must never escalate no
+// matter how long it stays "broken" -- otherwise the process would restart
+// itself forever because of a permanently, expectedly absent device.
+func TestSetStuckThreshold_neverEscalatesAStreamThatNeverWorked(t *testing.T) {
+	mon := NewMonitor(5 * time.Millisecond)
+	mon.RegisterRecoverable("depth", 10, func() {})
+
+	var stuckCalls int
+	mon.SetStuckThreshold(2, func(string) { stuckCalls++ })
+
+	time.Sleep(20 * time.Millisecond)
+	for range 20 {
+		mon.check()
+	}
+	require.Zero(t, stuckCalls, "a stream that has never ticked must never escalate")
+}
+
 func TestSetStuckThreshold_recoveryResetsTheCount(t *testing.T) {
 	mon := NewMonitor(5 * time.Millisecond)
 	mon.RegisterRecoverable("odom", 10, func() {})
@@ -241,16 +263,38 @@ func TestSetStuckThreshold_recoveryResetsTheCount(t *testing.T) {
 	var stuckCalls int
 	mon.SetStuckThreshold(2, func(string) { stuckCalls++ })
 
-	time.Sleep(20 * time.Millisecond)
-	mon.check()
-
 	for range 50 {
 		mon.Tick("odom")
 	}
-	mon.check()
+	time.Sleep(20 * time.Millisecond)
+	mon.check() // consumes the ticks; establishes the baseline
 
 	mon.check()
 	require.Zero(t, stuckCalls, "one failure right after recovering must not immediately re-escalate")
+}
+
+// Session rotation re-registers every stream every few minutes; that must
+// not reset a stream's progress toward the stuck threshold, or a stream
+// broken for hours would never escalate.
+func TestSetStuckThreshold_survivesReRegistration(t *testing.T) {
+	mon := NewMonitor(5 * time.Millisecond)
+	mon.RegisterRecoverable("pointcloud", 10, func() {})
+	mon.Tick("pointcloud")
+
+	var stuckCalls int
+	mon.SetStuckThreshold(3, func(string) { stuckCalls++ })
+
+	time.Sleep(20 * time.Millisecond)
+	mon.check() // consumes the initial tick
+	mon.check() // consecutiveBad=1
+	require.Zero(t, stuckCalls, "must not escalate before reaching the threshold")
+
+	mon.RegisterRecoverable("pointcloud", 10, func() {})
+	time.Sleep(20 * time.Millisecond)
+	mon.check() // consecutiveBad=2 despite the re-registration in between
+	require.Zero(t, stuckCalls)
+	mon.check() // consecutiveBad=3
+	require.Equal(t, 1, stuckCalls, "re-registration must not reset progress toward the stuck threshold")
 }
 
 func TestSetStuckThreshold_disabledByDefault(t *testing.T) {
