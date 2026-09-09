@@ -33,6 +33,10 @@ import (
 // scheduleTickInterval is how often the schedule reconciler checks for a state change.
 const scheduleTickInterval = 30 * time.Second
 
+// stuckStreamThreshold is consecutive 30s heartbeat failures (~5 minutes)
+// before a recoverable stream escalates from reconnecting to a full restart.
+const stuckStreamThreshold = 10
+
 func main() {
 	// Sampled before anything else, so the session's monotonic anchor covers
 	// the whole run.
@@ -64,6 +68,14 @@ func main() {
 	}
 
 	mon := heartbeat.NewMonitor(30 * time.Second)
+
+	restartSignal := make(chan string, 1)
+	mon.SetStuckThreshold(stuckStreamThreshold, func(stream string) {
+		select {
+		case restartSignal <- stream:
+		default:
+		}
+	})
 
 	var rs *recorderSet
 	streamsFn := func() *persistentStreams {
@@ -255,10 +267,17 @@ func main() {
 		reconcileSchedule()
 	}
 
+	var restartRequested bool
+
 loop:
 	for {
 		select {
 		case <-shutdownSignal:
+			break loop
+
+		case stream := <-restartSignal:
+			slog.Error("restarting process to recover a stuck stream", "stream", stream)
+			restartRequested = true
 			break loop
 
 		case <-scheduleC:
@@ -330,6 +349,10 @@ loop:
 		slog.Warn("session is still undated: the clock never synchronized while recording",
 			"dir", sess.RealDir(),
 			"note", "it will be dated on a later start if it ever syncs")
+	}
+
+	if restartRequested {
+		os.Exit(1)
 	}
 }
 

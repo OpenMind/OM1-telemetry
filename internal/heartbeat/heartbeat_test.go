@@ -207,3 +207,60 @@ func TestRegisterRecoverable_doesNotOverlapReconnects(t *testing.T) {
 	require.Equal(t, int32(1), calls.Load(), "a reconnect already in flight must not be duplicated")
 	close(release)
 }
+
+// Reader-level reconnects can loop forever without ever restoring data if
+// the real fault is upstream of the reader, so a stream stuck past the
+// threshold must escalate exactly once, not on every remaining bad check.
+func TestSetStuckThreshold_escalatesOnceAtThreshold(t *testing.T) {
+	mon := NewMonitor(5 * time.Millisecond)
+	mon.RegisterRecoverable("pointcloud", 10, func() {})
+
+	var stuckCalls int
+	var lastStream string
+	mon.SetStuckThreshold(2, func(stream string) {
+		stuckCalls++
+		lastStream = stream
+	})
+
+	time.Sleep(20 * time.Millisecond)
+	mon.check()
+	require.Zero(t, stuckCalls, "must not escalate before reaching the threshold")
+
+	mon.check()
+	require.Equal(t, 1, stuckCalls, "must escalate once the threshold is reached")
+	require.Equal(t, "pointcloud", lastStream)
+
+	mon.check()
+	require.Equal(t, 1, stuckCalls, "must not escalate again while still broken")
+}
+
+func TestSetStuckThreshold_recoveryResetsTheCount(t *testing.T) {
+	mon := NewMonitor(5 * time.Millisecond)
+	mon.RegisterRecoverable("odom", 10, func() {})
+
+	var stuckCalls int
+	mon.SetStuckThreshold(2, func(string) { stuckCalls++ })
+
+	time.Sleep(20 * time.Millisecond)
+	mon.check()
+
+	for range 50 {
+		mon.Tick("odom")
+	}
+	mon.check()
+
+	mon.check()
+	require.Zero(t, stuckCalls, "one failure right after recovering must not immediately re-escalate")
+}
+
+func TestSetStuckThreshold_disabledByDefault(t *testing.T) {
+	mon := NewMonitor(5 * time.Millisecond)
+	mon.RegisterRecoverable("lidar", 10, func() {})
+
+	time.Sleep(20 * time.Millisecond)
+	require.NotPanics(t, func() {
+		for range 10 {
+			mon.check()
+		}
+	})
+}

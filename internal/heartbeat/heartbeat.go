@@ -12,6 +12,9 @@ import (
 type Monitor struct {
 	streams  sync.Map
 	interval time.Duration
+
+	stuckThreshold int
+	stuckHandler   func(stream string)
 }
 
 type state struct {
@@ -27,10 +30,22 @@ type state struct {
 	// finds the stream still broken -- see RegisterRecoverable.
 	reconnect    func()
 	reconnecting atomic.Bool
+
+	// consecutiveBad counts checks in a row that found the stream broken;
+	// reset the moment it recovers. Drives the stuck-handler escalation.
+	consecutiveBad int
+	escalated      bool
 }
 
 func NewMonitor(checkInterval time.Duration) *Monitor {
 	return &Monitor{interval: checkInterval}
+}
+
+// SetStuckThreshold calls handler once, from check's goroutine, if a
+// recoverable stream is still broken after threshold consecutive checks.
+func (m *Monitor) SetStuckThreshold(threshold int, handler func(stream string)) {
+	m.stuckThreshold = threshold
+	m.stuckHandler = handler
 }
 
 func (m *Monitor) Register(name string, expectedHz float64) {
@@ -139,6 +154,19 @@ func (m *Monitor) check() {
 				defer s.reconnecting.Store(false)
 				reconnect()
 			}()
+		}
+
+		if bad && s.reconnect != nil {
+			s.consecutiveBad++
+			if m.stuckThreshold > 0 && s.consecutiveBad >= m.stuckThreshold && !s.escalated {
+				s.escalated = true
+				slog.Error("recorder still broken after repeated reconnects; escalating",
+					"stream", name, "consecutive_failures", s.consecutiveBad)
+				m.stuckHandler(name)
+			}
+		} else {
+			s.consecutiveBad = 0
+			s.escalated = false
 		}
 
 		s.lastTicks = current
