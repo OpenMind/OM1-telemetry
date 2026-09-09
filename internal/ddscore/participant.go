@@ -127,10 +127,13 @@ func NewWaitSet(participant *Participant, reader Entity) (*WaitSet, error) {
 	return &WaitSet{entity: ws, cond: cond}, nil
 }
 
+// Wait blocks for up to timeout; on error it sleeps for timeout too, since
+// callers retry on error with no backoff of their own.
 func (w *WaitSet) Wait(timeout time.Duration) (bool, error) {
 	var xs [1]C.dds_attach_t
 	ret := C.dds_waitset_wait(C.dds_entity_t(w.entity), &xs[0], 1, C.dds_duration_t(timeout.Nanoseconds()))
 	if ret < 0 {
+		time.Sleep(timeout)
 		return false, fmt.Errorf("dds_waitset_wait: %w", retcodeError(ret))
 	}
 	return ret > 0, nil
