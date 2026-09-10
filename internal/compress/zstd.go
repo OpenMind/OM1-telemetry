@@ -15,6 +15,10 @@ var wholeFileTargets = []string{
 	"lowstate_frames.bin",
 	"odom_frames.bin",
 	"lidar_scans.bin",
+	// Per-frame timestamp CSVs: repetitive numeric text, and large enough at
+	// lowstate's 400Hz to be worth compressing like their sibling data files.
+	"lowstate_timestamps.csv",
+	"odom_timestamps.csv",
 }
 
 // WholeFiles replaces each of wholeFileTargets with a zstd-compressed copy.
