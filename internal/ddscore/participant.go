@@ -40,11 +40,36 @@ func NewParticipant(domainID uint32) (*Participant, error) {
 	return &Participant{entity: e}, nil
 }
 
-func (p *Participant) Close() error {
-	if ret := C.dds_delete(C.dds_entity_t(p.entity)); ret < 0 {
-		return fmt.Errorf("dds_delete(participant): %w", retcodeError(ret))
+// closeTimeout bounds how long dds_delete is given to return. An entity
+// built on a subscription that never received any data can leave the call
+// hanging in native code forever, which no Go-level cancellation can
+// interrupt, so callers stop waiting instead of wedging shutdown.
+const closeTimeout = 5 * time.Second
+
+// closeEntity deletes entity, abandoning (and leaking) the underlying
+// cgo call if it does not return within closeTimeout.
+func closeEntity(entity C.dds_entity_t, what string) error {
+	done := make(chan error, 1)
+	go func() {
+		if ret := C.dds_delete(entity); ret < 0 {
+			done <- retcodeError(ret)
+			return
+		}
+		done <- nil
+	}()
+	select {
+	case err := <-done:
+		if err != nil {
+			return fmt.Errorf("dds_delete(%s): %w", what, err)
+		}
+		return nil
+	case <-time.After(closeTimeout):
+		return fmt.Errorf("dds_delete(%s): timed out after %s, abandoning", what, closeTimeout)
 	}
-	return nil
+}
+
+func (p *Participant) Close() error {
+	return closeEntity(C.dds_entity_t(p.entity), "participant")
 }
 
 func (p *Participant) CreateTopic(name string, descriptor unsafe.Pointer) (Entity, error) {
@@ -140,8 +165,5 @@ func (w *WaitSet) Wait(timeout time.Duration) (bool, error) {
 }
 
 func (w *WaitSet) Close() error {
-	if ret := C.dds_delete(C.dds_entity_t(w.entity)); ret < 0 {
-		return fmt.Errorf("dds_delete(waitset): %w", retcodeError(ret))
-	}
-	return nil
+	return closeEntity(C.dds_entity_t(w.entity), "waitset")
 }
