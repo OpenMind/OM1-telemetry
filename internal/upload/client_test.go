@@ -27,6 +27,8 @@ type fakeAPI struct {
 	preComplete   string // session_dir that should short-circuit as already complete
 	failRequests  map[string]int
 	multipartData map[string][]byte // uploadID -> reassembled bytes
+	failPosts     map[string]int    // file name -> direct-POST attempts still to reject
+	postCount     map[string]int    // file name -> direct-POST attempts received
 
 	// postDelay makes every direct-POST S3 upload take that long, so concurrency can be measured by wall-clock time.
 	postDelay  time.Duration
@@ -49,6 +51,8 @@ func newFakeAPI(t *testing.T) (*fakeAPI, *httptest.Server, *httptest.Server) {
 		sessions:      map[string]*fakeSession{},
 		failRequests:  map[string]int{},
 		multipartData: map[string][]byte{},
+		failPosts:     map[string]int{},
+		postCount:     map[string]int{},
 	}
 
 	s3 := httptest.NewServer(http.HandlerFunc(api.handleS3))
@@ -114,6 +118,14 @@ func (a *fakeAPI) createSession(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Like the real API, an in-progress session for the same dir is handed back instead of a new one.
+	for _, sess := range a.sessions {
+		if sess.sessionDir == body.SessionDir && sess.status == "uploading" {
+			a.writeSession(w, http.StatusOK, sess)
+			return
+		}
+	}
+
 	a.nextID++
 	id := fmt.Sprintf("sess-%d", a.nextID)
 	sess := &fakeSession{
@@ -122,10 +134,13 @@ func (a *fakeAPI) createSession(w http.ResponseWriter, r *http.Request) {
 		uploaded: map[string][]byte{},
 	}
 	a.sessions[id] = sess
+	a.writeSession(w, http.StatusCreated, sess)
+}
 
-	w.WriteHeader(http.StatusCreated)
+func (a *fakeAPI) writeSession(w http.ResponseWriter, code int, sess *fakeSession) {
+	w.WriteHeader(code)
 	_ = json.NewEncoder(w).Encode(map[string]any{
-		"session_id": id,
+		"session_id": sess.id,
 		"s3_prefix":  sess.prefix,
 		"status":     sess.status,
 		"upload": map[string]any{
@@ -250,6 +265,18 @@ func (a *fakeAPI) handleS3(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		key := r.FormValue("key")
+		name := filepath.Base(key)
+		a.mu.Lock()
+		a.postCount[name]++
+		reject := a.failPosts[name] > 0
+		if reject {
+			a.failPosts[name]--
+		}
+		a.mu.Unlock()
+		if reject {
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
 		f, _, err := r.FormFile("file")
 		if err != nil {
 			w.WriteHeader(http.StatusBadRequest)
@@ -412,23 +439,60 @@ func TestUploadSession_largeFileUsesMultipart(t *testing.T) {
 	require.Equal(t, big, got, "reassembled multipart bytes must match the source file")
 }
 
-func TestUploadSession_failureMarksSessionFailed(t *testing.T) {
-	api, apiSrv, s3 := newFakeAPI(t)
-	s3.Close() // every S3 request will now fail to connect
+func TestUploadSession_retryResumesSameSessionAndSkipsUploadedFiles(t *testing.T) {
+	api, apiSrv, _ := newFakeAPI(t)
+	api.failPosts["b.bin"] = 2 // the first attempt's initial try and its policy-renew retry both fail
 
 	dir := t.TempDir()
-	writeFile(t, dir, "meta.json", []byte(`{}`))
+	writeFile(t, dir, "a.bin", []byte("aaa"))
+	writeFile(t, dir, "b.bin", []byte("bbb"))
 
-	c := New(Config{BaseURL: apiSrv.URL, APIKey: "test-key"})
-	err := c.UploadSession(context.Background(), dir, "recordings/fails", time.Now(), Options{})
-	require.Error(t, err)
+	c := New(Config{BaseURL: apiSrv.URL, APIKey: "test-key", Concurrency: 1})
+	require.Error(t, c.UploadSession(context.Background(), dir, "recordings/resume", time.Now(), Options{}))
+	require.FileExists(t, filepath.Join(dir, uploadStateName))
+
+	require.NoError(t, c.UploadSession(context.Background(), dir, "recordings/resume", time.Now(), Options{}))
+	require.NoFileExists(t, filepath.Join(dir, uploadStateName))
 
 	api.mu.Lock()
 	defer api.mu.Unlock()
-	require.Len(t, api.sessions, 1)
+	require.Len(t, api.sessions, 1, "the retry must continue the server-side session, not open a new one")
 	for _, sess := range api.sessions {
-		require.Equal(t, "failed", sess.status)
-		require.NotEmpty(t, sess.failReason)
+		require.Equal(t, "complete", sess.status)
+		require.Equal(t, []byte("aaa"), sess.uploaded["a.bin"])
+		require.Equal(t, []byte("bbb"), sess.uploaded["b.bin"])
+	}
+	require.Equal(t, 1, api.postCount["a.bin"], "a file that already reached S3 must not be re-sent")
+	require.Equal(t, 3, api.postCount["b.bin"])
+}
+
+func TestUploadSession_preservedJournalIsResentOnRetry(t *testing.T) {
+	api, apiSrv, _ := newFakeAPI(t)
+	api.failPosts["meta.json"] = 2
+
+	dir := t.TempDir()
+	writeFile(t, dir, "clock_timebase.jsonl", []byte("{\"kind\":\"start\"}\n"))
+	writeFile(t, dir, "meta.json", []byte(`{}`))
+
+	c := New(Config{BaseURL: apiSrv.URL, APIKey: "test-key", Concurrency: 1})
+	opts := Options{PreserveJSONL: "clock_timebase.jsonl"}
+	require.Error(t, c.UploadSession(context.Background(), dir, "recordings/live", time.Now(), opts))
+
+	f, err := os.OpenFile(filepath.Join(dir, "clock_timebase.jsonl"), os.O_APPEND|os.O_WRONLY, 0o644)
+	require.NoError(t, err)
+	_, err = f.WriteString("{\"kind\":\"sync\"}\n")
+	require.NoError(t, err)
+	require.NoError(t, f.Close())
+
+	require.NoError(t, c.UploadSession(context.Background(), dir, "recordings/live", time.Now(), opts))
+
+	api.mu.Lock()
+	defer api.mu.Unlock()
+	require.Equal(t, 2, api.postCount["clock_timebase.json"], "the still-growing journal must be re-sent")
+	for _, sess := range api.sessions {
+		var records []map[string]any
+		require.NoError(t, json.Unmarshal(sess.uploaded["clock_timebase.json"], &records))
+		require.Len(t, records, 2)
 	}
 }
 

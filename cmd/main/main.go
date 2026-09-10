@@ -32,6 +32,9 @@ import (
 // scheduleTickInterval is how often the schedule reconciler checks for a state change.
 const scheduleTickInterval = 30 * time.Second
 
+// shutdownUploadTimeout bounds the synchronous upload of the live session at shutdown.
+const shutdownUploadTimeout = 10 * time.Minute
+
 func main() {
 	// Sampled before anything else, so the session's monotonic anchor covers
 	// the whole run.
@@ -118,7 +121,7 @@ func main() {
 
 	// Uploading (never cap enforcement) is gated on ctl.Uploading -- see retention.RunSweeps.
 	sweepCtx, sweepCancel := context.WithCancel(context.Background())
-	go retention.RunSweeps(sweepCtx, uploader, recordingsDir, bootTimebasePath, currentDirFn, cfg.Retention, ctl)
+	go retention.RunSweeps(sweepCtx, uploader, recordingsDir, bootTimebasePath, currentDirFn, cfg.Retention, ctl, cfg.Upload.DeleteAfterUpload)
 
 	rs := startRecorders(cfg, mon, recordingsDir, sess, videoHeartbeatNames)
 
@@ -176,7 +179,6 @@ func main() {
 		scheduleC = ticker.C
 	}
 
-	var uploadWG sync.WaitGroup
 	uploadDelete := cfg.Upload.DeleteAfterUpload
 
 	// pauseRecording is the schedule's close-half: same as a rotation's
@@ -191,7 +193,7 @@ func main() {
 		retention.SnapshotTimebase(bootTimebasePath, finished.RealDir())
 		ctl.SetRecording(false)
 		slog.Info("recording paused by schedule", "session", finished.RealDir())
-		retention.UploadFinishedSessionAsync(&uploadWG, uploader, ctl, recordingsDir, bootTimebasePath, finished, uploadDelete)
+		ctl.TriggerUpload()
 	}
 
 	// resumeRecording is the schedule's open-half: same as a rotation's open-half.
@@ -285,7 +287,7 @@ loop:
 
 			slog.Info("session rotated", "session", sess.RealDir())
 
-			retention.UploadFinishedSessionAsync(&uploadWG, uploader, ctl, recordingsDir, bootTimebasePath, finished, uploadDelete)
+			ctl.TriggerUpload()
 		}
 	}
 
@@ -302,10 +304,11 @@ loop:
 
 		if uploader != nil && ctl.Uploading() {
 			opts := retention.UploadOptions(bootTimebasePath, sess.RealDir())
-			retention.UploadSession(ctl, uploader, sess.RealDir(), retention.APISessionDir(recordingsDir, sess.RealDir()), time.Unix(0, sess.StartUnixNs()), uploadDelete, opts)
+			ctx, cancel := context.WithTimeout(context.Background(), shutdownUploadTimeout)
+			retention.UploadSession(ctx, ctl, uploader, sess.RealDir(), retention.APISessionDir(recordingsDir, sess.RealDir()), time.Unix(0, sess.StartUnixNs()), uploadDelete, opts)
+			cancel()
 		}
 	}
-	uploadWG.Wait()
 
 	clkCancel()
 
