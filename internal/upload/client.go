@@ -364,13 +364,27 @@ type completedPart struct {
 	ETag       string `json:"etag"`
 }
 
-// uploadMultipart sends one file through the API's S3-multipart endpoints, reading it in PartSize chunks.
+// uploadMultipart sends one file through the API's S3-multipart endpoints,
+// uploading up to Concurrency parts at once: a single lossy connection caps
+// throughput by its own loss/RTT, so parallel parts each get their own
+// connection instead of all sharing that one ceiling for the whole file.
 func (c *Client) uploadMultipart(ctx context.Context, sessionID, path, filename string) error {
 	f, err := os.Open(path)
 	if err != nil {
 		return err
 	}
 	defer func() { _ = f.Close() }()
+
+	info, err := f.Stat()
+	if err != nil {
+		return err
+	}
+	size := info.Size()
+	partSize := c.cfg.PartSize
+	numParts := (size + partSize - 1) / partSize
+	if numParts == 0 {
+		numParts = 1
+	}
 
 	var start struct {
 		UploadID string `json:"upload_id"`
@@ -385,26 +399,52 @@ func (c *Client) uploadMultipart(ctx context.Context, sessionID, path, filename 
 			map[string]string{"filename": filename, "upload_id": start.UploadID}, nil)
 	}
 
+	uploadCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	sem := make(chan struct{}, c.cfg.Concurrency)
+	var wg sync.WaitGroup
+	var mu sync.Mutex
 	var parts []completedPart
-	buf := make([]byte, c.cfg.PartSize)
-	for partNumber := int64(1); ; partNumber++ {
-		n, readErr := io.ReadFull(f, buf)
-		if n > 0 {
-			etag, err := c.uploadPart(ctx, sessionID, filename, start.UploadID, partNumber, buf[:n])
-			if err != nil {
-				abort()
-				return err
+	var once sync.Once
+	var firstErr error
+
+	for partNumber := int64(1); partNumber <= numParts; partNumber++ {
+		offset := (partNumber - 1) * partSize
+		n := partSize
+		if offset+n > size {
+			n = size - offset
+		}
+
+		sem <- struct{}{}
+		wg.Add(1)
+		go func(partNumber, offset, n int64) {
+			defer wg.Done()
+			defer func() { <-sem }()
+
+			buf := make([]byte, n)
+			if _, err := f.ReadAt(buf, offset); err != nil {
+				once.Do(func() { firstErr = err; cancel() })
+				return
 			}
+			etag, err := c.uploadPart(uploadCtx, sessionID, filename, start.UploadID, partNumber, buf)
+			if err != nil {
+				once.Do(func() { firstErr = err; cancel() })
+				return
+			}
+			mu.Lock()
 			parts = append(parts, completedPart{PartNumber: partNumber, ETag: etag})
-		}
-		if readErr == io.EOF || readErr == io.ErrUnexpectedEOF {
-			break
-		}
-		if readErr != nil {
-			abort()
-			return readErr
-		}
+			mu.Unlock()
+		}(partNumber, offset, n)
 	}
+	wg.Wait()
+
+	if firstErr != nil {
+		abort()
+		return firstErr
+	}
+
+	sort.Slice(parts, func(i, j int) bool { return parts[i].PartNumber < parts[j].PartNumber })
 
 	return c.doJSON(ctx, http.MethodPost, "/data/collection/sessions/"+sessionID+"/files/complete",
 		map[string]any{"filename": filename, "upload_id": start.UploadID, "parts": parts}, nil)

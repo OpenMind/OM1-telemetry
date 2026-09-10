@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"sync"
 	"testing"
 	"time"
@@ -22,13 +23,14 @@ type fakeAPI struct {
 
 	s3URL string
 
-	sessions      map[string]*fakeSession
-	nextID        int
-	preComplete   string // session_dir the server reports as already "complete" on creation
-	failRequests  map[string]int
-	multipartData map[string][]byte // uploadID -> reassembled bytes
-	failPosts     map[string]int    // file name -> direct-POST attempts still to reject
-	postCount     map[string]int    // file name -> direct-POST attempts received
+	sessions       map[string]*fakeSession
+	nextID         int
+	preComplete    string // session_dir the server reports as already "complete" on creation
+	failRequests   map[string]int
+	multipartParts map[string]map[int64][]byte // uploadID -> part number -> that part's bytes
+	multipartData  map[string][]byte           // uploadID -> parts reassembled in part-number order, set on complete
+	failPosts      map[string]int              // file name -> direct-POST attempts still to reject
+	postCount      map[string]int              // file name -> direct-POST attempts received
 
 	// postDelay makes every direct-POST S3 upload take that long, so concurrency can be measured by wall-clock time.
 	postDelay  time.Duration
@@ -48,11 +50,12 @@ type fakeSession struct {
 
 func newFakeAPI(t *testing.T) (*fakeAPI, *httptest.Server, *httptest.Server) {
 	api := &fakeAPI{
-		sessions:      map[string]*fakeSession{},
-		failRequests:  map[string]int{},
-		multipartData: map[string][]byte{},
-		failPosts:     map[string]int{},
-		postCount:     map[string]int{},
+		sessions:       map[string]*fakeSession{},
+		failRequests:   map[string]int{},
+		multipartParts: map[string]map[int64][]byte{},
+		multipartData:  map[string][]byte{},
+		failPosts:      map[string]int{},
+		postCount:      map[string]int{},
 	}
 
 	s3 := httptest.NewServer(http.HandlerFunc(api.handleS3))
@@ -202,7 +205,7 @@ func (a *fakeAPI) startMultipart(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewDecoder(r.Body).Decode(&body)
 	uploadID := "up-" + body.Filename
 	a.mu.Lock()
-	a.multipartData[uploadID] = nil
+	a.multipartParts[uploadID] = map[int64][]byte{}
 	a.mu.Unlock()
 	w.WriteHeader(http.StatusOK)
 	_ = json.NewEncoder(w).Encode(map[string]string{"upload_id": uploadID, "key": "k/" + body.Filename})
@@ -231,6 +234,16 @@ func (a *fakeAPI) completeMultipart(w http.ResponseWriter, r *http.Request) {
 		} `json:"parts"`
 	}
 	_ = json.NewDecoder(r.Body).Decode(&body)
+
+	a.mu.Lock()
+	parts := a.multipartParts[body.UploadID]
+	var reassembled []byte
+	for _, p := range body.Parts {
+		reassembled = append(reassembled, parts[p.PartNumber]...)
+	}
+	a.multipartData[body.UploadID] = reassembled
+	a.mu.Unlock()
+
 	w.WriteHeader(http.StatusOK)
 	_ = json.NewEncoder(w).Encode(map[string]string{"message": "Upload completed", "key": body.Filename})
 }
@@ -293,10 +306,11 @@ func (a *fakeAPI) handleS3(w http.ResponseWriter, r *http.Request) {
 	case r.Method == http.MethodPut && r.URL.Path == "/part":
 		uploadID := r.URL.Query().Get("upload_id")
 		part := r.URL.Query().Get("part")
+		partNumber, _ := strconv.ParseInt(part, 10, 64)
 		data, _ := io.ReadAll(r.Body)
 
 		a.mu.Lock()
-		a.multipartData[uploadID] = append(a.multipartData[uploadID], data...)
+		a.multipartParts[uploadID][partNumber] = data
 		a.mu.Unlock()
 
 		w.Header().Set("ETag", `"etag-`+uploadID+`-`+part+`"`)
