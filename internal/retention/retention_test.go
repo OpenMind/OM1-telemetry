@@ -18,6 +18,7 @@ import (
 	"om1-telemetry/config"
 	"om1-telemetry/internal/clock"
 	"om1-telemetry/internal/control"
+	"om1-telemetry/internal/session"
 	"om1-telemetry/internal/upload"
 )
 
@@ -399,6 +400,45 @@ func TestUploadSession_awaitReadyCompletesBeforeUploadStarts(t *testing.T) {
 	require.True(t, awaitReadyDone.Load())
 	require.True(t, sessionCreated())
 	require.True(t, IsUploaded(dir), "the session, including the file awaitReady added, must be reported as fully uploaded")
+}
+
+// Regression test for a real production deadlock: a recorder stream stuck
+// badly enough to never satisfy awaitReady -- exactly what trips the
+// heartbeat monitor's stuck-stream restart -- must not be able to block
+// UploadFinishedSessionAsync's goroutine forever. It used to run awaitReady
+// under context.Background(), so main's shutdown-time wg.Wait() (guarding the
+// os.Exit that lets the container actually restart and recover the stream)
+// never returned, silently defeating the restart it was blocking on.
+func TestUploadFinishedSessionAsync_boundsAHungAwaitReady(t *testing.T) {
+	orig := asyncUploadTimeout
+	asyncUploadTimeout = 20 * time.Millisecond
+	t.Cleanup(func() { asyncUploadTimeout = orig })
+
+	_, apiURL := newMinimalFakeAPI(t)
+	client := upload.New(upload.Config{BaseURL: apiURL, APIKey: "k"})
+
+	sess, err := session.Open(t.TempDir(), clock.NewWithSync(clock.SyncYes))
+	require.NoError(t, err)
+
+	// Shaped like the real awaitSegments/WaitSegment: it only ever returns via
+	// ctx, never on its own -- so this proves the fix is the bounded context,
+	// not some change to how awaitReady itself behaves.
+	awaitReady := func(ctx context.Context) { <-ctx.Done() }
+
+	var wg sync.WaitGroup
+	UploadFinishedSessionAsync(&wg, client, control.New(), t.TempDir(), "", sess, false, awaitReady)
+
+	done := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("UploadFinishedSessionAsync's goroutine never returned -- a hung awaitReady must not be able to block it forever")
+	}
 }
 
 // Cap enforcement must not block on a stuck catch-up upload.
