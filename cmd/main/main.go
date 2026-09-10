@@ -37,6 +37,9 @@ const scheduleTickInterval = 30 * time.Second
 // before a recoverable stream escalates from reconnecting to a full restart.
 const stuckStreamThreshold = 10
 
+// shutdownUploadTimeout bounds the synchronous upload of the live session at shutdown.
+const shutdownUploadTimeout = 10 * time.Minute
+
 func main() {
 	// Sampled before anything else, so the session's monotonic anchor covers
 	// the whole run.
@@ -140,7 +143,7 @@ func main() {
 
 	// Uploading (never cap enforcement) is gated on ctl.Uploading -- see retention.RunSweeps.
 	sweepCtx, sweepCancel := context.WithCancel(context.Background())
-	go retention.RunSweeps(sweepCtx, uploader, recordingsDir, bootTimebasePath, currentDirFn, cfg.Retention, ctl)
+	go retention.RunSweeps(sweepCtx, uploader, recordingsDir, bootTimebasePath, currentDirFn, cfg.Retention, ctl, cfg.Upload.DeleteAfterUpload)
 
 	rs = startRecorders(cfg, mon, recordingsDir, sess, videoHeartbeatNames)
 
@@ -338,7 +341,9 @@ loop:
 			opts := retention.UploadOptions(bootTimebasePath, sess.RealDir())
 			// No awaitReady needed: rs.Stop() above already drains ffmpeg's
 			// final segment (and its relocation) before returning.
-			retention.UploadSession(ctl, uploader, sess.RealDir(), retention.APISessionDir(recordingsDir, sess.RealDir()), time.Unix(0, sess.StartUnixNs()), uploadDelete, opts, nil)
+			ctx, cancel := context.WithTimeout(context.Background(), shutdownUploadTimeout)
+			retention.UploadSession(ctx, ctl, uploader, sess.RealDir(), retention.APISessionDir(recordingsDir, sess.RealDir()), time.Unix(0, sess.StartUnixNs()), uploadDelete, opts, nil)
+			cancel()
 		}
 	}
 	uploadWG.Wait()

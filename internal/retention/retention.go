@@ -22,9 +22,6 @@ import (
 // uploadMarkerName marks a session directory as already uploaded.
 const uploadMarkerName = ".uploaded"
 
-// uploadTimeout bounds one session's upload, whether kicked off by rotation, schedule, or shutdown.
-const uploadTimeout = 10 * time.Minute
-
 // minSessionAge is a second, time-based line of defense protecting the
 // currently-recording session, alongside the dir == currentDir check.
 const minSessionAge = 30 * time.Second
@@ -138,17 +135,20 @@ func SnapshotTimebase(bootPath, sessionDir string) {
 	}
 }
 
-// UploadSession uploads one finished session directory (kept locally for
-// retry on failure); awaitReady, if non-nil, blocks first so still-relocating streams can settle before dir's contents are listed.
-func UploadSession(ctl *control.State, client *upload.Client, dir, sessionDir string, startedAt time.Time, deleteAfter bool, opts upload.Options, awaitReady func(context.Context)) {
+// UploadSession uploads one finished session directory; on failure the files are kept locally for a later retry.
+// awaitReady, if non-nil, blocks first so still-relocating streams can settle before dir's contents are listed.
+//
+// dir is claimed for the duration of the upload, so a concurrent call for
+// the same dir (another upload path, or retention's cap enforcement) skips
+// it instead of racing. No deadline is added here beyond ctx: each request is
+// bounded by the caller and the client, and an interrupted upload resumes
+// from its last completed file.
+func UploadSession(ctx context.Context, ctl *control.State, client *upload.Client, dir, sessionDir string, startedAt time.Time, deleteAfter bool, opts upload.Options, awaitReady func(context.Context)) {
 	if !ctl.TryClaimDir(dir) {
 		slog.Info("retention: skipping upload, already in flight", "dir", dir)
 		return
 	}
 	defer ctl.ReleaseDir(dir)
-
-	ctx, cancel := context.WithTimeout(context.Background(), uploadTimeout)
-	defer cancel()
 
 	if awaitReady != nil {
 		awaitReady(ctx)
@@ -178,12 +178,12 @@ func UploadFinishedSessionAsync(wg *sync.WaitGroup, uploader *upload.Client, ctl
 	wg.Add(1)
 	go func(dir, apiDir string, startedAt time.Time, opts upload.Options) {
 		defer wg.Done()
-		UploadSession(ctl, uploader, dir, apiDir, startedAt, uploadDelete, opts, awaitReady)
+		UploadSession(context.Background(), ctl, uploader, dir, apiDir, startedAt, uploadDelete, opts, awaitReady)
 	}(finished.RealDir(), APISessionDir(recordingsDir, finished.RealDir()), time.Unix(0, finished.StartUnixNs()), opts)
 }
 
 // Sweep runs catch-up uploads and cap enforcement once; kept as a building block for tests.
-func Sweep(ctl *control.State, uploader *upload.Client, recordingsDir, bootTimebasePath, currentDir string, maxBytes int64) {
+func Sweep(ctx context.Context, ctl *control.State, uploader *upload.Client, recordingsDir, bootTimebasePath, currentDir string, maxBytes int64, deleteAfter bool) {
 	dirs, err := session.ListClosed(recordingsDir)
 	if err != nil {
 		slog.Warn("retention: cannot list session directories", "dir", recordingsDir, "err", err)
@@ -195,21 +195,24 @@ func Sweep(ctl *control.State, uploader *upload.Client, recordingsDir, bootTimeb
 		return dir == currentDir || BootSessionDir(bootTimebasePath, dir) || tooYoungToSweep(dir)
 	}
 
-	CatchUpUploads(ctl, uploader, dirs, uploadProtected, recordingsDir, bootTimebasePath)
+	CatchUpUploads(ctx, ctl, uploader, dirs, uploadProtected, recordingsDir, bootTimebasePath, deleteAfter)
 	EnforceRetentionCap(ctl, recordingsDir, dirs, deleteProtected, maxBytes)
 }
 
 // CatchUpUploads retries every closed, not-yet-uploaded, non-protected directory in dirs, oldest first.
-func CatchUpUploads(ctl *control.State, uploader *upload.Client, dirs []string, protected func(string) bool, recordingsDir, bootTimebasePath string) {
+func CatchUpUploads(ctx context.Context, ctl *control.State, uploader *upload.Client, dirs []string, protected func(string) bool, recordingsDir, bootTimebasePath string, deleteAfter bool) {
 	if uploader == nil {
 		return
 	}
 	for _, dir := range dirs {
+		if ctx.Err() != nil {
+			return
+		}
 		if protected(dir) || IsUploaded(dir) {
 			continue
 		}
 		opts := UploadOptions(bootTimebasePath, dir)
-		UploadSession(ctl, uploader, dir, APISessionDir(recordingsDir, dir), ReadStartedAt(dir), false, opts, nil)
+		UploadSession(ctx, ctl, uploader, dir, APISessionDir(recordingsDir, dir), ReadStartedAt(dir), deleteAfter, opts, nil)
 	}
 }
 
@@ -282,7 +285,7 @@ func EnforceRetentionCap(ctl *control.State, recordingsDir string, dirs []string
 }
 
 // RunSweeps drives catch-up uploads and cap enforcement on separate tickers until ctx is canceled.
-func RunSweeps(ctx context.Context, uploader *upload.Client, recordingsDir, bootTimebasePath string, currentDir func() string, cfg config.RetentionConfig, ctl *control.State) {
+func RunSweeps(ctx context.Context, uploader *upload.Client, recordingsDir, bootTimebasePath string, currentDir func() string, cfg config.RetentionConfig, ctl *control.State, deleteAfter bool) {
 	interval := cfg.SweepInterval
 	if interval <= 0 {
 		interval = 5 * time.Minute
@@ -334,7 +337,7 @@ func RunSweeps(ctx context.Context, uploader *upload.Client, recordingsDir, boot
 					return
 				}
 				if dirs, uploadProtected, _, ok := listClosed(); ok {
-					CatchUpUploads(ctl, uploader, dirs, uploadProtected, recordingsDir, bootTimebasePath)
+					CatchUpUploads(ctx, ctl, uploader, dirs, uploadProtected, recordingsDir, bootTimebasePath, deleteAfter)
 				}
 			}
 			for {

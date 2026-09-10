@@ -158,7 +158,7 @@ func TestSweep_nilUploaderSkipsCatchUpButStillEnforcesCap(t *testing.T) {
 	writeFile(t, underCap, "a.bin", []byte("data"))
 
 	ctl := control.New()
-	Sweep(ctl, nil, root, filepath.Join(root, "boot_timebase.jsonl"), "", 100)
+	Sweep(context.Background(), ctl, nil, root, filepath.Join(root, "boot_timebase.jsonl"), "", 100, false)
 
 	require.False(t, IsUploaded(underCap), "without an uploader nothing can be marked uploaded")
 	require.DirExists(t, underCap, "comfortably under the cap, so nothing needs to be deleted")
@@ -166,7 +166,7 @@ func TestSweep_nilUploaderSkipsCatchUpButStillEnforcesCap(t *testing.T) {
 	overCap := filepath.Join(root, "2026-08-15", "2026-08-15_00-00-00")
 	writeFile(t, overCap, "b.bin", make([]byte, 200))
 
-	Sweep(ctl, nil, root, filepath.Join(root, "boot_timebase.jsonl"), "", 100)
+	Sweep(context.Background(), ctl, nil, root, filepath.Join(root, "boot_timebase.jsonl"), "", 100, false)
 
 	require.NoDirExists(t, underCap,
 		"with no uploader configured, cap enforcement must still delete the oldest directory rather than let the disk fill up")
@@ -238,7 +238,7 @@ func TestSweep_uploadsOldestUnmarkedFirstAndSkipsProtectedAndAlreadyUploaded(t *
 
 	bootTimebasePath := filepath.Join(root, "does-not-exist.jsonl") // no boot session protection in play
 
-	Sweep(control.New(), client, root, bootTimebasePath, live, 0)
+	Sweep(context.Background(), control.New(), client, root, bootTimebasePath, live, 0, false)
 
 	require.True(t, IsUploaded(oldest), "the oldest not-yet-uploaded closed dir must get uploaded")
 	require.False(t, IsUploaded(live), "the currently-open session must never be swept")
@@ -264,7 +264,7 @@ func TestSweep_neverUploadsAVeryYoungDirEvenIfNotReportedCurrent(t *testing.T) {
 
 	bootTimebasePath := filepath.Join(root, "does-not-exist.jsonl")
 
-	Sweep(control.New(), client, root, bootTimebasePath, "", 0)
+	Sweep(context.Background(), control.New(), client, root, bootTimebasePath, "", 0, false)
 
 	require.False(t, IsUploaded(justOpened),
 		"a directory younger than minSessionAge must never be uploaded, even when it isn't reported as the current session")
@@ -287,7 +287,7 @@ func TestSweep_uploadsADirOlderThanMinSessionAge(t *testing.T) {
 
 	bootTimebasePath := filepath.Join(root, "does-not-exist.jsonl")
 
-	Sweep(control.New(), client, root, bootTimebasePath, "", 0)
+	Sweep(context.Background(), control.New(), client, root, bootTimebasePath, "", 0, false)
 
 	require.True(t, IsUploaded(old), "a directory well past minSessionAge must upload normally")
 
@@ -310,7 +310,7 @@ func TestSweep_retriesBootSessionDirOnUploadButNeverDeletesIt(t *testing.T) {
 	bootTimebasePath := filepath.Join(bootDir, clock.TimebaseName)
 	require.NoError(t, os.WriteFile(bootTimebasePath, []byte(`{"kind":"start"}`+"\n"), 0o644))
 
-	Sweep(control.New(), client, root, bootTimebasePath, "", 0)
+	Sweep(context.Background(), control.New(), client, root, bootTimebasePath, "", 0, false)
 
 	require.True(t, IsUploaded(bootDir),
 		"a catch-up sweep must retry the boot session's own directory, not strand it behind one failed attempt")
@@ -319,7 +319,7 @@ func TestSweep_retriesBootSessionDirOnUploadButNeverDeletesIt(t *testing.T) {
 	api.mu.Unlock()
 	require.FileExists(t, bootTimebasePath, "the live clock journal must never be swept away, uploaded or not")
 
-	Sweep(control.New(), client, root, bootTimebasePath, "", 10)
+	Sweep(context.Background(), control.New(), client, root, bootTimebasePath, "", 10, false)
 
 	require.DirExists(t, bootDir, "cap enforcement must never delete the boot session directory while its journal is live")
 	require.FileExists(t, bootTimebasePath)
@@ -349,7 +349,7 @@ func TestUploadSession_concurrentCallsForSameDirOnlyUploadOnce(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			UploadSession(ctl, client, dir, "api/dir", time.Time{}, false, upload.Options{}, nil)
+			UploadSession(context.Background(), ctl, client, dir, "api/dir", time.Time{}, false, upload.Options{}, nil)
 		}()
 	}
 
@@ -382,7 +382,7 @@ func TestUploadSession_awaitReadyCompletesBeforeUploadStarts(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		UploadSession(control.New(), client, dir, "api/dir", time.Time{}, false, upload.Options{}, awaitReady)
+		UploadSession(context.Background(), control.New(), client, dir, "api/dir", time.Time{}, false, upload.Options{}, awaitReady)
 	}()
 
 	sessionCreated := func() bool {
@@ -426,7 +426,7 @@ func TestRunSweeps_capEnforcementNotBlockedByStuckCatchUpUpload(t *testing.T) {
 
 	done := make(chan struct{})
 	go func() {
-		RunSweeps(ctx, client, root, filepath.Join(root, "missing-boot.jsonl"), func() string { return "" }, cfg, control.New())
+		RunSweeps(ctx, client, root, filepath.Join(root, "missing-boot.jsonl"), func() string { return "" }, cfg, control.New(), false)
 		close(done)
 	}()
 
@@ -472,7 +472,7 @@ func TestRunSweeps_uploadDisabled_skipsCatchUpButStillEnforcesCap(t *testing.T) 
 
 	done := make(chan struct{})
 	go func() {
-		RunSweeps(ctx, client, root, filepath.Join(root, "missing-boot.jsonl"), func() string { return "" }, cfg, ctl)
+		RunSweeps(ctx, client, root, filepath.Join(root, "missing-boot.jsonl"), func() string { return "" }, cfg, ctl, false)
 		close(done)
 	}()
 
@@ -518,7 +518,7 @@ func TestRunSweeps_uploadTrigger_runsImmediateSweep(t *testing.T) {
 
 	done := make(chan struct{})
 	go func() {
-		RunSweeps(ctx, client, root, filepath.Join(root, "missing-boot.jsonl"), func() string { return "" }, cfg, ctl)
+		RunSweeps(ctx, client, root, filepath.Join(root, "missing-boot.jsonl"), func() string { return "" }, cfg, ctl, false)
 		close(done)
 	}()
 
@@ -560,7 +560,7 @@ func TestRunSweeps_capDisabled_stillRunsCatchUpUploads(t *testing.T) {
 
 	done := make(chan struct{})
 	go func() {
-		RunSweeps(ctx, client, root, filepath.Join(root, "missing-boot.jsonl"), func() string { return "" }, cfg, ctl)
+		RunSweeps(ctx, client, root, filepath.Join(root, "missing-boot.jsonl"), func() string { return "" }, cfg, ctl, false)
 		close(done)
 	}()
 
