@@ -32,10 +32,8 @@ type Participant struct {
 	entity Entity
 }
 
-// createTimeout bounds how long a dds_create_* cgo call is given to return.
-// The same degraded-domain conditions that make dds_delete hang (see
-// closeTimeout) can, after enough create/destroy churn from a stream that
-// keeps reconnecting, make entity creation hang too.
+// createTimeout bounds how long a dds_create_* cgo call is given to return:
+// the same degraded-domain conditions that make dds_delete hang can also make entity creation hang.
 const createTimeout = 5 * time.Second
 
 // boundedCreate runs create with a bound of createTimeout, abandoning (and
@@ -61,10 +59,8 @@ func NewParticipant(domainID uint32) (*Participant, error) {
 	return &Participant{entity: e}, nil
 }
 
-// closeTimeout bounds how long dds_delete is given to return. An entity
-// built on a subscription that never received any data can leave the call
-// hanging in native code forever, which no Go-level cancellation can
-// interrupt, so callers stop waiting instead of wedging shutdown.
+// closeTimeout bounds how long dds_delete is given to return: a never-connected entity
+// can hang the call forever in native code, uninterruptible from Go.
 const closeTimeout = 5 * time.Second
 
 // closeEntity deletes entity, abandoning (and leaking) the underlying
@@ -93,10 +89,8 @@ func (p *Participant) Close() error {
 	return closeEntity(C.dds_entity_t(p.entity), "participant")
 }
 
-// CreateTopic creates topic. cname is freed inside the bounded goroutine,
-// after the cgo call actually returns, rather than via defer here -- a
-// timed-out call is abandoned but not necessarily dead, and freeing cname
-// early would risk a use-after-free if it eventually runs.
+// CreateTopic creates topic. cname is freed inside the goroutine after the cgo call
+// returns, not via defer, to avoid a use-after-free if a timed-out call eventually runs.
 func (p *Participant) CreateTopic(name string, descriptor unsafe.Pointer) (Entity, error) {
 	cname := C.CString(name)
 	e, err := boundedCreate(func() C.dds_entity_t {
@@ -162,9 +156,8 @@ type WaitSet struct {
 	cond   Entity
 }
 
-// NewWaitSet builds a waitset in its own goroutine, bounded by createTimeout,
-// for the same reason boundedCreate exists -- any of its three cgo calls can
-// hang on a degraded domain.
+// NewWaitSet builds a waitset in its own goroutine, bounded by createTimeout:
+// any of its three cgo calls can hang on a degraded domain, same as boundedCreate.
 func NewWaitSet(participant *Participant, reader Entity) (*WaitSet, error) {
 	type result struct {
 		ws  *WaitSet

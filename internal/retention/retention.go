@@ -168,15 +168,8 @@ func UploadSession(ctx context.Context, ctl *control.State, client *upload.Clien
 	}
 }
 
-// asyncUploadTimeout bounds a finished session's background upload, awaitReady
-// included. Without this, a recorder stream stuck badly enough to never
-// deliver awaitReady's segment -- exactly the condition that also trips the
-// heartbeat monitor's stuck-stream restart -- leaves this goroutine blocked
-// on context.Background() forever. main's shutdown path waits on every such
-// goroutine before it can os.Exit to let the container restart, so an
-// unbounded goroutine here silently defeats that recovery. A timed-out
-// attempt just gets picked up by the next catch-up sweep, same as any other
-// failed upload.
+// asyncUploadTimeout bounds a finished session's background upload (awaitReady included), so a
+// stream stuck forever there can't block shutdown's wg.Wait() and defeat the restart recovering it.
 var asyncUploadTimeout = 10 * time.Minute // var so tests can shrink it
 
 // UploadFinishedSessionAsync kicks off finished's upload in the background

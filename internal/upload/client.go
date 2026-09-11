@@ -364,10 +364,8 @@ type completedPart struct {
 	ETag       string `json:"etag"`
 }
 
-// uploadMultipart sends one file through the API's S3-multipart endpoints,
-// uploading up to Concurrency parts at once: a single lossy connection caps
-// throughput by its own loss/RTT, so parallel parts each get their own
-// connection instead of all sharing that one ceiling for the whole file.
+// uploadMultipart sends one file through the API's S3-multipart endpoints, uploading up to
+// Concurrency parts at once so no single connection's loss/RTT caps the whole file's throughput.
 func (c *Client) uploadMultipart(ctx context.Context, sessionID, path, filename string) error {
 	f, err := os.Open(path)
 	if err != nil {
