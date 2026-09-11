@@ -32,8 +32,29 @@ type Participant struct {
 	entity Entity
 }
 
+// createTimeout bounds how long a dds_create_* cgo call is given to return.
+// The same degraded-domain conditions that make dds_delete hang (see
+// closeTimeout) can, after enough create/destroy churn from a stream that
+// keeps reconnecting, make entity creation hang too.
+const createTimeout = 5 * time.Second
+
+// boundedCreate runs create with a bound of createTimeout, abandoning (and
+// leaking) it on timeout instead of blocking its caller forever.
+func boundedCreate(create func() C.dds_entity_t) (Entity, error) {
+	done := make(chan C.dds_entity_t, 1)
+	go func() { done <- create() }()
+	select {
+	case ret := <-done:
+		return check(ret)
+	case <-time.After(createTimeout):
+		return 0, errors.New("timed out")
+	}
+}
+
 func NewParticipant(domainID uint32) (*Participant, error) {
-	e, err := check(C.dds_create_participant(C.dds_domainid_t(domainID), nil, nil))
+	e, err := boundedCreate(func() C.dds_entity_t {
+		return C.dds_create_participant(C.dds_domainid_t(domainID), nil, nil)
+	})
 	if err != nil {
 		return nil, fmt.Errorf("dds_create_participant(domain=%d): %w", domainID, err)
 	}
@@ -72,15 +93,20 @@ func (p *Participant) Close() error {
 	return closeEntity(C.dds_entity_t(p.entity), "participant")
 }
 
+// CreateTopic creates topic. cname is freed inside the bounded goroutine,
+// after the cgo call actually returns, rather than via defer here -- a
+// timed-out call is abandoned but not necessarily dead, and freeing cname
+// early would risk a use-after-free if it eventually runs.
 func (p *Participant) CreateTopic(name string, descriptor unsafe.Pointer) (Entity, error) {
 	cname := C.CString(name)
-	defer C.free(unsafe.Pointer(cname))
-
-	e, err := check(C.dds_create_topic(
-		C.dds_entity_t(p.entity),
-		(*C.dds_topic_descriptor_t)(descriptor),
-		cname, nil, nil,
-	))
+	e, err := boundedCreate(func() C.dds_entity_t {
+		defer C.free(unsafe.Pointer(cname))
+		return C.dds_create_topic(
+			C.dds_entity_t(p.entity),
+			(*C.dds_topic_descriptor_t)(descriptor),
+			cname, nil, nil,
+		)
+	})
 	if err != nil {
 		return 0, fmt.Errorf("dds_create_topic(%q): %w", name, err)
 	}
@@ -88,7 +114,9 @@ func (p *Participant) CreateTopic(name string, descriptor unsafe.Pointer) (Entit
 }
 
 func (p *Participant) CreateReader(topic Entity) (Entity, error) {
-	e, err := check(C.dds_create_reader(C.dds_entity_t(p.entity), C.dds_entity_t(topic), nil, nil))
+	e, err := boundedCreate(func() C.dds_entity_t {
+		return C.dds_create_reader(C.dds_entity_t(p.entity), C.dds_entity_t(topic), nil, nil)
+	})
 	if err != nil {
 		return 0, fmt.Errorf("dds_create_reader: %w", err)
 	}
@@ -96,7 +124,9 @@ func (p *Participant) CreateReader(topic Entity) (Entity, error) {
 }
 
 func (p *Participant) CreateWriter(topic Entity) (Entity, error) {
-	e, err := check(C.dds_create_writer(C.dds_entity_t(p.entity), C.dds_entity_t(topic), nil, nil))
+	e, err := boundedCreate(func() C.dds_entity_t {
+		return C.dds_create_writer(C.dds_entity_t(p.entity), C.dds_entity_t(topic), nil, nil)
+	})
 	if err != nil {
 		return 0, fmt.Errorf("dds_create_writer: %w", err)
 	}
@@ -132,24 +162,40 @@ type WaitSet struct {
 	cond   Entity
 }
 
+// NewWaitSet builds a waitset in its own goroutine, bounded by createTimeout,
+// for the same reason boundedCreate exists -- any of its three cgo calls can
+// hang on a degraded domain.
 func NewWaitSet(participant *Participant, reader Entity) (*WaitSet, error) {
-	ws, err := check(C.dds_create_waitset(C.dds_entity_t(participant.entity)))
-	if err != nil {
-		return nil, fmt.Errorf("dds_create_waitset: %w", err)
+	type result struct {
+		ws  *WaitSet
+		err error
 	}
-
-	cond, err := check(C.dds_create_readcondition(C.dds_entity_t(reader), C.DDS_ANY_STATE))
-	if err != nil {
-		_ = C.dds_delete(C.dds_entity_t(ws))
-		return nil, fmt.Errorf("dds_create_readcondition: %w", err)
+	done := make(chan result, 1)
+	go func() {
+		ws, err := check(C.dds_create_waitset(C.dds_entity_t(participant.entity)))
+		if err != nil {
+			done <- result{nil, fmt.Errorf("dds_create_waitset: %w", err)}
+			return
+		}
+		cond, err := check(C.dds_create_readcondition(C.dds_entity_t(reader), C.DDS_ANY_STATE))
+		if err != nil {
+			_ = C.dds_delete(C.dds_entity_t(ws))
+			done <- result{nil, fmt.Errorf("dds_create_readcondition: %w", err)}
+			return
+		}
+		if ret := C.dds_waitset_attach(C.dds_entity_t(ws), C.dds_entity_t(cond), C.dds_attach_t(cond)); ret < 0 {
+			_ = C.dds_delete(C.dds_entity_t(ws))
+			done <- result{nil, fmt.Errorf("dds_waitset_attach: %w", retcodeError(C.dds_return_t(ret)))}
+			return
+		}
+		done <- result{&WaitSet{entity: ws, cond: cond}, nil}
+	}()
+	select {
+	case r := <-done:
+		return r.ws, r.err
+	case <-time.After(createTimeout):
+		return nil, fmt.Errorf("dds_create_waitset(construction): timed out after %s, abandoning", createTimeout)
 	}
-
-	if ret := C.dds_waitset_attach(C.dds_entity_t(ws), C.dds_entity_t(cond), C.dds_attach_t(cond)); ret < 0 {
-		_ = C.dds_delete(C.dds_entity_t(ws))
-		return nil, fmt.Errorf("dds_waitset_attach: %w", retcodeError(ret))
-	}
-
-	return &WaitSet{entity: ws, cond: cond}, nil
 }
 
 // Wait blocks for up to timeout; on error it sleeps for timeout too, since
