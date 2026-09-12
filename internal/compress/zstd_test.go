@@ -32,15 +32,20 @@ func TestWholeFiles_roundTripsAndDeletesOriginal(t *testing.T) {
 	require.Equal(t, original, decompressed)
 }
 
-func TestWholeFiles_compressesAllThreeTargets(t *testing.T) {
+func TestWholeFiles_compressesAllTargets(t *testing.T) {
 	dir := t.TempDir()
 	writeFile(t, dir, "lowstate_frames.bin", []byte("aaaaaaaaaaaaaaaa"))
 	writeFile(t, dir, "odom_frames.bin", []byte("bbbbbbbbbbbbbbbb"))
 	writeFile(t, dir, "lidar_scans.bin", []byte("cccccccccccccccc"))
+	writeFile(t, dir, "lowstate_timestamps.csv", []byte("dddddddddddddddd"))
+	writeFile(t, dir, "odom_timestamps.csv", []byte("eeeeeeeeeeeeeeee"))
 
 	require.NoError(t, WholeFiles(dir))
 
-	for _, name := range []string{"lowstate_frames.zstd", "odom_frames.zstd", "lidar_scans.zstd"} {
+	for _, name := range []string{
+		"lowstate_frames.zstd", "odom_frames.zstd", "lidar_scans.zstd",
+		"lowstate_timestamps.zstd", "odom_timestamps.zstd",
+	} {
 		require.FileExists(t, filepath.Join(dir, name))
 	}
 }
@@ -73,4 +78,5 @@ func TestCompressWholeFile_isIdempotentOnRetry(t *testing.T) {
 
 func TestZstdName(t *testing.T) {
 	require.Equal(t, "lowstate_frames.zstd", zstdName("lowstate_frames.bin"))
+	require.Equal(t, "lowstate_timestamps.zstd", zstdName("lowstate_timestamps.csv"))
 }

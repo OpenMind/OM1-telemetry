@@ -70,6 +70,17 @@ type segmentTarget struct {
 	sessionStart   time.Time
 	timestampsFile string
 	framesWrite    *recordutil.FrameCSVWriter
+
+	// ready closes once this target's first segment lands (or definitively
+	// won't, on relocation failure) -- see WaitSegment.
+	ready     chan struct{}
+	readyOnce sync.Once
+}
+
+// markReady unblocks any WaitSegment callers for this target. Safe to call
+// more than once (a target may receive several segments, or none).
+func (t *segmentTarget) markReady() {
+	t.readyOnce.Do(func() { close(t.ready) })
 }
 
 func New(cfg Config) *VideoRTSPStream {
@@ -133,7 +144,7 @@ func newSegmentTarget(sessionStart time.Time, timestampsFile, framesFile string)
 	if framesFile != "" {
 		fw = recordutil.NewFrameCSVWriter(framesFile)
 	}
-	return &segmentTarget{sessionStart: sessionStart, timestampsFile: timestampsFile, framesWrite: fw}
+	return &segmentTarget{sessionStart: sessionStart, timestampsFile: timestampsFile, framesWrite: fw, ready: make(chan struct{})}
 }
 
 // targetFor returns the target whose session started most recently at or
@@ -151,6 +162,29 @@ func (v *VideoRTSPStream) targetFor(startWallClock time.Time) *segmentTarget {
 		}
 	}
 	return best
+}
+
+// WaitSegment blocks until the target for sessionStart has relocated its
+// first segment, or ctx ends; reports whether a segment actually arrived.
+func (v *VideoRTSPStream) WaitSegment(ctx context.Context, sessionStart time.Time) bool {
+	v.targetMu.Lock()
+	var target *segmentTarget
+	for _, t := range v.targets {
+		if t.sessionStart.Equal(sessionStart) {
+			target = t
+			break
+		}
+	}
+	v.targetMu.Unlock()
+	if target == nil {
+		return false
+	}
+	select {
+	case <-target.ready:
+		return true
+	case <-ctx.Done():
+		return false
+	}
 }
 
 func (v *VideoRTSPStream) loop(ctx context.Context) {
@@ -182,7 +216,6 @@ func (v *VideoRTSPStream) record(ctx context.Context) error {
 	}
 
 	start := time.Now()
-	startMono := clock.MonoNs()
 	pattern := filepath.Join(v.cfg.ScratchDir, "%Y%m%dT%H%M%S.mp4")
 
 	cmd := exec.CommandContext(ctx, "ffmpeg",
@@ -239,7 +272,7 @@ func (v *VideoRTSPStream) record(ctx context.Context) error {
 
 	// Must fully drain stdout before calling Wait: Wait closes the pipe once
 	// it reaps the process, and reading after that races the close.
-	v.watchSegments(stdout, start, startMono)
+	v.watchSegments(stdout)
 
 	waitErr := cmd.Wait()
 	close(hbStop)
@@ -252,14 +285,14 @@ func (v *VideoRTSPStream) record(ctx context.Context) error {
 // (filename,start_seconds,end_seconds), and relocates, indexes, and
 // extracts frame timestamps for each segment as it completes. Returns once
 // ffmpeg closes stdout, i.e. once the process exits.
-func (v *VideoRTSPStream) watchSegments(stdout io.Reader, processStart time.Time, processStartMonoNs int64) {
+func (v *VideoRTSPStream) watchSegments(stdout io.Reader) {
 	scanner := bufio.NewScanner(stdout)
 	for scanner.Scan() {
 		line := strings.TrimSpace(scanner.Text())
 		if line == "" {
 			continue
 		}
-		name, startSeconds, ok := parseSegmentListLine(line)
+		name, startSeconds, endSeconds, ok := parseSegmentListLine(line)
 		if !ok {
 			slog.Warn("video: unrecognized segment_list line", "camera", v.cfg.HeartbeatName, "line", line)
 			continue
@@ -267,7 +300,8 @@ func (v *VideoRTSPStream) watchSegments(stdout io.Reader, processStart time.Time
 		// ffmpeg's segment_list reports the filename as written to its
 		// pattern, without the directory -- join it back to ScratchDir.
 		scratchFile := filepath.Join(v.cfg.ScratchDir, name)
-		v.finishSegment(scratchFile, startSeconds, processStart, processStartMonoNs)
+		duration := time.Duration((endSeconds - startSeconds) * float64(time.Second))
+		v.finishSegment(scratchFile, duration, time.Now(), clock.MonoNs())
 	}
 	if err := scanner.Err(); err != nil {
 		slog.Warn("video: segment_list read error", "camera", v.cfg.HeartbeatName, "err", err)
@@ -276,24 +310,27 @@ func (v *VideoRTSPStream) watchSegments(stdout io.Reader, processStart time.Time
 
 // parseSegmentListLine parses one "-segment_list_type csv" line:
 // filename,start_seconds,end_seconds.
-func parseSegmentListLine(line string) (file string, startSeconds float64, ok bool) {
+func parseSegmentListLine(line string) (file string, startSeconds, endSeconds float64, ok bool) {
 	parts := strings.Split(line, ",")
-	if len(parts) < 2 {
-		return "", 0, false
+	if len(parts) < 3 {
+		return "", 0, 0, false
 	}
 	start, err := strconv.ParseFloat(strings.TrimSpace(parts[1]), 64)
 	if err != nil {
-		return "", 0, false
+		return "", 0, 0, false
 	}
-	return strings.TrimSpace(parts[0]), start, true
+	end, err := strconv.ParseFloat(strings.TrimSpace(parts[2]), 64)
+	if err != nil {
+		return "", 0, 0, false
+	}
+	return strings.TrimSpace(parts[0]), start, end, true
 }
 
-// finishSegment relocates a just-closed segment from the scratch directory
-// into the current target's session directory, indexes it, and kicks off
-// its (async) frame extraction.
-func (v *VideoRTSPStream) finishSegment(scratchFile string, startSeconds float64, processStart time.Time, processStartMonoNs int64) {
-	startWallClock := processStart.Add(time.Duration(startSeconds * float64(time.Second)))
-	startMonoNs := processStartMonoNs + int64(startSeconds*float64(time.Second))
+// finishSegment relocates a just-closed segment into the current target's
+// session directory, indexes it, and kicks off its (async) frame extraction.
+func (v *VideoRTSPStream) finishSegment(scratchFile string, duration time.Duration, observedNow time.Time, observedMonoNs int64) {
+	startWallClock := observedNow.Add(-duration)
+	startMonoNs := observedMonoNs - duration.Nanoseconds()
 	target := v.targetFor(startWallClock)
 
 	finalFile := filepath.Join(filepath.Dir(target.timestampsFile),
@@ -301,6 +338,7 @@ func (v *VideoRTSPStream) finishSegment(scratchFile string, startSeconds float64
 
 	if err := os.Rename(scratchFile, finalFile); err != nil {
 		slog.Error("video: could not relocate segment", "camera", v.cfg.HeartbeatName, "err", err)
+		target.markReady()
 		return
 	}
 
@@ -309,6 +347,7 @@ func (v *VideoRTSPStream) finishSegment(scratchFile string, startSeconds float64
 			"file", target.timestampsFile, "err", err)
 	}
 	slog.Info("video segment closed", "camera", v.cfg.HeartbeatName, "file", finalFile)
+	target.markReady()
 
 	if target.framesWrite == nil {
 		return

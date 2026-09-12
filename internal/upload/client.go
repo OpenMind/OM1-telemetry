@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"mime/multipart"
 	"net/http"
 	"os"
@@ -77,12 +78,50 @@ type presignedPOST struct {
 type sessionResp struct {
 	SessionID string         `json:"session_id"`
 	S3Prefix  string         `json:"s3_prefix"`
-	Status    string         `json:"status"`
 	Upload    *presignedPOST `json:"upload"`
 }
 
+// uploadStateName journals, inside the session directory, which files already reached S3 for a session ID.
+const uploadStateName = ".upload-state.json"
+
+type uploadState struct {
+	SessionID string   `json:"session_id"`
+	Done      []string `json:"done"`
+}
+
+func (s uploadState) pending(files []string) []string {
+	done := make(map[string]bool, len(s.Done))
+	for _, name := range s.Done {
+		done[name] = true
+	}
+	var out []string
+	for _, name := range files {
+		if !done[name] {
+			out = append(out, name)
+		}
+	}
+	return out
+}
+
+func loadUploadState(localDir string) uploadState {
+	var st uploadState
+	if raw, err := os.ReadFile(filepath.Join(localDir, uploadStateName)); err == nil {
+		_ = json.Unmarshal(raw, &st)
+	}
+	return st
+}
+
+func saveUploadState(localDir string, st uploadState) error {
+	raw, err := json.Marshal(st)
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(filepath.Join(localDir, uploadStateName), raw, 0o644)
+}
+
 // UploadSession preprocesses localDir, uploads every regular file under it under sessionDir, then marks
-// the session complete. Best-effort: on error the session is marked "failed" server-side for a later retry.
+// the session complete. Progress is journaled in localDir, so a retry continues the same server-side
+// session and skips files that already reached S3.
 func (c *Client) UploadSession(ctx context.Context, localDir, sessionDir string, startedAt time.Time, opts Options) error {
 	if !c.cfg.Ready() {
 		return errors.New("upload: not configured (base URL / API key unset)")
@@ -107,20 +146,40 @@ func (c *Client) UploadSession(ctx context.Context, localDir, sessionDir string,
 	if err != nil {
 		return fmt.Errorf("upload: create session: %w", err)
 	}
-	if sess.Status == "complete" {
-		return nil
+	statePath := filepath.Join(localDir, uploadStateName)
+
+	st := loadUploadState(localDir)
+	if st.SessionID != sess.SessionID {
+		st = uploadState{SessionID: sess.SessionID}
+	}
+	// The preserved journal's conversion is re-sent on every attempt: its source is still growing.
+	live := strings.TrimSuffix(opts.PreserveJSONL, "l")
+	var stMu sync.Mutex
+	done := func(name string) {
+		if name == live {
+			return
+		}
+		stMu.Lock()
+		defer stMu.Unlock()
+		st.Done = append(st.Done, name)
+		if err := saveUploadState(localDir, st); err != nil {
+			slog.Warn("upload: could not journal progress", "dir", localDir, "err", err)
+		}
 	}
 
-	if err := c.uploadFiles(ctx, sess, localDir, files); err != nil {
-		c.fail(ctx, sess.SessionID, err)
+	if err := c.uploadFiles(ctx, sess, localDir, st.pending(files), done); err != nil {
 		return fmt.Errorf("upload: %w", err)
 	}
-
-	return c.complete(ctx, sess.SessionID)
+	if err := c.complete(ctx, sess.SessionID); err != nil {
+		return err
+	}
+	_ = os.Remove(statePath)
+	return nil
 }
 
-// uploadFiles uploads every file in files, up to Concurrency at a time; the first failure cancels the rest.
-func (c *Client) uploadFiles(ctx context.Context, sess *sessionResp, localDir string, files []string) error {
+// uploadFiles uploads every file in files, up to Concurrency at a time, calling done after each success;
+// the first failure cancels the rest.
+func (c *Client) uploadFiles(ctx context.Context, sess *sessionResp, localDir string, files []string, done func(name string)) error {
 	uploadCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
@@ -131,20 +190,20 @@ func (c *Client) uploadFiles(ctx context.Context, sess *sessionResp, localDir st
 	var once sync.Once
 	var firstErr error
 
-	fail := func(name string, err error) {
-		once.Do(func() {
-			firstErr = fmt.Errorf("%s: %w", name, err)
-			cancel()
-		})
-	}
-
 	for _, name := range files {
 		sem <- struct{}{}
 		wg.Add(1)
 		go func(name string) {
 			defer wg.Done()
 			defer func() { <-sem }()
-			c.uploadOne(uploadCtx, sess, localDir, name, post, fail)
+			if err := c.uploadOne(uploadCtx, sess, localDir, name, post); err != nil {
+				once.Do(func() {
+					firstErr = fmt.Errorf("%s: %w", name, err)
+					cancel()
+				})
+				return
+			}
+			done(name)
 		}(name)
 	}
 	wg.Wait()
@@ -152,38 +211,32 @@ func (c *Client) uploadFiles(ctx context.Context, sess *sessionResp, localDir st
 	return firstErr
 }
 
-// uploadOne uploads a single file, choosing multipart vs. direct-POST by size, reporting failure via fail.
-func (c *Client) uploadOne(ctx context.Context, sess *sessionResp, localDir, name string, post *postBox, fail func(name string, err error)) {
+// uploadOne uploads a single file, choosing multipart vs. direct-POST by size.
+func (c *Client) uploadOne(ctx context.Context, sess *sessionResp, localDir, name string, post *postBox) error {
 	path := filepath.Join(localDir, name)
 	info, err := os.Stat(path)
 	if err != nil {
-		fail(name, fmt.Errorf("stat %s: %w", path, err))
-		return
+		return fmt.Errorf("stat %s: %w", path, err)
 	}
 
 	if info.Size() >= c.cfg.MultipartThreshold {
-		if err := c.uploadMultipart(ctx, sess.SessionID, path, name); err != nil {
-			fail(name, err)
-		}
-		return
+		return c.uploadMultipart(ctx, sess.SessionID, path, name)
 	}
 
 	p, err := post.get(ctx, c)
 	if err != nil {
-		fail(name, fmt.Errorf("renew policy: %w", err))
-		return
+		return fmt.Errorf("renew policy: %w", err)
 	}
-	if err := c.uploadDirect(ctx, p, sess.S3Prefix+name, path); err != nil {
-		// Retry once against a freshly-presigned policy in case the old one expired.
-		p, rerr := post.forceRenew(ctx, c)
-		if rerr != nil {
-			fail(name, err)
-			return
-		}
-		if err := c.uploadDirect(ctx, p, sess.S3Prefix+name, path); err != nil {
-			fail(name, err)
-		}
+	err = c.uploadDirect(ctx, p, sess.S3Prefix+name, path)
+	if err == nil {
+		return nil
 	}
+	// Retry once against a freshly-presigned policy in case the old one expired.
+	p, rerr := post.forceRenew(ctx, c)
+	if rerr != nil {
+		return err
+	}
+	return c.uploadDirect(ctx, p, sess.S3Prefix+name, path)
 }
 
 // postBox holds the presigned-POST policy files share for direct uploads within one session.
@@ -246,19 +299,6 @@ func (c *Client) renew(ctx context.Context, sessionID string) (*presignedPOST, e
 func (c *Client) complete(ctx context.Context, sessionID string) error {
 	return c.doJSON(ctx, http.MethodPost, "/data/collection/sessions/"+sessionID+"/complete",
 		map[string]string{"status": "complete"}, nil)
-}
-
-// fail best-effort marks a session failed server-side.
-func (c *Client) fail(ctx context.Context, sessionID string, cause error) {
-	if sessionID == "" {
-		return
-	}
-	msg := cause.Error()
-	if len(msg) > 500 {
-		msg = msg[:500]
-	}
-	_ = c.doJSON(ctx, http.MethodPost, "/data/collection/sessions/"+sessionID+"/complete",
-		map[string]string{"status": "failed", "error": msg}, nil)
 }
 
 // uploadDirect POSTs one file straight to S3 using a presigned POST policy.
@@ -324,13 +364,25 @@ type completedPart struct {
 	ETag       string `json:"etag"`
 }
 
-// uploadMultipart sends one file through the API's S3-multipart endpoints, reading it in PartSize chunks.
+// uploadMultipart sends one file through the API's S3-multipart endpoints, uploading up to
+// Concurrency parts at once so no single connection's loss/RTT caps the whole file's throughput.
 func (c *Client) uploadMultipart(ctx context.Context, sessionID, path, filename string) error {
 	f, err := os.Open(path)
 	if err != nil {
 		return err
 	}
 	defer func() { _ = f.Close() }()
+
+	info, err := f.Stat()
+	if err != nil {
+		return err
+	}
+	size := info.Size()
+	partSize := c.cfg.PartSize
+	numParts := (size + partSize - 1) / partSize
+	if numParts == 0 {
+		numParts = 1
+	}
 
 	var start struct {
 		UploadID string `json:"upload_id"`
@@ -345,26 +397,52 @@ func (c *Client) uploadMultipart(ctx context.Context, sessionID, path, filename 
 			map[string]string{"filename": filename, "upload_id": start.UploadID}, nil)
 	}
 
+	uploadCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	sem := make(chan struct{}, c.cfg.Concurrency)
+	var wg sync.WaitGroup
+	var mu sync.Mutex
 	var parts []completedPart
-	buf := make([]byte, c.cfg.PartSize)
-	for partNumber := int64(1); ; partNumber++ {
-		n, readErr := io.ReadFull(f, buf)
-		if n > 0 {
-			etag, err := c.uploadPart(ctx, sessionID, filename, start.UploadID, partNumber, buf[:n])
-			if err != nil {
-				abort()
-				return err
+	var once sync.Once
+	var firstErr error
+
+	for partNumber := int64(1); partNumber <= numParts; partNumber++ {
+		offset := (partNumber - 1) * partSize
+		n := partSize
+		if offset+n > size {
+			n = size - offset
+		}
+
+		sem <- struct{}{}
+		wg.Add(1)
+		go func(partNumber, offset, n int64) {
+			defer wg.Done()
+			defer func() { <-sem }()
+
+			buf := make([]byte, n)
+			if _, err := f.ReadAt(buf, offset); err != nil {
+				once.Do(func() { firstErr = err; cancel() })
+				return
 			}
+			etag, err := c.uploadPart(uploadCtx, sessionID, filename, start.UploadID, partNumber, buf)
+			if err != nil {
+				once.Do(func() { firstErr = err; cancel() })
+				return
+			}
+			mu.Lock()
 			parts = append(parts, completedPart{PartNumber: partNumber, ETag: etag})
-		}
-		if readErr == io.EOF || readErr == io.ErrUnexpectedEOF {
-			break
-		}
-		if readErr != nil {
-			abort()
-			return readErr
-		}
+			mu.Unlock()
+		}(partNumber, offset, n)
 	}
+	wg.Wait()
+
+	if firstErr != nil {
+		abort()
+		return firstErr
+	}
+
+	sort.Slice(parts, func(i, j int) bool { return parts[i].PartNumber < parts[j].PartNumber })
 
 	return c.doJSON(ctx, http.MethodPost, "/data/collection/sessions/"+sessionID+"/files/complete",
 		map[string]any{"filename": filename, "upload_id": start.UploadID, "parts": parts}, nil)

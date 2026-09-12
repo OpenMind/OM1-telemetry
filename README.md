@@ -10,6 +10,7 @@ A Go application that synchronously records multi-modal sensor data:
 - **Depth** frames from a CycloneDDS topic (RVL-compressed, lossless)
 - **Odometry** messages from a CycloneDDS topic
 - **Lowstate** (IMU/joints/battery/etc.) from a CycloneDDS topic
+- **LLM traces** (prompt/response records) polled from a co-located OM1 process's Prometheus trace-export endpoint
 
 All streams are timestamped and organized into session directories for easy alignment and analysis.
 
@@ -87,6 +88,33 @@ The profile has it enabled because this fleet's G1 has a D435i fitted
 (measured 14.9 Hz, 480x270 `16UC1`, RVL-compressed to ~34% of raw, lossless).
 On a G1 without one, set `ENABLE_DEPTH=false`.
 
+#### DDS readers reconnect on their own after a sensor restart
+
+`lidar`, `pointcloud`, `depth`, `odom`, and `lowstate` each hold one
+long-lived DDS reader for the life of the process -- a session rotation only
+swaps their output files (see `persistentStreams` in `cmd/main/main.go`), it
+never resubscribes.
+
+Plain DDS discovery does not always recover cleanly if the underlying sensor
+or its driver process restarts (a physical power-cycle, say): a writer
+announces itself with a burst of discovery packets right at startup and then
+falls back to a much slower steady-state interval, so a reader that's been
+sitting idle for a while can simply miss that burst and never learn the new
+writer exists -- nothing retries that specific handshake afterward. A reader
+created fresh (a full process restart, or a brand-new subscriber from a tool
+like `ros2 topic hz`) sends its own discovery burst immediately and tends to
+match right away, which is what makes this failure mode easy to miss until a
+stream has been silently empty for hours.
+
+Each of the five streams above is registered with
+`heartbeat.Monitor.RegisterRecoverable` instead of plain `Register`: once a
+stream is found broken (the same "recorder NOT WORKING" condition that gets
+logged), the monitor calls that stream's `Reconnect()` once per check
+interval until it recovers. `Reconnect()` tears down and recreates just that
+stream's DDS participant/reader -- forcing a fresh discovery burst -- without
+touching output files, so no manual restart should be needed after a sensor
+bounces.
+
 #### The G1's down camera is the RealSense RGB view
 
 There is no third USB camera on a G1 -- only `OM1FRONTCAM` and `OM1REARCAM`.
@@ -139,6 +167,9 @@ Any of the following override the selected profile / defaults:
 - `ODOM_DDS_TOPIC` - DDS topic for odometry data (default: `rt/odom`)
 - `LOWSTATE_DDS_DOMAIN` - CycloneDDS domain ID for lowstate (default: `0`)
 - `LOWSTATE_DDS_TOPIC` - DDS topic for lowstate data (default: `rt/lowstate`)
+- `TRACES_ENABLED` - Poll a co-located OM1 process's Prometheus trace-export endpoint and record its LLM traces (default: `false` — most deployments have no OM1 process to poll; see "LLM trace export" below)
+- `TRACES_URL` - OM1's metrics endpoint (default: `http://localhost:9090/metrics`)
+- `TRACES_POLL_INTERVAL` - How often to poll `TRACES_URL` (default: `30s`)
 - `RECORDINGS_DIR` - Base directory for recordings (default: `recordings`)
 - `SESSION_ROTATE_INTERVAL` - Close the current session and open a fresh one on this cadence, so each segment can be uploaded without waiting for the whole run to end (default: `5m`; `0` disables rotation — one session for the life of the process, as before this feature existed)
 - `UPLOAD_ENABLED` - Upload each rotated-away session to the openmind-api (default: `true`; actual uploading additionally requires `OPENMIND_API_URL` and `OPENMIND_API_KEY` — see "Cloud upload" below)
@@ -248,7 +279,8 @@ recordings/
         ├── depth_frames.bin           # RVL-compressed depth frames (lossless)
         ├── depth_timestamps.csv       # unix_ns,seq,byte_offset,byte_length,method,width,height,encoding,mono_ns
         ├── odom_frames.bin            # Raw odometry messages
-        └── odom_timestamps.csv        # Timestamps: unix_ns,seq,byte_offset,mono_ns
+        ├── odom_timestamps.csv        # Timestamps: unix_ns,seq,byte_offset,mono_ns
+        └── traces.jsonl                # LLM trace records polled from OM1 (if TRACES_ENABLED set)
 ```
 
 Every timestamps CSV carries a **`mono_ns`** column alongside its wall-clock
@@ -473,6 +505,33 @@ physically lives in the first session's directory. Every later segment gets
 its own copy of it (a snapshot taken when that segment closes), so each
 segment's directory stays self-contained for `align_recording.py` /
 `fix_session_time.py` without needing the boot session alongside it.
+
+## LLM trace export
+
+Set `TRACES_ENABLED=true` to poll a co-located [OM1](https://github.com/OpenMind/OM1)
+process's Prometheus trace-export endpoint (`use_tracer.prometheus_export.enabled`
+in OM1's config) and record each LLM interaction trace into the current
+session's `traces.jsonl` -- picked up by the normal upload pipeline like
+every other stream, with no extra bucket-path configuration needed.
+
+This is a persistent stream: it keeps one poll loop and one dedup cursor
+(the newest trace timestamp already written) running for the life of the
+process, only swapping which session's `traces.jsonl` it writes to on
+rotation -- so OM1 re-serving its whole buffer on every poll never produces
+duplicate lines, even across a session rotation. The cursor is also
+persisted to `RECORDINGS_DIR/.traces_cursor`, so a full process restart
+resumes from it too, instead of re-ingesting OM1's whole buffered backlog
+into whatever session happens to be open at that moment.
+
+OM1's exporter only buffers its most recent 200 trace records; poll more
+often than that window fills at your deployment's trace rate
+(`TRACES_POLL_INTERVAL`, default `30s`) or older records will be evicted on
+the OM1 side before this recorder ever sees them.
+
+`TRACES_URL` points at OM1's main `/metrics` endpoint -- `om1_trace_info`
+is broadcast there alongside every other metric, so this poller (like OM1's
+own fleet-wide Prometheus, if one scrapes the same endpoint) will also see
+full prompt/response text as unbounded label values on that metric.
 
 ## Scheduling
 

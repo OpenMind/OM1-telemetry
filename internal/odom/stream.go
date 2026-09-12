@@ -33,6 +33,10 @@ type OdomStream struct {
 	cancel  context.CancelFunc
 	wg      sync.WaitGroup
 
+	// reconnect asks a running record() to tear down and recreate its DDS
+	// subscription. Buffered so a request never blocks; see Reconnect.
+	reconnect chan struct{}
+
 	filesMu sync.Mutex
 	files   *outputFiles
 }
@@ -47,7 +51,7 @@ type outputFiles struct {
 }
 
 func New(cfg Config) *OdomStream {
-	return &OdomStream{cfg: cfg}
+	return &OdomStream{cfg: cfg, reconnect: make(chan struct{}, 1)}
 }
 
 func (o *OdomStream) Start() {
@@ -88,6 +92,15 @@ func (o *OdomStream) Rotate(dataFile, timestampsFile string) error {
 		closeOutputFiles(old, "odom")
 	}
 	return nil
+}
+
+// Reconnect tears down and recreates the DDS subscription without touching
+// output files. Non-blocking; see heartbeat.Monitor.RegisterRecoverable.
+func (o *OdomStream) Reconnect() {
+	select {
+	case o.reconnect <- struct{}{}:
+	default:
+	}
 }
 
 func (o *OdomStream) loop(ctx context.Context) {
@@ -144,6 +157,9 @@ func (o *OdomStream) record(ctx context.Context) error {
 		case <-ctx.Done():
 			o.flush()
 			return nil
+		case <-o.reconnect:
+			o.flush()
+			return fmt.Errorf("reconnect requested")
 		case <-syncTicker.C:
 			o.flush()
 		case sample, ok := <-receiver:

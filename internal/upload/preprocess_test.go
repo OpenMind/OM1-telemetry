@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -28,6 +29,30 @@ func TestConvertJSONLToJSON_producesValidArrayAndRemovesSource(t *testing.T) {
 	require.Len(t, records, 2)
 	require.Equal(t, "start", records[0]["kind"])
 	require.Equal(t, "sample", records[1]["kind"])
+}
+
+func TestConvertJSONLToJSON_putsEachRecordOnItsOwnLine(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, dir, "traces.jsonl",
+		[]byte("{\"ts\":\"a\"}\n{\"ts\":\"b\"}\n{\"ts\":\"c\"}\n"))
+
+	require.NoError(t, convertJSONLToJSON(dir, Options{}))
+
+	raw, err := os.ReadFile(filepath.Join(dir, "traces.json"))
+	require.NoError(t, err)
+
+	lines := strings.Split(strings.TrimRight(string(raw), "\n"), "\n")
+	require.Equal(t, []string{
+		"[",
+		`{"ts":"a"},`,
+		`{"ts":"b"},`,
+		`{"ts":"c"}`,
+		"]",
+	}, lines, "each record must be readable and diffable on its own line, not packed into one giant line")
+
+	var records []map[string]any
+	require.NoError(t, json.Unmarshal(raw, &records))
+	require.Len(t, records, 3)
 }
 
 func TestConvertJSONLToJSON_emptyFileProducesEmptyArray(t *testing.T) {
